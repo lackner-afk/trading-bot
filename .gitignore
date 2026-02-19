@@ -26,6 +26,9 @@ trades.db
 *.swp
 *.swo
 
+# Runtime
+bot.pid
+
 # OS
 .DS_Store
 Thumbs.db

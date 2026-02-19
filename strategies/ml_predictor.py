@@ -48,8 +48,7 @@ class MLPredictor:
 
     Features:
     - RSI, BB-Position, Volume-Ratio
-    - Funding-Rate
-    - Polymarket-Sentiment-Scores
+    - EMA-Cross, Momentum, Volatilität
 
     Target: Preis-Richtung in nächsten 5-15 Minuten
     """
@@ -86,7 +85,7 @@ class MLPredictor:
             'ema_cross',  # EMA9 > EMA21 = 1, sonst -1
             'momentum',
             'volatility',
-            'sentiment_score'  # Von Polymarket
+            'sentiment_score'  # Markt-Sentiment (reserviert)
         ]
 
     def prepare_features(self, candles: pd.DataFrame,
@@ -96,7 +95,7 @@ class MLPredictor:
 
         Args:
             candles: DataFrame mit OHLCV + Indikatoren
-            sentiment_score: Polymarket-Sentiment (-1 bis 1)
+            sentiment_score: Markt-Sentiment (-1 bis 1, aktuell immer 0.0)
 
         Returns:
             Feature-Array oder None
@@ -288,7 +287,7 @@ class MLPredictor:
         Args:
             candles: Aktuelle Kerzen-Daten
             symbol: Trading-Pair
-            sentiment_score: Polymarket-Sentiment (-1 bis 1)
+            sentiment_score: Markt-Sentiment (-1 bis 1, aktuell immer 0.0)
 
         Returns:
             MLPrediction oder None

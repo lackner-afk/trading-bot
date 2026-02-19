@@ -32,7 +32,7 @@ class MomentumStrategy:
         # Parameter
         self.leverage = self.config.get('leverage', 10)
         self.max_leverage = min(self.config.get('max_leverage', 20), 50)
-        self.pairs = self.config.get('pairs', ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'DOGE/USDT'])
+        self.pairs = self.config.get('pairs', ['BTC_EUR', 'ETH_EUR', 'SOL_EUR', 'XRP_EUR'])
 
         # TP/SL (validiert im Backtest)
         self.take_profit_pct = self.config.get('take_profit', 0.015)   # 1.5%

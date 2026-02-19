@@ -1,7 +1,6 @@
 """
-Crypto-Datenfeed über CCXT
-Live-Daten via WebSocket/REST für BTC, ETH, SOL, DOGE, PEPE
-Berechnet technische Indikatoren: RSI, Bollinger Bands, VWAP, EMA
+Crypto-Datenfeed — Shared Dataclasses und CCXT-Fallback
+Enthält CandleData und MarketData, die von OneTradingFeed verwendet werden
 """
 
 import asyncio

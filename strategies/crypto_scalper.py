@@ -53,7 +53,7 @@ class CryptoScalper:
         # Parameter aus Config
         self.leverage = self.config.get('leverage', 20)
         self.max_leverage = min(self.config.get('max_leverage', 50), 50)
-        self.pairs = self.config.get('pairs', ['BTC/USDT', 'ETH/USDT', 'SOL/USDT'])
+        self.pairs = self.config.get('pairs', ['BTC_EUR', 'ETH_EUR', 'SOL_EUR'])
         self.timeframe = self.config.get('timeframe', '1m')
 
         # Take-Profit / Stop-Loss

@@ -20,11 +20,11 @@ python backtest.py --grid
 
 ## Architecture Overview
 
-This is an async Python paper-trading bot for crypto perpetuals and Polymarket prediction markets.
+This is an async Python paper-trading bot for crypto spot markets on One Trading (EUR pairs).
 
 ### Core Flow
 1. **main.py** orchestrates everything via `asyncio` event loops
-2. **Data Feeds** (CryptoFeed, PolymarketFeed) provide real-time prices
+2. **OneTradingFeed** provides real-time prices via WebSocket + historical candles via REST
 3. **Strategies** analyze data and generate signals
 4. **OrderEngine** simulates execution with slippage/fees
 5. **Portfolio** tracks positions, PNL, and persists to SQLite
@@ -37,22 +37,27 @@ This is an async Python paper-trading bot for crypto perpetuals and Polymarket p
 | `core/portfolio.py` | Fake portfolio with SQLite persistence |
 | `core/risk_manager.py` | Kelly criterion, stop-loss, drawdown limits |
 | `core/order_engine.py` | Simulated market/limit orders with slippage |
-| `data/crypto_feed.py` | CCXT-based feed with TA indicators (RSI, BB, EMA) |
-| `data/polymarket_feed.py` | Polymarket CLOB API with mock fallback |
+| `data/onetrading_feed.py` | One Trading WebSocket (PRICE_TICKS) + REST candlesticks |
+| `data/crypto_feed.py` | Shared dataclasses (CandleData, MarketData) + CCXT fallback |
+| `strategies/momentum.py` | EMA 9/21 crossover with RSI filter |
 | `strategies/crypto_scalper.py` | RSI+BB+Volume mean-reversion and breakout |
-| `strategies/polymarket_arbitrage.py` | YES/NO share arbitrage scanner |
-| `strategies/hybrid_sentiment.py` | Polymarket→Crypto sentiment signals |
 | `strategies/ml_predictor.py` | Gradient Boosting price direction prediction |
 
 ### Async Loop Structure (main.py)
 
 - **Main Loop** (1s): Price updates, pending orders, exit conditions
-- **Scalper Loop** (5s): RSI/BB/Breakout signals
-- **Arbitrage Loop** (1s): Polymarket opportunity scanning
-- **Sentiment Loop** (5s): Event-based crypto signals
+- **Momentum Loop** (30s): EMA crossover signals
+- **Scalper Loop** (15s): RSI/BB/Breakout signals
 - **ML Loop** (5min): Model retraining and predictions
 - **Risk Loop** (5min): Drawdown and exposure checks
 - **Report Loop** (1h): PNL summaries
+
+### Data Feed: One Trading
+
+- **WebSocket**: `wss://streams.fast.onetrading.com` — PRICE_TICKS channel für Live-Preise
+- **REST**: `https://api.onetrading.com/fast/v1/candlesticks/{symbol}` — historische OHLCV-Daten
+- **Pairs**: BTC_EUR, ETH_EUR, SOL_EUR, XRP_EUR
+- Kein API Key benötigt für öffentliche Marktdaten
 
 ## Code Conventions
 
