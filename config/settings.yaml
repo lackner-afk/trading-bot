@@ -31,6 +31,10 @@ strategies:
     rsi_long_threshold: 45   # Long nur wenn RSI < 45
     rsi_short_threshold: 55  # Short nur wenn RSI > 55
     cooldown_seconds: 300    # 5 Min Cooldown pro Symbol
+    atr_period: 14
+    sl_atr_multiplier: 1.8
+    tp_atr_multiplier: 3.5
+    trailing_atr_multiplier: 1.2
 
   # Sekundär-Strategie: RSI+BB Mean-Reversion (deaktiviert)
   scalper:
@@ -70,3 +74,9 @@ slippage:
 notifications:
   console: true
   webhook_url: null  # Optional: Discord/Slack Webhook
+  telegram:
+    enabled: true
+    token: ${TELEGRAM_BOT_TOKEN}
+    chat_id: ${TELEGRAM_CHAT_ID}
+    send_trade_alerts: true
+    send_hourly_report: true

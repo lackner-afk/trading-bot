@@ -126,6 +126,9 @@ class TradingBot:
         # Reporter
         self.reporter = Reporter(config=self.config.get('notifications', {}))
 
+        # Telegram-Config (Initialisierung in start(), da await nötig)
+        self._telegram_config = self.config.get('notifications', {}).get('telegram', {})
+
         # Callbacks setzen
         self.order_engine.on_fill = self._on_order_fill
 
@@ -153,6 +156,15 @@ class TradingBot:
         if self.config.get('strategies', {}).get('ml', {}).get('enabled'):
             await self._initial_ml_training()
 
+        # Telegram starten (falls konfiguriert und Token gesetzt)
+        import os
+        tg = self._telegram_config
+        if tg.get('enabled'):
+            token = os.environ.get('TELEGRAM_BOT_TOKEN', tg.get('token', ''))
+            chat_id = os.environ.get('TELEGRAM_CHAT_ID', tg.get('chat_id', ''))
+            if token and chat_id:
+                await self.reporter.setup_telegram(token, chat_id)
+
         # Haupt-Loops starten
         tasks = [
             asyncio.create_task(self._main_loop()),
@@ -161,6 +173,7 @@ class TradingBot:
             asyncio.create_task(self._ml_loop()),
             asyncio.create_task(self._risk_check_loop()),
             asyncio.create_task(self._reporting_loop()),
+            asyncio.create_task(self._telegram_hourly_loop()),
         ]
 
         # Warte auf Beendigung
@@ -374,6 +387,11 @@ class TradingBot:
         if state.equity < 50:
             return
 
+        # SL-Distanz aus Signal ableiten (ATR-basiert)
+        sl_distance_pct = 0.0
+        if signal.price > 0 and signal.stop_loss > 0:
+            sl_distance_pct = abs(signal.price - signal.stop_loss) / signal.price
+
         # Risk-Check
         risk_check = self.risk_manager.check_trade(
             portfolio_equity=state.equity,
@@ -381,7 +399,8 @@ class TradingBot:
             leverage=signal.suggested_leverage,
             current_positions=len(state.positions),
             consecutive_losses=self.portfolio.consecutive_losses,
-            daily_drawdown=self.portfolio.get_daily_drawdown()
+            daily_drawdown=self.portfolio.get_daily_drawdown(),
+            sl_distance_pct=sl_distance_pct if sl_distance_pct > 0 else None
         )
 
         if risk_check.action == RiskAction.BLOCK:
@@ -392,8 +411,11 @@ class TradingBot:
             self.logger.info(f"Cooldown aktiv: {risk_check.reason}")
             return
 
-        # Position Size: max 10% Equity, max 30% Balance, €50-€200
-        position_size = min(abs(state.equity) * 0.1, abs(state.balance) * 0.3)
+        # ATR-basierte Position Size (2% Risiko pro Trade)
+        if sl_distance_pct > 0 and hasattr(signal, 'atr_value') and signal.atr_value > 0:
+            position_size = self.risk_manager.size_from_risk(state.equity, sl_distance_pct)
+        else:
+            position_size = min(abs(state.equity) * 0.1, abs(state.balance) * 0.3)
         position_size = max(50, min(200, position_size))
 
         if position_size > state.balance or state.balance < 50:
@@ -446,7 +468,9 @@ class TradingBot:
                 entry_price=position.entry_price,
                 current_price=current_price,
                 side=position.side,
-                highest_since_entry=strategy.highest_prices.get(symbol)
+                highest_since_entry=strategy.highest_prices.get(symbol),
+                stop_loss_price=position.stop_loss if hasattr(position, 'stop_loss') else None,
+                take_profit_price=position.take_profit if hasattr(position, 'take_profit') else None
             )
 
             if should_exit:
@@ -469,6 +493,26 @@ class TradingBot:
 
         if trade:
             self.reporter.print_trade_executed(trade)
+            await self.reporter.send_trade_alert(trade)
+
+    async def _telegram_hourly_loop(self):
+        """Sendet stündlichen Telegram-Report"""
+        await asyncio.sleep(3600)   # erste Sendung nach 1h
+        while self.running:
+            try:
+                state = self.portfolio.get_state()
+                metrics = self.risk_manager.get_metrics(
+                    state.equity,
+                    self.portfolio.get_daily_drawdown(),
+                    self.portfolio.get_sharpe_ratio()
+                )
+                uptime_h = (datetime.now() - self.start_time).total_seconds() / 3600
+                await self.reporter.send_telegram_hourly_report(
+                    self.portfolio, metrics, uptime_h
+                )
+            except Exception as e:
+                self.logger.error(f"Telegram-Loop Fehler: {e}")
+            await asyncio.sleep(3600)
 
     async def _close_all_positions(self, reason: str):
         """Schließt alle Positionen"""

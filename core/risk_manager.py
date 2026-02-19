@@ -65,19 +65,37 @@ class RiskManager:
         self.cooldown_until: Optional[datetime] = None
         self.warnings: list = []
 
+    def size_from_risk(self, equity: float, sl_distance_pct: float) -> float:
+        """
+        Berechnet Positionsgröße so dass genau max_risk_per_trade riskiert wird.
+
+        Args:
+            equity: Aktuelles Portfolio-Eigenkapital
+            sl_distance_pct: |entry - sl_price| / entry_price (z.B. 0.012 = 1.2%)
+
+        Returns:
+            Empfohlene Positionsgröße in EUR
+        """
+        if sl_distance_pct <= 0:
+            return equity * 0.05   # Fallback
+        raw_size = (equity * self.max_risk_per_trade) / sl_distance_pct
+        return min(raw_size, equity * self.MAX_POSITION_SIZE)
+
     def check_trade(self, portfolio_equity: float, position_size: float,
                    leverage: float, current_positions: int,
-                   consecutive_losses: int, daily_drawdown: float) -> RiskCheck:
+                   consecutive_losses: int, daily_drawdown: float,
+                   sl_distance_pct: float = None) -> RiskCheck:
         """
         Prüft ob ein Trade den Risiko-Regeln entspricht
 
         Args:
             portfolio_equity: Aktuelles Portfolio-Eigenkapital
-            position_size: Gewünschte Positionsgröße in USD
+            position_size: Gewünschte Positionsgröße in EUR
             leverage: Gewünschter Leverage
             current_positions: Anzahl aktuell offener Positionen
             consecutive_losses: Anzahl aufeinanderfolgender Verluste
             daily_drawdown: Aktueller täglicher Drawdown (0.0 - 1.0)
+            sl_distance_pct: Optionaler ATR-basierter SL-Abstand als Bruchteil (z.B. 0.012)
 
         Returns:
             RiskCheck mit Aktion und Begründung
@@ -136,10 +154,16 @@ class RiskManager:
             )
 
         # 8. Risk per Trade
-        risk_amount = position_size * leverage * 0.01  # Annahme: 1% Stop-Loss
+        if sl_distance_pct and sl_distance_pct > 0:
+            risk_amount = position_size * sl_distance_pct
+        else:
+            risk_amount = position_size * leverage * 0.01  # Fallback: Annahme 1% Stop-Loss
         max_risk = portfolio_equity * self.max_risk_per_trade
         if risk_amount > max_risk:
-            adjusted_size = max_risk / (leverage * 0.01)
+            if sl_distance_pct and sl_distance_pct > 0:
+                adjusted_size = max_risk / sl_distance_pct
+            else:
+                adjusted_size = max_risk / (leverage * 0.01)
             return RiskCheck(
                 action=RiskAction.REDUCE_SIZE,
                 reason=f"Risiko pro Trade begrenzt auf {self.max_risk_per_trade:.1%}",

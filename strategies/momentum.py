@@ -34,10 +34,18 @@ class MomentumStrategy:
         self.max_leverage = min(self.config.get('max_leverage', 20), 50)
         self.pairs = self.config.get('pairs', ['BTC_EUR', 'ETH_EUR', 'SOL_EUR', 'XRP_EUR'])
 
-        # TP/SL (validiert im Backtest)
+        # TP/SL (validiert im Backtest) — Fallback wenn kein ATR verfügbar
         self.take_profit_pct = self.config.get('take_profit', 0.015)   # 1.5%
         self.stop_loss_pct = self.config.get('stop_loss', 0.008)       # 0.8%
         self.trailing_stop_pct = self.config.get('trailing_stop', 0.005)  # 0.5%
+
+        # ATR-Parameter für dynamische SL/TP
+        self.atr_period = self.config.get('atr_period', 14)
+        self.sl_atr_multiplier = self.config.get('sl_atr_multiplier', 1.8)
+        self.tp_atr_multiplier = self.config.get('tp_atr_multiplier', 3.5)
+        self.trailing_atr_multiplier = self.config.get('trailing_atr_multiplier', 1.2)
+        # ATR-Cache pro Symbol (für check_exit_conditions)
+        self._last_atr: Dict[str, float] = {}
 
         # EMA-Cross Parameter
         self.rsi_long_threshold = self.config.get('rsi_long_threshold', 40)
@@ -98,34 +106,54 @@ class MomentumStrategy:
         bullish_cross = currently_bullish and not was_bullish
         bearish_cross = not currently_bullish and was_bullish
 
+        # ATR berechnen für dynamische SL/TP
+        atr = self._calculate_atr(candles, self.atr_period)
+        use_atr = not (pd.isna(atr) or atr <= 0)
+        if use_atr:
+            self._last_atr[symbol] = atr
+
         signal = None
 
         # LONG: EMA9 kreuzt über EMA21 + RSI unter 40 (nicht überkauft)
         if bullish_cross and rsi < self.rsi_long_threshold:
             confidence = self._calculate_confidence(rsi, ema_9, ema_21, 'long')
+            if use_atr:
+                sl_price = current_price - (atr * self.sl_atr_multiplier)
+                tp_price = current_price + (atr * self.tp_atr_multiplier)
+            else:
+                sl_price = current_price * (1 - self.stop_loss_pct)
+                tp_price = current_price * (1 + self.take_profit_pct)
             signal = ScalperSignal(
                 signal_type=SignalType.LONG,
                 symbol=symbol,
                 price=current_price,
                 confidence=confidence,
                 reason=f"Momentum LONG: EMA9 kreuzt über EMA21, RSI={rsi:.1f}",
-                take_profit=current_price * (1 + self.take_profit_pct),
-                stop_loss=current_price * (1 - self.stop_loss_pct),
-                suggested_leverage=self._calculate_leverage(confidence)
+                take_profit=tp_price,
+                stop_loss=sl_price,
+                suggested_leverage=self._calculate_leverage(confidence),
+                atr_value=atr if use_atr else 0.0
             )
 
         # SHORT: EMA9 kreuzt unter EMA21 + RSI über 60 (nicht überverkauft)
         elif bearish_cross and rsi > self.rsi_short_threshold:
             confidence = self._calculate_confidence(rsi, ema_9, ema_21, 'short')
+            if use_atr:
+                sl_price = current_price + (atr * self.sl_atr_multiplier)
+                tp_price = current_price - (atr * self.tp_atr_multiplier)
+            else:
+                sl_price = current_price * (1 + self.stop_loss_pct)
+                tp_price = current_price * (1 - self.take_profit_pct)
             signal = ScalperSignal(
                 signal_type=SignalType.SHORT,
                 symbol=symbol,
                 price=current_price,
                 confidence=confidence,
                 reason=f"Momentum SHORT: EMA9 kreuzt unter EMA21, RSI={rsi:.1f}",
-                take_profit=current_price * (1 - self.take_profit_pct),
-                stop_loss=current_price * (1 + self.stop_loss_pct),
-                suggested_leverage=self._calculate_leverage(confidence)
+                take_profit=tp_price,
+                stop_loss=sl_price,
+                suggested_leverage=self._calculate_leverage(confidence),
+                atr_value=atr if use_atr else 0.0
             )
 
         if signal:
@@ -134,6 +162,19 @@ class MomentumStrategy:
             self.logger.info(f"{signal.reason} @ ${current_price:.2f} (Conf: {signal.confidence:.0%})")
 
         return signal
+
+    def _calculate_atr(self, candles: pd.DataFrame, period: int) -> float:
+        """Berechnet Average True Range (ATR) über gegebene Periode"""
+        high = candles['high']
+        low = candles['low']
+        close = candles['close']
+        prev_close = close.shift(1)
+        tr = pd.concat([
+            high - low,
+            (high - prev_close).abs(),
+            (low - prev_close).abs()
+        ], axis=1).max(axis=1)
+        return tr.rolling(period).mean().iloc[-1]
 
     def _calculate_confidence(self, rsi: float, ema_9: float, ema_21: float,
                               direction: str) -> float:
@@ -167,25 +208,58 @@ class MomentumStrategy:
 
     def check_exit_conditions(self, symbol: str, entry_price: float,
                               current_price: float, side: str,
-                              highest_since_entry: float = None) -> Tuple[bool, str]:
-        """Prüft Exit-Bedingungen (gleiche Logik wie Scalper)"""
+                              highest_since_entry: float = None,
+                              stop_loss_price: float = None,
+                              take_profit_price: float = None) -> Tuple[bool, str]:
+        """Prüft Exit-Bedingungen — nutzt absolute Preise wenn übergeben, sonst %-Fallback"""
+        atr = self._last_atr.get(symbol)
+
         if side == 'long':
-            if current_price >= entry_price * (1 + self.take_profit_pct):
+            # Take-Profit
+            if take_profit_price is not None:
+                if current_price >= take_profit_price:
+                    return True, "Take-Profit erreicht"
+            elif current_price >= entry_price * (1 + self.take_profit_pct):
                 return True, "Take-Profit erreicht"
-            if current_price <= entry_price * (1 - self.stop_loss_pct):
+
+            # Stop-Loss
+            if stop_loss_price is not None:
+                if current_price <= stop_loss_price:
+                    return True, "Stop-Loss getriggert"
+            elif current_price <= entry_price * (1 - self.stop_loss_pct):
                 return True, "Stop-Loss getriggert"
-            if highest_since_entry and current_price >= entry_price * (1 + self.trailing_stop_pct):
-                trailing_stop = highest_since_entry * (1 - self.trailing_stop_pct)
-                if current_price <= trailing_stop:
+
+            # Trailing-Stop (ATR-basiert wenn verfügbar)
+            if highest_since_entry:
+                if atr and atr > 0:
+                    trailing_stop = highest_since_entry - (atr * self.trailing_atr_multiplier)
+                else:
+                    trailing_stop = highest_since_entry * (1 - self.trailing_stop_pct)
+                if current_price >= entry_price * (1 + self.trailing_stop_pct) and current_price <= trailing_stop:
                     return True, f"Trailing-Stop ({trailing_stop:.2f})"
-        else:
-            if current_price <= entry_price * (1 - self.take_profit_pct):
+
+        else:  # short
+            # Take-Profit
+            if take_profit_price is not None:
+                if current_price <= take_profit_price:
+                    return True, "Take-Profit erreicht"
+            elif current_price <= entry_price * (1 - self.take_profit_pct):
                 return True, "Take-Profit erreicht"
-            if current_price >= entry_price * (1 + self.stop_loss_pct):
+
+            # Stop-Loss
+            if stop_loss_price is not None:
+                if current_price >= stop_loss_price:
+                    return True, "Stop-Loss getriggert"
+            elif current_price >= entry_price * (1 + self.stop_loss_pct):
                 return True, "Stop-Loss getriggert"
-            if highest_since_entry and current_price <= entry_price * (1 - self.trailing_stop_pct):
-                trailing_stop = highest_since_entry * (1 + self.trailing_stop_pct)
-                if current_price >= trailing_stop:
+
+            # Trailing-Stop (ATR-basiert wenn verfügbar, highest_since_entry = niedrigster Preis für Short)
+            if highest_since_entry:
+                if atr and atr > 0:
+                    trailing_stop = highest_since_entry + (atr * self.trailing_atr_multiplier)
+                else:
+                    trailing_stop = highest_since_entry * (1 + self.trailing_stop_pct)
+                if current_price <= entry_price * (1 - self.trailing_stop_pct) and current_price >= trailing_stop:
                     return True, f"Trailing-Stop ({trailing_stop:.2f})"
 
         return False, ""

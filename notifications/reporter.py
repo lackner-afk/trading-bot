@@ -18,6 +18,90 @@ from rich.text import Text
 from rich import box
 
 
+class TelegramNotifier:
+    """
+    Sendet Notifications via Telegram-Bot-API
+
+    Benötigt:
+    - TELEGRAM_BOT_TOKEN aus BotFather
+    - TELEGRAM_CHAT_ID (eigene User-ID oder Gruppen-ID)
+    """
+
+    def __init__(self, token: str, chat_id: str):
+        from telegram import Bot
+        self.bot = Bot(token=token)
+        self.chat_id = chat_id
+        self.logger = logging.getLogger('TelegramNotifier')
+        self._last_report_time: Optional[datetime] = None
+
+    async def send_message(self, text: str, parse_mode: str = 'HTML') -> bool:
+        """Sendet Nachricht, gibt False bei Fehler zurück"""
+        try:
+            await self.bot.send_message(chat_id=self.chat_id, text=text, parse_mode=parse_mode)
+            return True
+        except Exception as e:
+            self.logger.error(f"Telegram-Fehler: {e}")
+            return False
+
+    async def send_trade_alert(self, trade) -> bool:
+        """Sendet Trade-Alert (Win/Loss, Symbol, PNL, Strategie)"""
+        emoji = "🟢" if trade.pnl >= 0 else "🔴"
+        pct = trade.pnl / trade.size * 100 if trade.size > 0 else 0
+        text = (
+            f"{emoji} <b>{trade.side.upper()} {trade.symbol}</b>\n"
+            f"Entry: <code>{trade.entry_price:.4f}</code> → Exit: <code>{trade.exit_price:.4f}</code>\n"
+            f"PNL: <b>{trade.pnl:+.2f}€</b> ({pct:+.2f}%)\n"
+            f"Strategie: {trade.strategy}"
+        )
+        return await self.send_message(text)
+
+    async def send_hourly_report(self, portfolio, metrics: dict,
+                                  uptime_hours: float) -> bool:
+        """Rate-limitierter Stundenbericht (max 1/h)"""
+        if self._last_report_time and \
+           (datetime.now() - self._last_report_time).total_seconds() < 3600:
+            return False
+
+        state = portfolio.get_state()
+        win_rate = portfolio.get_win_rate()
+        max_dd = portfolio.get_max_drawdown()
+        avg_win, avg_loss = portfolio.get_avg_win_loss()
+        profit_factor = abs(avg_win / avg_loss) if avg_loss != 0 else 0.0
+
+        pnl_emoji = "📈" if state.daily_pnl >= 0 else "📉"
+        status = metrics.get('status', 'OK')
+        status_emoji = {'OK': '✅', 'CAUTION': '⚠️', 'WARNING': '🟠', 'CRITICAL': '🔴'}.get(status, 'ℹ️')
+
+        # Positions-Block
+        pos_lines = []
+        for sym, pos in state.positions.items():
+            pnl_e = "+" if pos.unrealized_pnl >= 0 else ""
+            pos_lines.append(
+                f"  • {sym} {pos.side.upper()} {pnl_e}{pos.unrealized_pnl:.2f}€"
+            )
+        pos_text = "\n".join(pos_lines) if pos_lines else "  Keine offenen Positionen"
+
+        text = (
+            f"<b>📊 Stündlicher Report</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{pnl_emoji} <b>Equity:</b> {state.equity:.2f}€\n"
+            f"   Daily PnL: <b>{state.daily_pnl:+.2f}€</b>\n"
+            f"   Realized PnL: {state.realized_pnl:+.2f}€\n\n"
+            f"<b>📌 Offene Positionen:</b>\n{pos_text}\n\n"
+            f"<b>📉 Statistiken:</b>\n"
+            f"   Win-Rate: {win_rate:.1%} | Profit-Faktor: {profit_factor:.2f}\n"
+            f"   Max Drawdown: {max_dd:.2%}\n"
+            f"   Trades gesamt: {state.total_trades}\n\n"
+            f"{status_emoji} Risk-Status: <b>{status}</b>\n"
+            f"⏱ Laufzeit: {uptime_hours:.1f}h (Paper-Mode)"
+        )
+
+        ok = await self.send_message(text)
+        if ok:
+            self._last_report_time = datetime.now()
+        return ok
+
+
 class Reporter:
     """
     Reporting und Notifications für Paper-Trading-Bot
@@ -41,6 +125,9 @@ class Reporter:
         self.session: Optional[aiohttp.ClientSession] = None
         self.last_hourly_report = datetime.now()
         self.last_daily_report = datetime.now().date()
+
+        # Telegram (wird via setup_telegram() initialisiert)
+        self.telegram: Optional[TelegramNotifier] = None
 
     async def start(self):
         """Initialisiert Reporter"""
@@ -319,6 +406,26 @@ class Reporter:
         """Sendet Alert via Webhook"""
         emoji = {"warning": "⚠️", "error": "❌", "info": "ℹ️", "success": "✅"}
         await self.send_webhook(f"{emoji.get(alert_type, '📢')} {message}", f"Alert: {alert_type.upper()}")
+
+    async def setup_telegram(self, token: str, chat_id: str):
+        """Initialisiert Telegram-Notifier und sendet Startnachricht"""
+        self.telegram = TelegramNotifier(token=token, chat_id=chat_id)
+        ok = await self.telegram.send_message("🤖 <b>Paper-Trading-Bot gestartet!</b>")
+        if ok:
+            self.logger.info("Telegram-Verbindung erfolgreich")
+        else:
+            self.logger.warning("Telegram-Verbindung fehlgeschlagen")
+
+    async def send_trade_alert(self, trade):
+        """Sendet Trade-Notification via Webhook und Telegram"""
+        await self.send_trade_notification(trade)
+        if self.telegram:
+            await self.telegram.send_trade_alert(trade)
+
+    async def send_telegram_hourly_report(self, portfolio, metrics: dict, uptime_hours: float):
+        """Sendet stündlichen Report via Telegram"""
+        if self.telegram:
+            await self.telegram.send_hourly_report(portfolio, metrics, uptime_hours)
 
     def should_send_hourly_report(self) -> bool:
         """Prüft ob stündlicher Report fällig ist"""

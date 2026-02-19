@@ -30,6 +30,7 @@ class ScalperSignal:
     take_profit: float
     stop_loss: float
     suggested_leverage: int
+    atr_value: float = 0.0   # ATR zum Signalzeitpunkt (für Risk-Sizing in main.py)
     timestamp: datetime = None
 
     def __post_init__(self):
