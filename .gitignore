@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+.env
+
+# Secrets - NIEMALS committen!
+config/secrets.env
+*.pem
+*.key
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+trades.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Cache
+.cache/
+*.cache
+
+# ML Models
+models/
+*.pkl
+*.joblib
+*.pt
+*.pth
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Build
+dist/
+build/
+*.egg-info/
