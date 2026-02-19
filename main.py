@@ -371,7 +371,7 @@ class TradingBot:
         if len(state.positions) >= 2:
             return
 
-        if state.equity < 1000:
+        if state.equity < 50:
             return
 
         # Risk-Check
@@ -392,11 +392,11 @@ class TradingBot:
             self.logger.info(f"Cooldown aktiv: {risk_check.reason}")
             return
 
-        # Position Size: max 10% Equity, max 30% Balance, $100-$1000
+        # Position Size: max 10% Equity, max 30% Balance, €50-€200
         position_size = min(abs(state.equity) * 0.1, abs(state.balance) * 0.3)
-        position_size = max(100, min(1000, position_size))
+        position_size = max(50, min(200, position_size))
 
-        if position_size > state.balance or state.balance < 500:
+        if position_size > state.balance or state.balance < 50:
             return
 
         side = 'buy' if signal.signal_type == SignalType.LONG else 'sell'

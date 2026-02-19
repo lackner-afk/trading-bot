@@ -3,8 +3,8 @@
 
 general:
   mode: paper  # paper | live (NIEMALS live ohne explizite Bestätigung)
-  start_capital: 10000
-  base_currency: USDT
+  start_capital: 1000
+  base_currency: EUR
   log_level: INFO
 
 exchanges:
@@ -28,13 +28,13 @@ strategies:
     take_profit: 0.015       # 1.5%
     stop_loss: 0.008         # 0.8%
     trailing_stop: 0.005     # 0.5%
-    rsi_long_threshold: 40   # Long nur wenn RSI < 40
-    rsi_short_threshold: 60  # Short nur wenn RSI > 60
+    rsi_long_threshold: 45   # Long nur wenn RSI < 45
+    rsi_short_threshold: 55  # Short nur wenn RSI > 55
     cooldown_seconds: 300    # 5 Min Cooldown pro Symbol
 
   # Sekundär-Strategie: RSI+BB Mean-Reversion (deaktiviert)
   scalper:
-    enabled: false
+    enabled: true
     leverage: 20
     pairs:
       - BTC_EUR
