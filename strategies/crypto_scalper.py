@@ -304,7 +304,9 @@ class CryptoScalper:
 
     def check_exit_conditions(self, symbol: str, entry_price: float,
                              current_price: float, side: str,
-                             highest_since_entry: float = None) -> Tuple[bool, str]:
+                             highest_since_entry: float = None,
+                             stop_loss_price: float = None,
+                             take_profit_price: float = None) -> Tuple[bool, str]:
         """
         Prüft Exit-Bedingungen
 
@@ -320,11 +322,17 @@ class CryptoScalper:
         """
         if side == 'long':
             # Take-Profit
-            if current_price >= entry_price * (1 + self.take_profit_pct):
+            if take_profit_price is not None:
+                if current_price >= take_profit_price:
+                    return True, "Take-Profit erreicht"
+            elif current_price >= entry_price * (1 + self.take_profit_pct):
                 return True, "Take-Profit erreicht"
 
             # Stop-Loss
-            if current_price <= entry_price * (1 - self.stop_loss_pct):
+            if stop_loss_price is not None:
+                if current_price <= stop_loss_price:
+                    return True, "Stop-Loss getriggert"
+            elif current_price <= entry_price * (1 - self.stop_loss_pct):
                 return True, "Stop-Loss getriggert"
 
             # Trailing-Stop
@@ -335,14 +343,20 @@ class CryptoScalper:
 
         else:  # short
             # Take-Profit
-            if current_price <= entry_price * (1 - self.take_profit_pct):
+            if take_profit_price is not None:
+                if current_price <= take_profit_price:
+                    return True, "Take-Profit erreicht"
+            elif current_price <= entry_price * (1 - self.take_profit_pct):
                 return True, "Take-Profit erreicht"
 
             # Stop-Loss
-            if current_price >= entry_price * (1 + self.stop_loss_pct):
+            if stop_loss_price is not None:
+                if current_price >= stop_loss_price:
+                    return True, "Stop-Loss getriggert"
+            elif current_price >= entry_price * (1 + self.stop_loss_pct):
                 return True, "Stop-Loss getriggert"
 
-            # Trailing-Stop (für Short: niedrigster Preis)
+            # Trailing-Stop
             if highest_since_entry and current_price <= entry_price * (1 - self.trailing_stop_pct):
                 trailing_stop = highest_since_entry * (1 + self.trailing_stop_pct)
                 if current_price >= trailing_stop:
