@@ -44,20 +44,26 @@ class TelegramNotifier:
             return False
 
     async def send_trade_alert(self, trade) -> bool:
-        """Sendet Trade-Alert (Win/Loss, Symbol, PNL, Strategie)"""
-        emoji = "🟢" if trade.pnl >= 0 else "🔴"
+        """Sendet Trade-Alert im Moneyboy-Stil"""
         pct = trade.pnl / trade.size * 100 if trade.size > 0 else 0
+        if trade.pnl >= 0:
+            emoji = "🟢"
+            vibe = f"Digga i han <b>{trade.pnl:+.2f}€</b> gecasht, vong Profit her! Fly sein auf {trade.symbol} 💰"
+        else:
+            emoji = "🔴"
+            vibe = f"Oida was ist das für 1 Loss, i han <b>{trade.pnl:+.2f}€</b> vong {trade.symbol} her verloren 😤"
         text = (
             f"{emoji} <b>{trade.side.upper()} {trade.symbol}</b>\n"
             f"Entry: <code>{trade.entry_price:.4f}</code> → Exit: <code>{trade.exit_price:.4f}</code>\n"
             f"PNL: <b>{trade.pnl:+.2f}€</b> ({pct:+.2f}%)\n"
-            f"Strategie: {trade.strategy}"
+            f"Strategie: {trade.strategy}\n\n"
+            f"{vibe}"
         )
         return await self.send_message(text)
 
     async def send_hourly_report(self, portfolio, metrics: dict,
                                   uptime_hours: float) -> bool:
-        """Rate-limitierter Stundenbericht (max 1/h)"""
+        """Rate-limitierter Stundenbericht im Moneyboy-Stil (max 1/h)"""
         if self._last_report_time and \
            (datetime.now() - self._last_report_time).total_seconds() < 3600:
             return False
@@ -68,9 +74,29 @@ class TelegramNotifier:
         avg_win, avg_loss = portfolio.get_avg_win_loss()
         profit_factor = abs(avg_win / avg_loss) if avg_loss != 0 else 0.0
 
-        pnl_emoji = "📈" if state.daily_pnl >= 0 else "📉"
         status = metrics.get('status', 'OK')
-        status_emoji = {'OK': '✅', 'CAUTION': '⚠️', 'WARNING': '🟠', 'CRITICAL': '🔴'}.get(status, 'ℹ️')
+
+        # Equity-Veränderung
+        start = 100.0  # Startkapital (wird approximiert)
+        equity_change = state.equity - state.balance + state.realized_pnl
+
+        # Moneyboy-Kommentar je nach Performance
+        if state.daily_pnl > 5:
+            mood = "Digga i bims voll am Poppen heute, der Swag ist lit 🔥 Was ist das für 1 Life!"
+        elif state.daily_pnl > 0:
+            mood = "Läuft so halbwegs, vong Profit her, gönn dir! 💸"
+        elif state.daily_pnl < -5:
+            mood = "Oida das ist voll corny heute, i han zu viel verloren. Ahnbar belastend 😤"
+        else:
+            mood = "I bims, euer Trading-Boy. Markt ist gerade voll sus, wart ma ab 👀"
+
+        # Risk-Status auf Moneyboy-Art
+        risk_lines = {
+            'OK': "Risk-Status: ✅ Alles fly, kein Stress",
+            'CAUTION': "Risk-Status: ⚠️ Digga pass auf, wird corny",
+            'WARNING': "Risk-Status: 🟠 Oida das ist nicht ahnbar, Vorsicht!",
+            'CRITICAL': "Risk-Status: 🔴 BRO STOP! Das ist voll belastend, i bims am Aufhören!"
+        }.get(status, f"Risk-Status: {status}")
 
         # Positions-Block
         pos_lines = []
@@ -79,21 +105,22 @@ class TelegramNotifier:
             pos_lines.append(
                 f"  • {sym} {pos.side.upper()} {pnl_e}{pos.unrealized_pnl:.2f}€"
             )
-        pos_text = "\n".join(pos_lines) if pos_lines else "  Keine offenen Positionen"
+        pos_text = "\n".join(pos_lines) if pos_lines else "  Keine offenen Positionen grad, i bims am Warten"
 
         text = (
-            f"<b>📊 Stündlicher Report</b>\n"
+            f"<b>💰 Stündlicher Report — I bims, euer Bot!</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"{pnl_emoji} <b>Equity:</b> {state.equity:.2f}€\n"
+            f"{'📈' if state.daily_pnl >= 0 else '📉'} <b>Equity:</b> {state.equity:.2f}€\n"
             f"   Daily PnL: <b>{state.daily_pnl:+.2f}€</b>\n"
             f"   Realized PnL: {state.realized_pnl:+.2f}€\n\n"
             f"<b>📌 Offene Positionen:</b>\n{pos_text}\n\n"
-            f"<b>📉 Statistiken:</b>\n"
+            f"<b>📊 Statistiken vong Heute her:</b>\n"
             f"   Win-Rate: {win_rate:.1%} | Profit-Faktor: {profit_factor:.2f}\n"
             f"   Max Drawdown: {max_dd:.2%}\n"
             f"   Trades gesamt: {state.total_trades}\n\n"
-            f"{status_emoji} Risk-Status: <b>{status}</b>\n"
-            f"⏱ Laufzeit: {uptime_hours:.1f}h (Paper-Mode)"
+            f"{risk_lines}\n"
+            f"⏱ Laufzeit: {uptime_hours:.1f}h (Paper-Mode)\n\n"
+            f"<i>{mood}</i>"
         )
 
         ok = await self.send_message(text)
@@ -410,7 +437,7 @@ class Reporter:
     async def setup_telegram(self, token: str, chat_id: str):
         """Initialisiert Telegram-Notifier und sendet Startnachricht"""
         self.telegram = TelegramNotifier(token=token, chat_id=chat_id)
-        ok = await self.telegram.send_message("🤖 <b>Paper-Trading-Bot gestartet!</b>")
+        ok = await self.telegram.send_message("🤖 <b>Halo, i bims! Euer Paper-Trading-Bot ist jetzt am Starten tun 🚀</b>\nI han die Märkte im Griff, gönn dir — vong Profit her! 💰")
         if ok:
             self.logger.info("Telegram-Verbindung erfolgreich")
         else:
