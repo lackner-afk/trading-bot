@@ -63,6 +63,7 @@ class RiskManager:
 
         # State
         self.cooldown_until: Optional[datetime] = None
+        self._cooldown_triggered_at_losses: int = 0  # Verlustanzahl beim letzten Cooldown-Trigger
         self.warnings: list = []
 
     def size_from_risk(self, equity: float, sl_distance_pct: float) -> float:
@@ -122,7 +123,13 @@ class RiskManager:
             self._add_warning(f"Drawdown bei {daily_drawdown:.1%}")
 
         # 4. Consecutive Losses → Cooldown
-        if consecutive_losses >= self.COOLDOWN_AFTER_LOSSES:
+        # Streak zurücksetzen wenn kein aktiver Verlust-Streak mehr
+        if consecutive_losses < self.COOLDOWN_AFTER_LOSSES:
+            self._cooldown_triggered_at_losses = 0
+        # Nur triggern wenn neue Verluste dazugekommen sind seit letztem Cooldown
+        if consecutive_losses >= self.COOLDOWN_AFTER_LOSSES and \
+                consecutive_losses > self._cooldown_triggered_at_losses:
+            self._cooldown_triggered_at_losses = consecutive_losses
             self.cooldown_until = datetime.now() + timedelta(seconds=self.cooldown_seconds)
             return RiskCheck(
                 action=RiskAction.COOLDOWN,

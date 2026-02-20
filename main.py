@@ -378,7 +378,7 @@ class TradingBot:
         if len(state.positions) >= 5:
             return
 
-        if state.equity < 50:
+        if state.equity < 20:
             return
 
         # SL-Distanz aus Signal ableiten (ATR-basiert)
@@ -410,9 +410,12 @@ class TradingBot:
             position_size = self.risk_manager.size_from_risk(state.equity, sl_distance_pct)
         else:
             position_size = min(abs(state.equity) * 0.1, abs(state.balance) * 0.3)
-        position_size = max(50, min(200, position_size))
+        # Skaliert auf Kapital: Min 5% des Equity, Max 10% des Equity
+        min_size = max(5.0, state.equity * 0.05)
+        max_size = state.equity * 0.10
+        position_size = max(min_size, min(max_size, position_size))
 
-        if position_size > state.balance or state.balance < 50:
+        if position_size > state.balance or state.balance < 20:
             return
 
         side = 'buy' if signal.signal_type == SignalType.LONG else 'sell'
