@@ -3,7 +3,7 @@
 
 general:
   mode: paper  # paper | live (NIEMALS live ohne explizite Bestätigung)
-  start_capital: 1000
+  start_capital: 100
   base_currency: EUR
   log_level: INFO
 
