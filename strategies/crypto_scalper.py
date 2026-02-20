@@ -62,10 +62,10 @@ class CryptoScalper:
         self.stop_loss_pct = self.config.get('stop_loss', 0.008)       # 0.8%
         self.trailing_stop_pct = self.config.get('trailing_stop', 0.005)  # 0.5%
 
-        # Signal-Parameter (strenger für weniger, bessere Signale)
-        self.rsi_oversold = 25
-        self.rsi_overbought = 75
-        self.volume_spike_threshold = 3.0  # 3x Durchschnitt
+        # Signal-Parameter (aus Config ladbar)
+        self.rsi_oversold = self.config.get('rsi_oversold', 25)
+        self.rsi_overbought = self.config.get('rsi_overbought', 75)
+        self.volume_spike_threshold = self.config.get('volume_spike_threshold', 3.0)
 
         # Signal-Cooldown: 60 Sekunden pro Symbol nach Signal
         self._signal_cooldowns: Dict[str, datetime] = {}
