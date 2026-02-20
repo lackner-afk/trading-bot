@@ -380,8 +380,8 @@ class TradingBot:
 
         state = self.portfolio.get_state()
 
-        # Max 2 gleichzeitige Positionen
-        if len(state.positions) >= 2:
+        # Max 5 gleichzeitige Positionen
+        if len(state.positions) >= 5:
             return
 
         if state.equity < 50:
