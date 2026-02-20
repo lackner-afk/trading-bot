@@ -205,19 +205,43 @@ class OneTradingFeed:
                             self._update_simulated_data(symbol)
                             continue
 
+                        latest_close = None
                         for timeframe in self.TIMEFRAMES:
                             try:
-                                df_new = await self._fetch_candles(session, symbol, timeframe, count=5)
+                                df_new = await self._fetch_candles(session, symbol, timeframe, count=10)
                                 if df_new is not None and len(df_new) > 0:
                                     existing = self.candle_history.get(symbol, {}).get(timeframe)
                                     if existing is not None:
                                         df_new = pd.concat([existing, df_new]) \
                                             .drop_duplicates(subset='timestamp') \
+                                            .sort_values('timestamp') \
                                             .tail(100)
                                     df_new = self._calculate_indicators(df_new)
                                     self.candle_history.setdefault(symbol, {})[timeframe] = df_new
+                                    # 1m-Kerze → market_data updaten
+                                    if timeframe == '1m':
+                                        latest_close = float(df_new['close'].iloc[-1])
                             except Exception as e:
                                 self.logger.debug(f"Candle-Refresh {symbol} {timeframe}: {e}")
+
+                        # market_data aus REST-Preis updaten (Fallback wenn WS still ist)
+                        if latest_close and latest_close > 0:
+                            existing_md = self.market_data.get(symbol)
+                            # Nur updaten wenn WS-Daten älter als 90s sind
+                            last = self.last_update.get(symbol, datetime.min)
+                            if (datetime.now() - last).total_seconds() > 90:
+                                spread = latest_close * 0.0001
+                                self.market_data[symbol] = MarketData(
+                                    symbol=symbol,
+                                    price=latest_close,
+                                    bid=latest_close - spread,
+                                    ask=latest_close + spread,
+                                    volume_24h=existing_md.volume_24h if existing_md else 0.0,
+                                    change_24h=existing_md.change_24h if existing_md else 0.0,
+                                    timestamp=datetime.now()
+                                )
+                                self.last_update[symbol] = datetime.now()
+                                self.logger.debug(f"Preis via REST aktualisiert: {symbol} @ {latest_close:.4f}")
 
                 await asyncio.sleep(60)
 

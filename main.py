@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 from core.portfolio import Portfolio
 from core.risk_manager import RiskManager, RiskAction
 from core.order_engine import OrderEngine
-from data.onetrading_feed import OneTradingFeed
+from data.kraken_feed import KrakenFeed
 from strategies.crypto_scalper import CryptoScalper, SignalType
 from strategies.momentum import MomentumStrategy
 from strategies.ml_predictor import MLPredictor
@@ -109,14 +109,8 @@ class TradingBot:
         scalper_config = strategy_config.get('scalper', {})
         pairs = momentum_config.get('pairs', scalper_config.get('pairs', []))
 
-        # One Trading Daten-Feed
-        onetrading_config = self.config.get('exchanges', {}).get('onetrading', {})
-        import os
-        self.crypto_feed = OneTradingFeed(
-            api_key=os.environ.get('ONETRADING_API_KEY', onetrading_config.get('api_key')),
-            api_secret=os.environ.get('ONETRADING_API_SECRET', onetrading_config.get('api_secret')),
-            config={'pairs': pairs}
-        )
+        # Kraken Daten-Feed (echte EUR-Pairs, kein API-Key nötig)
+        self.crypto_feed = KrakenFeed(config={'pairs': pairs})
 
         # Strategien
         self.momentum = MomentumStrategy(config=momentum_config)
