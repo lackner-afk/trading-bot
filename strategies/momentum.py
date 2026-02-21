@@ -105,10 +105,10 @@ class MomentumStrategy:
         # Frischer Crossover ODER anhaltend starke EMA-Zustand + RSI-Bestätigung
         bullish_cross = currently_bullish and not was_bullish
         bearish_cross = not currently_bullish and was_bullish
-        # EMA-Zustand-Signal: EMA klar getrennt + RSI bestätigt Richtung
+        # EMA-Zustand-Signal: EMA klar getrennt (RSI-Filter kommt weiter unten)
         ema_spread = abs(ema_9 - ema_21) / ema_21 if ema_21 > 0 else 0
-        strong_bullish_state = currently_bullish and ema_spread > 0.001 and rsi < 45
-        strong_bearish_state = not currently_bullish and ema_spread > 0.001 and rsi > 55
+        strong_bullish_state = currently_bullish and ema_spread > 0.001
+        strong_bearish_state = not currently_bullish and ema_spread > 0.001
 
         # ATR berechnen für dynamische SL/TP
         atr = self._calculate_atr(candles, self.atr_period)
