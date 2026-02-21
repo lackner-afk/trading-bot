@@ -251,10 +251,10 @@ class TradingBot:
                         trend_up = self._get_trend(candles_15m)
 
                         if signal.signal_type == SignalType.LONG and trend_up is False:
-                            self.logger.debug(f"Trend-Filter: {symbol} LONG blockiert (15m Abwärtstrend)")
+                            self.logger.info(f"Trend-Filter: {symbol} LONG blockiert (15m Abwärtstrend)")
                             continue
                         if signal.signal_type == SignalType.SHORT and trend_up is True:
-                            self.logger.debug(f"Trend-Filter: {symbol} SHORT blockiert (15m Aufwärtstrend)")
+                            self.logger.info(f"Trend-Filter: {symbol} SHORT blockiert (15m Aufwärtstrend)")
                             continue
 
                         await self._execute_signal(signal, strategy_name='momentum')
