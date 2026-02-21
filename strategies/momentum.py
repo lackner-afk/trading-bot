@@ -204,7 +204,7 @@ class MomentumStrategy:
 
         # Skaliere linear: Conf 0.3 → base/2, Conf 0.9 → max
         lev = int(base * 0.5 + (max_lev - base * 0.5) * (confidence - 0.3) / 0.6)
-        return max(5, min(max_lev, lev))
+        return max(10, min(max_lev, lev))
 
     def check_exit_conditions(self, symbol: str, entry_price: float,
                               current_price: float, side: str,

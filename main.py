@@ -215,8 +215,19 @@ class TradingBot:
                 self.logger.error(f"Fehler im Haupt-Loop: {e}")
                 await asyncio.sleep(5)
 
+    def _get_trend(self, candles) -> bool:
+        """Ermittelt Trendrichtung anhand 15m EMA9/EMA21. True = Aufwärtstrend, False = Abwärtstrend, None = unklar"""
+        if candles is None or len(candles) < 21:
+            return None
+        import pandas as pd
+        ema_9 = candles['ema_9'].iloc[-1]
+        ema_21 = candles['ema_21'].iloc[-1]
+        if pd.isna(ema_9) or pd.isna(ema_21):
+            return None
+        return bool(ema_9 > ema_21)
+
     async def _momentum_loop(self):
-        """Momentum-Strategie Loop (alle 30 Sekunden)"""
+        """Momentum-Strategie Loop (alle 30 Sekunden) — 5m-Kerzen mit 15m-Trend-Filter"""
         if not self.config.get('strategies', {}).get('momentum', {}).get('enabled'):
             return
 
@@ -225,7 +236,8 @@ class TradingBot:
         while self.running:
             try:
                 for symbol in self.momentum.pairs:
-                    candles = self.crypto_feed.get_candles(symbol, '1m')
+                    # 5m-Kerzen für Signal (weniger Rauschen als 1m)
+                    candles = self.crypto_feed.get_candles(symbol, '5m')
                     price = self.crypto_feed.get_price(symbol)
 
                     if candles is None or price is None:
@@ -234,6 +246,17 @@ class TradingBot:
                     signal = self.momentum.analyze(symbol, candles, price)
 
                     if signal and signal.signal_type in [SignalType.LONG, SignalType.SHORT]:
+                        # Trend-Filter: 15m-Trend muss Signal bestätigen
+                        candles_15m = self.crypto_feed.get_candles(symbol, '15m')
+                        trend_up = self._get_trend(candles_15m)
+
+                        if signal.signal_type == SignalType.LONG and trend_up is False:
+                            self.logger.debug(f"Trend-Filter: {symbol} LONG blockiert (15m Abwärtstrend)")
+                            continue
+                        if signal.signal_type == SignalType.SHORT and trend_up is True:
+                            self.logger.debug(f"Trend-Filter: {symbol} SHORT blockiert (15m Aufwärtstrend)")
+                            continue
+
                         await self._execute_signal(signal, strategy_name='momentum')
 
                 await asyncio.sleep(30)
@@ -409,10 +432,10 @@ class TradingBot:
         if sl_distance_pct > 0 and hasattr(signal, 'atr_value') and signal.atr_value > 0:
             position_size = self.risk_manager.size_from_risk(state.equity, sl_distance_pct)
         else:
-            position_size = min(abs(state.equity) * 0.1, abs(state.balance) * 0.3)
-        # Skaliert auf Kapital: Min 5% des Equity, Max 10% des Equity
-        min_size = max(5.0, state.equity * 0.05)
-        max_size = state.equity * 0.10
+            position_size = state.equity * 0.20
+        # Skaliert auf Kapital: Min 15% des Equity, Max 25% des Equity
+        min_size = max(10.0, state.equity * 0.15)
+        max_size = state.equity * 0.25
         position_size = max(min_size, min(max_size, position_size))
 
         if position_size > state.balance or state.balance < 20:
