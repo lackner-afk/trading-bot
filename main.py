@@ -216,7 +216,7 @@ class TradingBot:
                 await asyncio.sleep(5)
 
     def _get_trend(self, candles) -> bool:
-        """Ermittelt Trendrichtung anhand 15m EMA9/EMA21. True = Aufwärtstrend, False = Abwärtstrend, None = unklar"""
+        """Ermittelt Trendrichtung anhand 1h EMA9/EMA21. True = Aufwärtstrend, False = Abwärtstrend, None = unklar"""
         if candles is None or len(candles) < 21:
             return None
         import pandas as pd
@@ -227,7 +227,7 @@ class TradingBot:
         return bool(ema_9 > ema_21)
 
     async def _momentum_loop(self):
-        """Momentum-Strategie Loop (alle 30 Sekunden) — 5m-Kerzen mit 15m-Trend-Filter"""
+        """Momentum-Strategie Loop (alle 30 Sekunden) — 5m-Kerzen mit 1h-Trend-Filter"""
         if not self.config.get('strategies', {}).get('momentum', {}).get('enabled'):
             return
 
@@ -246,15 +246,15 @@ class TradingBot:
                     signal = self.momentum.analyze(symbol, candles, price)
 
                     if signal and signal.signal_type in [SignalType.LONG, SignalType.SHORT]:
-                        # Trend-Filter: 15m-Trend muss Signal bestätigen
-                        candles_15m = self.crypto_feed.get_candles(symbol, '15m')
-                        trend_up = self._get_trend(candles_15m)
+                        # Trend-Filter: 1h-Trend muss Signal bestätigen (robuster als 15m)
+                        candles_1h = self.crypto_feed.get_candles(symbol, '1h')
+                        trend_up = self._get_trend(candles_1h)
 
                         if signal.signal_type == SignalType.LONG and trend_up is False:
-                            self.logger.info(f"Trend-Filter: {symbol} LONG blockiert (15m Abwärtstrend)")
+                            self.logger.info(f"Trend-Filter: {symbol} LONG blockiert (1h Abwärtstrend)")
                             continue
                         if signal.signal_type == SignalType.SHORT and trend_up is True:
-                            self.logger.info(f"Trend-Filter: {symbol} SHORT blockiert (15m Aufwärtstrend)")
+                            self.logger.info(f"Trend-Filter: {symbol} SHORT blockiert (1h Aufwärtstrend)")
                             continue
 
                         await self._execute_signal(signal, strategy_name='momentum')

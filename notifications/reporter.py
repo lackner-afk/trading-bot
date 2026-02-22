@@ -5,6 +5,7 @@ Console-Output mit Rich + optionaler Webhook-Support
 
 import asyncio
 import logging
+import random
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import aiohttp
@@ -48,10 +49,22 @@ class TelegramNotifier:
         pct = trade.pnl / trade.size * 100 if trade.size > 0 else 0
         if trade.pnl >= 0:
             emoji = "🟢"
-            vibe = f"Digga i han <b>{trade.pnl:+.2f}€</b> gecasht, vong Profit her! Fly sein auf {trade.symbol} 💰"
+            vibe = random.choice([
+                f"Digga i han <b>{trade.pnl:+.2f}€</b> gecasht, vong Profit her! Fly sein auf {trade.symbol} 💰",
+                f"Gönn dir! <b>{trade.pnl:+.2f}€</b> rein, {trade.symbol} ist 1 Flex heute 🔥",
+                f"I bims am Poppen! <b>{trade.pnl:+.2f}€</b> vong {trade.symbol} her, was ist das für 1 Life 😤💸",
+                f"Bruder das ist lit! <b>{trade.pnl:+.2f}€</b> auf {trade.symbol}, der Swag stimmt heute ✨",
+                f"Ahnbar krass, <b>{trade.pnl:+.2f}€</b> gecasht! {trade.symbol} hat mi ned enttäuscht oida 🚀",
+            ])
         else:
             emoji = "🔴"
-            vibe = f"Oida was ist das für 1 Loss, i han <b>{trade.pnl:+.2f}€</b> vong {trade.symbol} her verloren 😤"
+            vibe = random.choice([
+                f"Oida was ist das für 1 Loss, i han <b>{trade.pnl:+.2f}€</b> vong {trade.symbol} her verloren 😤",
+                f"Das ist voll corny, <b>{trade.pnl:+.2f}€</b> weg. {trade.symbol} hat mi verarscht bitte 💀",
+                f"Belastend. Einfach nur belastend. <b>{trade.pnl:+.2f}€</b> weg auf {trade.symbol} 😩",
+                f"I man echt, was ist das für 1 Trade! <b>{trade.pnl:+.2f}€</b> Loss auf {trade.symbol}, nicht ahnbar 🤦",
+                f"Digga {trade.symbol} ist heute nicht fly. <b>{trade.pnl:+.2f}€</b> in die Tonne, pls 😭",
+            ])
         text = (
             f"{emoji} <b>{trade.side.upper()} {trade.symbol}</b>\n"
             f"Entry: <code>{trade.entry_price:.4f}</code> → Exit: <code>{trade.exit_price:.4f}</code>\n"
@@ -82,20 +95,52 @@ class TelegramNotifier:
 
         # Moneyboy-Kommentar je nach Performance
         if state.daily_pnl > 5:
-            mood = "Digga i bims voll am Poppen heute, der Swag ist lit 🔥 Was ist das für 1 Life!"
+            mood = random.choice([
+                "Digga i bims voll am Poppen heute, der Swag ist lit 🔥 Was ist das für 1 Life!",
+                "Bruder heute ist 1 Segen, vong Profit her geht's auffi! Gönn dir einfach 💸",
+                "I man echt, das ist 1 krasser Flex heute. Der Markt respektiert den Swag 🚀",
+            ])
         elif state.daily_pnl > 0:
-            mood = "Läuft so halbwegs, vong Profit her, gönn dir! 💸"
+            mood = random.choice([
+                "Läuft so halbwegs, vong Profit her, gönn dir! 💸",
+                "Kleiner Profit ist auch 1 Profit, fly bleiben oida ✨",
+                "I bims zufrieden, net viel aber was geht was geht 🤙",
+            ])
         elif state.daily_pnl < -5:
-            mood = "Oida das ist voll corny heute, i han zu viel verloren. Ahnbar belastend 😤"
+            mood = random.choice([
+                "Oida das ist voll corny heute, i han zu viel verloren. Ahnbar belastend 😤",
+                "Was ist das für 1 Tag bitte. Voll sus, der Markt macht mi irre 💀",
+                "Digga i bin ned fly heute. Das ist belastend, brauche 1 Pause vom Stress 😩",
+            ])
         else:
-            mood = "I bims, euer Trading-Boy. Markt ist gerade voll sus, wart ma ab 👀"
+            mood = random.choice([
+                "I bims, euer Trading-Boy. Markt ist gerade voll sus, wart ma ab 👀",
+                "Minus aber net viel, das ist noch ahnbar. Morgen wird's besser oida 🤞",
+                "Corny day aber i gib ned auf, vong Comeback her wird das noch was 💪",
+            ])
 
         # Risk-Status auf Moneyboy-Art
         risk_lines = {
-            'OK': "Risk-Status: ✅ Alles fly, kein Stress",
-            'CAUTION': "Risk-Status: ⚠️ Digga pass auf, wird corny",
-            'WARNING': "Risk-Status: 🟠 Oida das ist nicht ahnbar, Vorsicht!",
-            'CRITICAL': "Risk-Status: 🔴 BRO STOP! Das ist voll belastend, i bims am Aufhören!"
+            'OK': random.choice([
+                "Risk-Status: ✅ Alles fly, kein Stress",
+                "Risk-Status: ✅ I bims entspannt, läuft",
+                "Risk-Status: ✅ Gönn dir, alles unter Kontrolle",
+            ]),
+            'CAUTION': random.choice([
+                "Risk-Status: ⚠️ Digga pass auf, wird corny",
+                "Risk-Status: ⚠️ Oida wird sus, i schau genauer hin",
+                "Risk-Status: ⚠️ Net ganz fly, aber noch ahnbar",
+            ]),
+            'WARNING': random.choice([
+                "Risk-Status: 🟠 Oida das ist nicht ahnbar, Vorsicht!",
+                "Risk-Status: 🟠 Belastend wird's, digga setz die Bremse!",
+                "Risk-Status: 🟠 Was ist das für 1 Drawdown bitte 😤",
+            ]),
+            'CRITICAL': random.choice([
+                "Risk-Status: 🔴 BRO STOP! Das ist voll belastend, i bims am Aufhören!",
+                "Risk-Status: 🔴 I man echt, das ist 1 Katastrophe. Alles dicht machen!",
+                "Risk-Status: 🔴 Oida das ist nicht mehr fly. Emergency-Stop aktiviert 🚨",
+            ]),
         }.get(status, f"Risk-Status: {status}")
 
         # Positions-Block
@@ -437,7 +482,13 @@ class Reporter:
     async def setup_telegram(self, token: str, chat_id: str):
         """Initialisiert Telegram-Notifier und sendet Startnachricht"""
         self.telegram = TelegramNotifier(token=token, chat_id=chat_id)
-        ok = await self.telegram.send_message("🤖 <b>Halo, i bims! Euer Paper-Trading-Bot ist jetzt am Starten tun 🚀</b>\nI han die Märkte im Griff, gönn dir — vong Profit her! 💰")
+        startup_msg = random.choice([
+            "🤖 <b>Halo, i bims! Euer Paper-Trading-Bot ist jetzt am Starten tun 🚀</b>\nI han die Märkte im Griff, gönn dir — vong Profit her! 💰",
+            "🤖 <b>I bims wieder da, euer Trading-Boy!</b>\nDer Swag ist aktiviert, vong Gewinne her wird das heute was 🔥",
+            "🤖 <b>Servus! I bims am Starten!</b>\nMarkt wird gleich analysiert, fly bleiben oida — i meld mich bei jedem Trade 💸",
+            "🤖 <b>Was geht digga, i bin online!</b>\nBTC, ETH, SOL — i schau auf alles. Vong Profit her, gönn dir! 🚀",
+        ])
+        ok = await self.telegram.send_message(startup_msg)
         if ok:
             self.logger.info("Telegram-Verbindung erfolgreich")
         else:

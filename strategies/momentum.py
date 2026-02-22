@@ -48,8 +48,11 @@ class MomentumStrategy:
         self._last_atr: Dict[str, float] = {}
 
         # EMA-Cross Parameter
-        self.rsi_long_threshold = self.config.get('rsi_long_threshold', 40)
-        self.rsi_short_threshold = self.config.get('rsi_short_threshold', 60)
+        self.rsi_long_threshold = self.config.get('rsi_long_threshold', 55)
+        self.rsi_short_threshold = self.config.get('rsi_short_threshold', 45)
+
+        # Mindest-ATR: Nur traden wenn Markt genug Volatilität hat (0.3% des Preises)
+        self.min_atr_pct = self.config.get('min_atr_pct', 0.003)
 
         # Cooldown: 5 Minuten pro Symbol nach Signal
         self._signal_cooldowns: Dict[str, datetime] = {}
@@ -107,8 +110,8 @@ class MomentumStrategy:
         bearish_cross = not currently_bullish and was_bullish
         # EMA-Zustand-Signal: EMA klar getrennt (RSI-Filter kommt weiter unten)
         ema_spread = abs(ema_9 - ema_21) / ema_21 if ema_21 > 0 else 0
-        strong_bullish_state = currently_bullish and ema_spread > 0.001
-        strong_bearish_state = not currently_bullish and ema_spread > 0.001
+        strong_bullish_state = currently_bullish and ema_spread > 0.005
+        strong_bearish_state = not currently_bullish and ema_spread > 0.005
 
         # ATR berechnen für dynamische SL/TP
         atr = self._calculate_atr(candles, self.atr_period)
@@ -116,10 +119,18 @@ class MomentumStrategy:
         if use_atr:
             self._last_atr[symbol] = atr
 
+        # ATR-Mindestgröße: Nur traden wenn ATR > 0.3% des Preises
+        # Sonst ist der Markt zu ruhig und SL wird durch normales Rauschen getriggert
+        atr_pct = atr / current_price if (use_atr and current_price > 0) else 0
+        if atr_pct < self.min_atr_pct:
+            self.logger.debug(f"{symbol}: ATR zu klein ({atr_pct:.4%} < {self.min_atr_pct:.4%}), kein Trade")
+            return None
+
         signal = None
 
-        # LONG: EMA9 über EMA21 (Crossover ODER starker Zustand) + RSI nicht überkauft
-        if (bullish_cross or strong_bullish_state) and rsi < self.rsi_long_threshold:
+        # NUR LONG: Crossover bullish + RSI nicht überkauft + RSI zeigt Aufwärtsdynamik
+        # (kein EMA-State mehr — nur echte Crossover-Momente)
+        if bullish_cross and rsi < self.rsi_long_threshold and rsi > 35:
             confidence = self._calculate_confidence(rsi, ema_9, ema_21, 'long')
             if use_atr:
                 sl_price = current_price - (atr * self.sl_atr_multiplier)
@@ -127,21 +138,21 @@ class MomentumStrategy:
             else:
                 sl_price = current_price * (1 - self.stop_loss_pct)
                 tp_price = current_price * (1 + self.take_profit_pct)
-            reason = "Crossover" if bullish_cross else "EMA-Trend"
             signal = ScalperSignal(
                 signal_type=SignalType.LONG,
                 symbol=symbol,
                 price=current_price,
                 confidence=confidence,
-                reason=f"Momentum LONG ({reason}): EMA9>{ema_9:.1f} EMA21={ema_21:.1f}, RSI={rsi:.1f}",
+                reason=f"Momentum LONG (Crossover): EMA9>{ema_9:.1f} EMA21={ema_21:.1f}, RSI={rsi:.1f}, ATR={atr_pct:.3%}",
                 take_profit=tp_price,
                 stop_loss=sl_price,
                 suggested_leverage=self._calculate_leverage(confidence),
                 atr_value=atr if use_atr else 0.0
             )
 
-        # SHORT: EMA9 unter EMA21 (Crossover ODER starker Zustand) + RSI nicht überverkauft
-        elif (bearish_cross or strong_bearish_state) and rsi > self.rsi_short_threshold:
+        # SHORT: Nur wenn 1h Trend klar abwärts (wird im main.py Trend-Filter geprüft)
+        # + bearish Crossover + RSI nicht überverkauft
+        elif bearish_cross and rsi > self.rsi_short_threshold and rsi < 65:
             confidence = self._calculate_confidence(rsi, ema_9, ema_21, 'short')
             if use_atr:
                 sl_price = current_price + (atr * self.sl_atr_multiplier)
@@ -149,13 +160,12 @@ class MomentumStrategy:
             else:
                 sl_price = current_price * (1 + self.stop_loss_pct)
                 tp_price = current_price * (1 - self.take_profit_pct)
-            reason = "Crossover" if bearish_cross else "EMA-Trend"
             signal = ScalperSignal(
                 signal_type=SignalType.SHORT,
                 symbol=symbol,
                 price=current_price,
                 confidence=confidence,
-                reason=f"Momentum SHORT ({reason}): EMA9<{ema_9:.1f} EMA21={ema_21:.1f}, RSI={rsi:.1f}",
+                reason=f"Momentum SHORT (Crossover): EMA9<{ema_9:.1f} EMA21={ema_21:.1f}, RSI={rsi:.1f}, ATR={atr_pct:.3%}",
                 take_profit=tp_price,
                 stop_loss=sl_price,
                 suggested_leverage=self._calculate_leverage(confidence),
