@@ -567,12 +567,22 @@ class TradingBot:
 
 def main():
     """Haupteinstiegspunkt"""
-    # Signal-Handler für graceful shutdown
+    # PID-Lock: verhindert mehrfache Instanzen
+    import os
+    pid_file = Path('/tmp/trading-bot.pid')
+    if pid_file.exists():
+        old_pid = int(pid_file.read_text().strip())
+        if Path(f'/proc/{old_pid}').exists():
+            print(f"Bot läuft bereits (PID {old_pid}). Beende.")
+            sys.exit(0)
+    pid_file.write_text(str(os.getpid()))
+
     bot = TradingBot()
 
     def signal_handler(sig, frame):
         print("\nBeende Bot...")
         bot.running = False
+        pid_file.unlink(missing_ok=True)
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -585,6 +595,8 @@ def main():
     except Exception as e:
         print(f"Fataler Fehler: {e}")
         sys.exit(1)
+    finally:
+        pid_file.unlink(missing_ok=True)
 
 
 if __name__ == '__main__':
