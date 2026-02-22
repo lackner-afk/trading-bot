@@ -49,11 +49,14 @@ class TradingBot:
         self.start_time = None
 
     def _setup_logging(self):
-        """Konfiguriert Logging"""
+        """Konfiguriert Logging — schreibt in bot.log"""
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s [%(name)s] %(levelname)s: %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
+            datefmt='%Y-%m-%d %H:%M:%S',
+            handlers=[
+                logging.FileHandler('bot.log', encoding='utf-8'),
+            ]
         )
 
     def _load_config(self, config_path: str) -> Dict:

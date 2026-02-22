@@ -31,7 +31,7 @@ strategies:
     rsi_long_threshold: 55   # Long nur wenn RSI < 55 (nicht überkauft, aber mit Dynamik)
     rsi_short_threshold: 45  # Short nur wenn RSI > 45 (nicht überverkauft)
     atr_period: 14
-    min_atr_pct: 0.003       # Mindest-ATR: 0.3% des Preises — kein Trade in ruhigem Markt
+    min_atr_pct: 0.0003      # Mindest-ATR: 0.03% des Preises — nur extrem ruhige Märkte ausschließen
     sl_atr_multiplier: 2.0   # war 1.5 — SL weiter setzen
     tp_atr_multiplier: 4.0
     trailing_atr_multiplier: 1.2

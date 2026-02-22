@@ -119,11 +119,11 @@ class MomentumStrategy:
         if use_atr:
             self._last_atr[symbol] = atr
 
-        # ATR-Mindestgröße: Nur traden wenn ATR > 0.3% des Preises
+        # ATR-Mindestgröße: Nur traden wenn ATR > 0.1% des Preises
         # Sonst ist der Markt zu ruhig und SL wird durch normales Rauschen getriggert
         atr_pct = atr / current_price if (use_atr and current_price > 0) else 0
         if atr_pct < self.min_atr_pct:
-            self.logger.debug(f"{symbol}: ATR zu klein ({atr_pct:.4%} < {self.min_atr_pct:.4%}), kein Trade")
+            self.logger.info(f"{symbol}: ATR zu klein ({atr_pct:.4%} < {self.min_atr_pct:.4%}), kein Trade")
             return None
 
         signal = None
