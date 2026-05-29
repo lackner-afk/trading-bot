@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-Paper-Trading-Bot Haupt-Orchestrator
+Trading-Bot Haupt-Orchestrator
 Koordiniert Datenfeeds, Strategien und Execution
+
+Unterstützt zwei Modi:
+- Paper (Default): Simulierte Orders + Kraken oder OneTrading Feed
+- Live: Echte Orders auf One Trading via LiveOrderEngine + Reconciliation
 """
 
 import asyncio
@@ -19,7 +23,10 @@ from dotenv import load_dotenv
 from core.portfolio import Portfolio
 from core.risk_manager import RiskManager, RiskAction
 from core.order_engine import OrderEngine
+from core.live_order_engine import LiveOrderEngine
+from core.reconciliation import run_startup_reconciliation
 from data.kraken_feed import KrakenFeed
+from data.onetrading_ccxt_feed import OneTradingCCXTFeed
 from strategies.crypto_scalper import CryptoScalper, SignalType
 from strategies.momentum import MomentumStrategy
 from strategies.ml_predictor import MLPredictor
@@ -30,7 +37,11 @@ class TradingBot:
     """
     Haupt-Bot-Klasse
 
-    Orchestriert alle Komponenten im async Event-Loop
+    Orchestriert alle Komponenten im async Event-Loop.
+
+    Unterstützt Paper- und Live-Modus (gesteuert über config['general']['mode']).
+    Im Live-Modus werden echte Orders auf One Trading ausgeführt + Reconciliation
+    beim Start durchgeführt.
     """
 
     def __init__(self, config_path: str = 'config/settings.yaml'):
@@ -75,10 +86,11 @@ class TradingBot:
         return config
 
     def _default_config(self) -> Dict:
-        """Standard-Konfiguration"""
+        """Standard-Konfiguration — IMMER Paper-Modus als sichere Default"""
         return {
             'general': {
                 'mode': 'paper',
+                'live_explicit_confirmation': False,
                 'start_capital': 10000,
                 'base_currency': 'USDT'
             },
@@ -95,25 +107,59 @@ class TradingBot:
         }
 
     def _init_components(self):
-        """Initialisiert alle Bot-Komponenten"""
+        """Initialisiert alle Bot-Komponenten (Paper oder Live je nach Config)"""
         general = self.config.get('general', {})
         risk_config = self.config.get('risk', {})
         strategy_config = self.config.get('strategies', {})
+        fees_config = self.config.get('fees', {})
 
-        # Core
+        mode = general.get('mode', 'paper')
+        self.is_live = mode == 'live'
+
+        # Core (Portfolio + Risk immer gleich)
         self.portfolio = Portfolio(
             start_capital=general.get('start_capital', 10000)
         )
         self.risk_manager = RiskManager(config=risk_config)
-        self.order_engine = OrderEngine(config=self.config.get('fees', {}))
 
         # Trading-Pairs aus Momentum oder Scalper Config
         momentum_config = strategy_config.get('momentum', {})
         scalper_config = strategy_config.get('scalper', {})
         pairs = momentum_config.get('pairs', scalper_config.get('pairs', []))
 
-        # Kraken Daten-Feed (echte EUR-Pairs, kein API-Key nötig)
-        self.crypto_feed = KrakenFeed(config={'pairs': pairs})
+        if self.is_live:
+            # === LIVE MODE ===
+            import os
+            api_key = os.getenv('ONETRADING_API_KEY')
+            api_secret = os.getenv('ONETRADING_API_SECRET')
+
+            if not api_key or not api_secret:
+                raise RuntimeError(
+                    "LIVE MODE AKTIVIERT, aber ONETRADING_API_KEY / ONETRADING_API_SECRET fehlen in secrets.env!"
+                )
+
+            self.logger = logging.getLogger('TradingBot')  # re-fetch after possible config load
+            self.logger.critical("=== LIVE MODE INITIALISIERT ===")
+            self.logger.critical("Verwende OneTradingCCXTFeed + LiveOrderEngine")
+
+            # Echte Execution Engine
+            self.order_engine = LiveOrderEngine(
+                api_key=api_key,
+                api_secret=api_secret,
+                config=fees_config
+            )
+
+            # Echter One Trading Feed (mit Keys für Balance etc.)
+            self.crypto_feed = OneTradingCCXTFeed(
+                api_key=api_key,
+                api_secret=api_secret,
+                config={'pairs': pairs}
+            )
+        else:
+            # === PAPER MODE (Standard) ===
+            self.order_engine = OrderEngine(config=fees_config)
+            # Kraken als Default für Paper (gute EUR-Paare, kein Key nötig)
+            self.crypto_feed = KrakenFeed(config={'pairs': pairs})
 
         # Strategien
         self.momentum = MomentumStrategy(config=momentum_config)
@@ -123,10 +169,10 @@ class TradingBot:
         # Reporter
         self.reporter = Reporter(config=self.config.get('notifications', {}))
 
-        # Telegram-Config (Initialisierung in start(), da await nötig)
+        # Telegram-Config
         self._telegram_config = self.config.get('notifications', {}).get('telegram', {})
 
-        # Callbacks setzen
+        # Callback setzen (funktioniert für beide Engines)
         self.order_engine.on_fill = self._on_order_fill
 
     async def _on_order_fill(self, result):
@@ -138,9 +184,38 @@ class TradingBot:
         self.running = True
         self.start_time = datetime.now()
 
-        self.logger.info("=" * 60)
-        self.logger.info("Paper-Trading-Bot startet...")
-        self.logger.info("=" * 60)
+        mode = self.config.get('general', {}).get('mode', 'paper')
+        live_confirmed = self.config.get('general', {}).get('live_explicit_confirmation', False)
+
+        # ============================================================
+        # ⚠️  EXTREM LAUTE LIVE-MODE WARNUNG (Phase 0 Sicherheitsmaßnahme)
+        # ============================================================
+        if mode == 'live':
+            self.logger.critical("=" * 70)
+            self.logger.critical("!!! LIVE-MODUS AKTIVIERT !!!")
+            self.logger.critical("!!! ECHTES GELD WIRD VERWENDET !!!")
+            self.logger.critical("=" * 70)
+            self.logger.critical(f"Mode: {mode}")
+            self.logger.critical(f"live_explicit_confirmation: {live_confirmed}")
+            self.logger.critical("Starte in 10 Sekunden... (Ctrl+C zum Abbrechen)")
+            self.logger.critical("=" * 70)
+
+            # Harte Verzögerung + mehrfache Warnung
+            import time
+            for i in range(10, 0, -1):
+                self.logger.critical(f"  LIVE START IN {i} SEKUNDEN...")
+                time.sleep(1)
+
+            if not live_confirmed:
+                self.logger.critical("ABBRUCH: live_explicit_confirmation ist nicht true!")
+                self.logger.critical("Setze in settings.yaml general.live_explicit_confirmation: true")
+                raise RuntimeError("Live mode blocked: missing explicit confirmation flag")
+
+            self.logger.critical("!!! LETZTE WARNUNG: ECHTE ORDERS WERDEN JETZT PLATZIERT !!!")
+        else:
+            self.logger.info("=" * 60)
+            self.logger.info("Paper-Trading-Bot startet (Paper-Modus)")
+            self.logger.info("=" * 60)
 
         # Startup-Banner
         self.reporter.print_startup_banner(self.config)
@@ -148,6 +223,19 @@ class TradingBot:
         # Komponenten starten
         await self.crypto_feed.start()
         await self.reporter.start()
+
+        # === Reconciliation im Live-Modus (Phase 3/4) ===
+        if self.is_live:
+            self.logger.critical("Starte Reconciliation mit One Trading (Exchange als Source of Truth)...")
+            try:
+                report = await run_startup_reconciliation(self.portfolio, self.order_engine)
+                if not report.success:
+                    self.logger.critical("RECONCILIATION FEHLGESCHLAGEN — Live-Start wird aus Sicherheitsgründen abgebrochen!")
+                    raise RuntimeError("Reconciliation failed. Bot refuses to start in live mode.")
+                self.logger.critical("Reconciliation erfolgreich abgeschlossen.")
+            except Exception as recon_err:
+                self.logger.critical(f"Reconciliation Fehler: {recon_err}")
+                raise RuntimeError("Reconciliation error — aborting live start for safety") from recon_err
 
         # ML-Modelle initial trainieren
         if self.config.get('strategies', {}).get('ml', {}).get('enabled'):

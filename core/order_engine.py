@@ -49,6 +49,7 @@ class Order:
     fill_timestamp: datetime = None
     strategy: str = ""
     market_type: str = "crypto"
+    external_id: Optional[str] = None   # Real exchange order ID (for live mode)
 
     def __post_init__(self):
         if self.timestamp is None:

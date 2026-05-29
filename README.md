@@ -4,6 +4,8 @@ Async Python Paper-Trading-Bot für Crypto-Spot-Märkte auf [One Trading](https:
 
 **⚠️ ACHTUNG: Dies ist eine SIMULATION mit Fake-Money. Kein echtes Trading!**
 
+**→ Bevor du jemals echtes Geld einsetzt: Lies `LIVE_TRADING.md` (im Projekt-Root)!**
+
 ## Features
 
 - **Live-Datenfeed**: One Trading WebSocket (PRICE_TICKS) + REST API für Candlesticks
@@ -141,6 +143,39 @@ ssh root@<IP> 'bash -s' < deploy/setup-server.sh
 ssh deploy@<IP> 'journalctl -u trading-bot -f -q'
 ```
 
+**Live-Status Check (empfohlen):**
+```bash
+./deploy/status.sh <SERVER-IP>
+```
+
+Dieses Script (Phase 6) zeigt explizit, ob der Bot im **LIVE MODE** läuft, letzte Reconciliation-Ergebnisse und kritische Errors.
+
+**Vor dem ersten Live-Einsatz unbedingt ausführen:**
+```bash
+python tools/paper_to_live_checklist.py
+```
+Siehe auch `LIVE_TRADING.md` für die vollständige Cutover-Checklist.
+```
+
+## Bitpanda / Real Portfolio Oversight (Phase 6)
+
+Wenn du echtes Geld auf Bitpanda hast, nutze in dieser Grok-Session die integrierten `bitpanda-broker` MCP Tools für tägliche Checks:
+
+- `get_portfolio` → Dein reales Exposure in EUR
+- `list_trades` → Echte Trades abgleichen mit Bot-Logs
+- `list_wallets` / `list_transactions`
+
+Siehe [tools/bitpanda_mcp_oversight.md](tools/bitpanda_mcp_oversight.md) für den empfohlenen Workflow.
+
 ## Disclaimer
 
-Dieser Bot ist ausschließlich für Bildungszwecke und Paper-Trading gedacht. Crypto-Trading ist extrem riskant. Nutze niemals echtes Geld ohne umfassende Kenntnisse der Risiken.
+Dieser Bot ist **ausschließlich für Bildungszwecke und Paper-Trading** gedacht.
+
+**Live-Trading mit echtem Kapital ist extrem riskant** und kann zum vollständigen Verlust führen.
+
+Bevor du den Live-Modus aktivierst:
+- Lies und verstehe `LIVE_TRADING.md`
+- Setze mehrere explizite Sicherheits-Flags (siehe dort)
+- Teste gründlich im Shadow-Modus + mit sehr kleinem Kapital
+
+Crypto-Trading ist hochspekulativ. Nutze **niemals** Geld, dessen Verlust du dir nicht leisten kannst.

@@ -1,11 +1,28 @@
 # Paper-Trading-Bot Konfiguration
-# ACHTUNG: Niemals echtes Geld ohne explizite Bestätigung!
+# ============================================================
+# ⚠️  KRITISCHE SICHERHEITSWARNUNG
+# ============================================================
+# Der Bot ist STANDARDMÄSSIG IMMER im Paper-Modus.
+# Live-Trading mit echtem Geld ist EXTREM RISIKOREICH und kann
+# zum KOMPLETTEN VERLUST des eingesetzten Kapitals führen.
+#
+# Live-Modus darf NUR aktiviert werden, wenn:
+#   1. Du die Datei LIVE_TRADING.md vollständig gelesen und verstanden hast
+#   2. Du mehrere unabhängige Bestätigungsmechanismen bewusst umgehst
+#   3. Du bereit bist, echtes Geld zu verlieren
+#
+# Siehe: LIVE_TRADING.md (im Projekt-Root)
 
 general:
-  mode: paper  # paper | live (NIEMALS live ohne explizite Bestätigung)
+  mode: paper                    # paper | live  ← NIEMALS live ohne explizite Absicht!
+  live_explicit_confirmation: false   # Muss explizit auf true gesetzt werden für Live
   start_capital: 100
   base_currency: EUR
   log_level: INFO
+
+  # Zusätzliche Live-Guardrails (werden in späteren Phasen hart erzwungen)
+  # max_real_capital_exposure_eur: 500
+  # require_live_env_var: true
 
 exchanges:
   onetrading:

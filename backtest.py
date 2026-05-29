@@ -2,6 +2,9 @@
 """
 Standalone Backtest-Runner
 Testet alle Strategien auf historischen Daten
+
+Für Data Parity mit dem Live-Bot empfohlen:
+    python backtest.py --data-exchange onetrading
 """
 
 import asyncio
@@ -85,18 +88,35 @@ def breakout_strategy(df, idx):
     return None
 
 
-async def run_backtests():
-    """Führt alle Backtests durch"""
+async def run_backtests(data_exchange: str = 'binance'):
+    """
+    Führt Backtests durch.
+
+    data_exchange:
+        - 'binance' (Default, USDT) – schnell, aber andere Market-Microstructure
+        - 'kraken' (EUR) – näher am Live-Bot
+        - 'onetrading' (EUR) – **empfohlen** für Data Parity mit Live-Trading auf One Trading
+
+    Data Parity ist entscheidend für Profitabilität: Strategien sollen auf denselben
+    Märkten und mit ähnlicher Liquidität/Volatilität getestet werden wie im Live-Betrieb.
+    """
     print("\n" + "=" * 70)
-    print("PAPER-TRADING-BOT BACKTEST")
+    print(f"PAPER-TRADING-BOT BACKTEST  |  Data Source: {data_exchange.upper()}")
     print("=" * 70)
 
-    # Backtester initialisieren
-    backtester = Backtester(initial_capital=10000)
+    # Backtester mit gewünschter Datenquelle initialisieren (Phase 5)
+    backtester = Backtester(
+        initial_capital=10000,
+        config={'data_exchange': data_exchange}
+    )
 
-    # Historische Daten laden
-    symbols = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
-    print(f"\nLade historische Daten für: {', '.join(symbols)}...")
+    # Symbole je nach Exchange anpassen (EUR für Kraken/One Trading)
+    if data_exchange in ('kraken', 'onetrading'):
+        symbols = ['BTC/EUR', 'ETH/EUR', 'SOL/EUR']
+    else:
+        symbols = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
+
+    print(f"\nLade historische Daten für: {', '.join(symbols)} via {data_exchange}...")
 
     await backtester.load_data(symbols, days=90)
 
@@ -228,8 +248,15 @@ def run_grid_search():
 
 if __name__ == '__main__':
     import sys
+    import argparse
 
-    if len(sys.argv) > 1 and sys.argv[1] == '--grid':
+    parser = argparse.ArgumentParser(description='Trading Bot Backtester')
+    parser.add_argument('--grid', action='store_true', help='Run parameter grid search')
+    parser.add_argument('--data-exchange', default='binance', choices=['binance', 'kraken', 'onetrading'],
+                        help='Data source for backtest (for Data Parity with live bot)')
+    args = parser.parse_args()
+
+    if args.grid:
         run_grid_search()
     else:
-        asyncio.run(run_backtests())
+        asyncio.run(run_backtests(data_exchange=args.data_exchange))

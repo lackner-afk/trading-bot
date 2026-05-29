@@ -65,13 +65,14 @@ class BacktestTrade:
 class Backtester:
     """
     Historische Simulation für Trading-Strategien
-    Nutzt CoinGecko für Preisdaten
 
-    Realistische Limits:
-    - Max 3 gleichzeitige Positionen
-    - Max 10% des Kapitals pro Position
-    - Min 1000 USD Kapital für Trading
-    - Cooldown nach Trade auf gleichem Symbol
+    Unterstützt jetzt mehrere Exchanges für bessere Data Parity zum Live-Bot:
+    - 'binance' (Default, USDT-Paare)
+    - 'kraken' (EUR-Paare – näher am Live-Bot)
+    - 'onetrading' (EUR-Paare auf One Trading)
+
+    Dies ist ein zentraler Schritt für Profitabilität: Backtests sollen auf denselben
+    Märkten und mit ähnlicher Datenqualität laufen wie der Live-Bot.
     """
 
     def __init__(self, initial_capital: float = 10000.0, config: Dict = None):
@@ -79,45 +80,59 @@ class Backtester:
         self.config = config or {}
         self.logger = logging.getLogger('Backtester')
 
+        # Data source for parity with live trading (Phase 5)
+        self.data_exchange = self.config.get('data_exchange', 'binance')  # binance | kraken | onetrading
+
         # Fee-Struktur
         self.maker_fee = self.config.get('maker_fee', 0.0004)
         self.taker_fee = self.config.get('taker_fee', 0.0006)
 
         # Risk-Limits
         self.max_positions = self.config.get('max_positions', 3)
-        self.max_position_pct = self.config.get('max_position_pct', 0.10)  # 10% max pro Position
-        self.min_capital = self.config.get('min_capital', 1000)  # Min $1000 zum Traden
-        self.stop_loss_pct = self.config.get('stop_loss_pct', 0.008)  # 0.8% Stop-Loss
-        self.take_profit_pct = self.config.get('take_profit_pct', 0.015)  # 1.5% Take-Profit
-        self.cooldown_periods = self.config.get('cooldown_periods', 5)  # 5 Perioden Pause nach Trade
+        self.max_position_pct = self.config.get('max_position_pct', 0.10)
+        self.min_capital = self.config.get('min_capital', 1000)
+        self.stop_loss_pct = self.config.get('stop_loss_pct', 0.008)
+        self.take_profit_pct = self.config.get('take_profit_pct', 0.015)
+        self.cooldown_periods = self.config.get('cooldown_periods', 5)
 
         # Daten-Cache
         self.price_data: Dict[str, pd.DataFrame] = {}
 
     async def load_data(self, symbols: List[str], days: int = 90) -> Dict[str, pd.DataFrame]:
         """
-        Lädt historische OHLCV-Daten von Binance via CCXT
+        Lädt historische OHLCV-Daten via CCXT.
 
-        Args:
-            symbols: Liste von Trading-Pairs (z.B. ['BTC/USDT', 'ETH/USDT'])
-            days: Anzahl Tage historischer Daten
+        Unterstützt mehrere Exchanges für Data Parity mit dem Live-Bot (Phase 5):
+        - binance (USDT-Paare)
+        - kraken (EUR-Paare)
+        - onetrading (EUR-Paare – empfohlen für Live-ähnliche Backtests)
 
-        Returns:
-            Dict mit DataFrames pro Symbol
+        Wichtiger Profitabilitäts-Faktor: Backtests auf denselben Märkten wie Live-Trading laufen lassen.
         """
-        self.logger.info(f"Lade historische Daten für {len(symbols)} Coins über {days} Tage via Binance")
+        exchange_name = self.data_exchange
+        self.logger.info(f"Lade historische Daten für {len(symbols)} über {days} Tage via {exchange_name.upper()}")
 
         if ccxt_async is None:
             self.logger.error("ccxt nicht installiert - pip install ccxt")
             self.price_data = self._generate_simulated_data(symbols, days)
             return self.price_data
 
-        exchange = ccxt_async.binance({'enableRateLimit': True})
+        # Exchange-spezifische Initialisierung
+        if exchange_name == 'kraken':
+            exchange = ccxt_async.kraken({'enableRateLimit': True})
+            fetch_method = self._fetch_generic_ohlcv
+        elif exchange_name == 'onetrading':
+            exchange = ccxt_async.onetrading({'enableRateLimit': True})
+            fetch_method = self._fetch_generic_ohlcv
+        else:
+            # Default: binance
+            exchange = ccxt_async.binance({'enableRateLimit': True})
+            fetch_method = self._fetch_binance_ohlcv
 
         try:
             for symbol in symbols:
                 try:
-                    df = await self._fetch_binance_ohlcv(exchange, symbol, days)
+                    df = await fetch_method(exchange, symbol, days)
                     if df is not None and len(df) > 0:
                         df = self._calculate_indicators(df)
                         self.price_data[symbol] = df
@@ -125,13 +140,12 @@ class Backtester:
                         end_price = df['close'].iloc[-1]
                         change = (end_price - start_price) / start_price * 100
                         self.logger.info(f"{symbol}: {len(df)} Kerzen geladen | "
-                                        f"${start_price:.2f} → ${end_price:.2f} ({change:+.1f}%)")
+                                        f"{start_price:.2f} → {end_price:.2f} ({change:+.1f}%)")
                 except Exception as e:
-                    self.logger.error(f"Fehler beim Laden von {symbol}: {e}")
+                    self.logger.error(f"Fehler beim Laden von {symbol} via {exchange_name}: {e}")
         finally:
             await exchange.close()
 
-        # Fallback auf simulierte Daten wenn API nicht verfügbar
         if len(self.price_data) == 0:
             self.logger.warning("Keine API-Daten verfügbar - generiere simulierte Daten")
             self.price_data = self._generate_simulated_data(symbols, days)
@@ -172,6 +186,47 @@ class Backtester:
 
             except Exception as e:
                 self.logger.warning(f"Binance API-Fehler für {symbol}: {e}")
+                break
+
+        if not all_candles:
+            return None
+
+        df = pd.DataFrame(all_candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df = df.drop_duplicates(subset='timestamp').sort_values('timestamp').reset_index(drop=True)
+
+        return df
+
+    async def _fetch_generic_ohlcv(self, exchange, symbol: str, days: int) -> Optional[pd.DataFrame]:
+        """
+        Generischer OHLCV Fetcher für Kraken, One Trading und andere CCXT Exchanges.
+        Wird für EUR-Paare im Live-Bot verwendet (Data Parity).
+        """
+        since = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
+        timeframe = '1h'
+        all_candles = []
+
+        while True:
+            try:
+                candles = await exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=1000)
+
+                if not candles:
+                    break
+
+                all_candles.extend(candles)
+
+                last_ts = candles[-1][0]
+                if last_ts == since:
+                    break
+                since = last_ts + 1
+
+                await asyncio.sleep(0.1)
+
+                if len(candles) < 1000:
+                    break
+
+            except Exception as e:
+                self.logger.warning(f"{exchange.id} API-Fehler für {symbol}: {e}")
                 break
 
         if not all_candles:

@@ -36,7 +36,7 @@ mkdir -p /home/botuser/logs
 echo "[5/5] Systemd Service erstellen..."
 cat > /etc/systemd/system/trading-bot.service << 'EOF'
 [Unit]
-Description=Paper-Trading-Bot (Momentum)
+Description=Trading-Bot (One Trading / Bitpanda) - Paper + Live Mode supported
 After=network.target
 
 [Service]
@@ -55,6 +55,8 @@ StartLimitBurst=5
 
 # Environment
 Environment=PYTHONUNBUFFERED=1
+# Für Live-Modus: Hier kannst du LIVE_TRADING_ENABLED=1 setzen (aber NUR nach mehrfacher Bestätigung!)
+# Environment=LIVE_TRADING_ENABLED=1
 
 [Install]
 WantedBy=multi-user.target

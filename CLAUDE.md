@@ -34,11 +34,13 @@ This is an async Python paper-trading bot for crypto spot markets on One Trading
 
 | Module | Purpose |
 |--------|---------|
-| `core/portfolio.py` | Fake portfolio with SQLite persistence |
+| `core/portfolio.py` | Portfolio with SQLite persistence (works for both paper & live) |
 | `core/risk_manager.py` | Kelly criterion, stop-loss, drawdown limits |
-| `core/order_engine.py` | Simulated market/limit orders with slippage |
-| `data/onetrading_feed.py` | One Trading WebSocket (PRICE_TICKS) + REST candlesticks |
-| `data/crypto_feed.py` | Shared dataclasses (CandleData, MarketData) + CCXT fallback |
+| `core/order_engine.py` | Paper trading execution |
+| `core/live_order_engine.py` | Real One Trading execution via CCXT (with Shadow Mode) |
+| `core/reconciliation.py` | Startup sync between local state and exchange (critical for live) |
+| `data/onetrading_ccxt_feed.py` | Recommended live data feed (CCXT onetrading) |
+| `data/kraken_feed.py` | Good public EUR feed for paper mode |
 | `strategies/momentum.py` | EMA 9/21 crossover with RSI filter |
 | `strategies/crypto_scalper.py` | RSI+BB+Volume mean-reversion and breakout |
 | `strategies/ml_predictor.py` | Gradient Boosting price direction prediction |
@@ -70,6 +72,8 @@ This is an async Python paper-trading bot for crypto spot markets on One Trading
 ## Configuration
 
 All settings in `config/settings.yaml`. Environment variables for secrets in `config/secrets.env`.
+
+**Live Mode** is heavily guarded (see `LIVE_TRADING.md` and `tools/paper_to_live_checklist.py`). The bot supports both Paper and Live mode with proper branching in `main.py`.
 
 ## Testing Strategies
 
