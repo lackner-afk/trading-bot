@@ -35,7 +35,7 @@ class AssetSelector:
             "BTC_EUR", "ETH_EUR", "SOL_EUR", "XRP_EUR", "BNB_EUR"
         ])
 
-        self.min_liquidity_score = self.config.get("min_liquidity_score", 0.6)
+        self.min_liquidity_score = self.config.get("min_liquidity_score", 0.4)  # lowered in aggressive test mode
 
     def select_assets(self, regime: str, candles_dict: Dict[str, pd.DataFrame],
                       max_assets: int = 5) -> List[AssetCandidate]:
@@ -57,8 +57,9 @@ class AssetSelector:
             volatility = returns.tail(30).std()
 
             # Volatility scoring: sweet spot for momentum (not too low, not insane)
+            # Aggressive test mode (A): be much more permissive in low_vol_chop
             if volatility < 0.008:
-                vol_score = 0.3
+                vol_score = 0.65   # was 0.3 - allow trading in quiet markets
             elif volatility > 0.06:
                 vol_score = 0.5
             else:

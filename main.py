@@ -468,14 +468,36 @@ class TradingBot:
                     if candles is not None:
                         all_candles[symbol] = candles
 
+                input_count = len(all_candles)
                 universe = self.confluence_strategy.get_recommended_assets(all_candles)
+                selected_symbols = universe.get("symbols", [])
+                selected_count = len(selected_symbols)
+
+                # Permanent health / starvation logging (critical for debugging)
+                if selected_count == 0:
+                    self.logger.warning(
+                        f"[CONFLUENCE HEALTH] Starvation! Input candidates: {input_count}, "
+                        f"selected after AssetSelector: {selected_count}. "
+                        f"Regime likely too hostile or selector too strict."
+                    )
+                else:
+                    self.logger.info(
+                        f"[CONFLUENCE HEALTH] Input candidates: {input_count} → selected: {selected_count}"
+                    )
+
+                # Temporary starvation fallback (aggressive test mode)
+                if selected_count == 0 and input_count > 0:
+                    self.logger.warning("[CONFLUENCE HEALTH] Activating starvation fallback - analyzing raw input list")
+                    symbols_to_analyze = list(all_candles.keys())
+                else:
+                    symbols_to_analyze = selected_symbols
 
                 analyzed = 0
                 best_score = 0.0
                 best_symbol = None
                 regime_name = None
 
-                for symbol in universe.get("symbols", []):
+                for symbol in symbols_to_analyze:
                     candles = self.crypto_feed.get_candles(symbol, '5m', n=80)
                     price = self.crypto_feed.get_price(symbol)
 
