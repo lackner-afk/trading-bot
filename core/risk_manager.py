@@ -61,9 +61,12 @@ class RiskManager:
         )
         self.cooldown_seconds = self.config.get('cooldown_seconds', self.COOLDOWN_DURATION)
 
+        # Phase 5: More frequent trading support
+        self.max_concurrent_positions = self.config.get('max_concurrent_positions', self.MAX_CONCURRENT_POSITIONS)
+
         # State
         self.cooldown_until: Optional[datetime] = None
-        self._cooldown_triggered_at_losses: int = 0  # Verlustanzahl beim letzten Cooldown-Trigger
+        self._cooldown_triggered_at_losses: int = 0
         self.warnings: list = []
 
     def size_from_risk(self, equity: float, sl_distance_pct: float) -> float:
@@ -85,7 +88,11 @@ class RiskManager:
     def check_trade(self, portfolio_equity: float, position_size: float,
                    leverage: float, current_positions: int,
                    consecutive_losses: int, daily_drawdown: float,
-                   sl_distance_pct: float = None) -> RiskCheck:
+                   sl_distance_pct: float = None,
+                   regime: str = None,
+                   macro_risk_multiplier: float = 1.0,
+                   asset_beta_group: str = None,
+                   current_beta_exposure: float = 0.0) -> RiskCheck:
         """
         Prüft ob ein Trade den Risiko-Regeln entspricht
 
@@ -178,7 +185,7 @@ class RiskManager:
             )
 
         # 9. Dynamische Größenreduktion bei Drawdown
-        if daily_drawdown > 0.03:  # Bei >3% Drawdown
+        if daily_drawdown > 0.03:
             reduction_factor = 1.0 - (daily_drawdown / self.max_daily_drawdown)
             adjusted_size = position_size * reduction_factor
             if adjusted_size < position_size:
@@ -187,6 +194,39 @@ class RiskManager:
                     reason=f"Größe reduziert wegen Drawdown ({daily_drawdown:.1%})",
                     suggested_size=adjusted_size
                 )
+
+        # === Phase 5: Regime + Macro Risk Awareness ===
+        effective_size = position_size
+
+        # Macro event risk reduction
+        if macro_risk_multiplier < 1.0:
+            effective_size *= macro_risk_multiplier
+            if effective_size < position_size * 0.95:
+                return RiskCheck(
+                    action=RiskAction.REDUCE_SIZE,
+                    reason=f"Position size reduced due to macro event risk (multiplier {macro_risk_multiplier:.2f})",
+                    suggested_size=effective_size
+                )
+
+        # Dynamic max positions based on regime
+        effective_max_pos = self.max_concurrent_positions
+        if regime in ["high_vol_event", "low_vol_chop", "event_driven"]:
+            effective_max_pos = max(2, int(self.max_concurrent_positions * 0.65))
+
+        if current_positions >= effective_max_pos:
+            return RiskCheck(
+                action=RiskAction.BLOCK,
+                reason=f"Max positions for current regime reached ({current_positions}/{effective_max_pos})"
+            )
+
+        # Basic beta / correlation control (high-beta alts)
+        if asset_beta_group in ["high_beta_alt", "meme"] and current_beta_exposure > 0.55:
+            effective_size *= 0.65
+            return RiskCheck(
+                action=RiskAction.REDUCE_SIZE,
+                reason=f"Reduced size due to high beta exposure in group '{asset_beta_group}'",
+                suggested_size=effective_size
+            )
 
         return RiskCheck(action=RiskAction.ALLOW, reason="Trade erlaubt")
 

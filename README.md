@@ -97,6 +97,12 @@ API Key ist für öffentliche Marktdaten **nicht erforderlich**.
 - Retrain alle 6 Stunden
 - Gibt Signale aus, führt selbst keine Trades aus
 
+**Neues Multi-Factor Confluence System (Phase 1–6 Überarbeitung)**:
+- 5+ Faktoren (Trend, Momentum, Breakout, Volume, Volatility, Sentiment/Fear&Greed, Macro/News)
+- Regime Detection (trending / ranging / high_vol_event / low_vol_chop / event_driven)
+- Adaptive Faktor-Gewichtung je Regime
+- **Phase 6 Monitoring**: Detaillierte Factor-Attribution in Logs + Console + Telegram, Regime-Change-Alerts, Macro-Event-Alerts, täglicher Attribution-Report
+
 ## Risk-Management
 
 Harte Limits (nicht überschreibbar):

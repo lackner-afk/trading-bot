@@ -17,6 +17,7 @@ Der Bot hat jetzt eine **komplette, sichere Live-Architektur**:
 - ✅ Sauberes Live-Mode Wiring in main.py mit starken Guardrails (Phase 4)
 - ✅ Data Parity + Execution Quality Logging (Phase 5)
 - ✅ Verbesserte Deploy & Status-Tools + MCP Oversight (Phase 6)
+- ✅ **Faktor-Attribution & Monitoring** (Logs, Rich-Console-Tabellen, Telegram "Warum dieser Trade?", Regime-Change-Alerts, Macro-Event-Alerts, täglicher Factor-Performance-Report)
 - ✅ Vollständige Dokumentation & Cutover-Checklist (Phase 7)
 
 Trotzdem gilt weiterhin: **Krypto-Trading mit Hebel ist extrem riskant.** Es gibt keine Garantie auf Gewinne.

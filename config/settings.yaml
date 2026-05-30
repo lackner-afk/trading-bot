@@ -75,6 +75,19 @@ strategies:
     retrain_hours: 6
     min_confidence: 0.65
 
+  # ============================================================
+  # CONFLUENCE (Phase 1-6 neues Multi-Factor System) — aktiviert
+  # ============================================================
+  confluence:
+    enabled: true
+    interval_seconds: 45
+    min_confluence_score: 5.8
+    base_leverage: 8
+    factor_weights:
+      technical: 0.58
+      sentiment: 0.25
+      macro_news: 0.17
+
 risk:
   max_risk_per_trade: 0.02      # 2% des Portfolios
   max_daily_drawdown: 0.10       # 10% → Pause bis nächster Tag
@@ -100,3 +113,14 @@ notifications:
     chat_id: ${TELEGRAM_CHAT_ID}
     send_trade_alerts: true
     send_hourly_report: true
+
+# ============================================================
+# PHASE 6: MONITORING & ATTRIBUTION (wird in Code gelesen)
+# ============================================================
+monitoring:
+  phase6:
+    factor_breakdown_logging: true
+    regime_change_alerts: true
+    macro_event_alerts: true
+    send_confluence_decisions: true
+    daily_attribution_report: true

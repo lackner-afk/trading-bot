@@ -14,7 +14,7 @@ import logging
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
 import yaml
 from dotenv import load_dotenv
@@ -30,6 +30,7 @@ from data.onetrading_ccxt_feed import OneTradingCCXTFeed
 from strategies.crypto_scalper import CryptoScalper, SignalType
 from strategies.momentum import MomentumStrategy
 from strategies.ml_predictor import MLPredictor
+from strategies.confluence_strategy import ConfluenceStrategy  # New 2026 multi-factor system
 from notifications.reporter import Reporter
 
 
@@ -166,6 +167,31 @@ class TradingBot:
         self.scalper = CryptoScalper(config=scalper_config)
         self.ml_predictor = MLPredictor(config=strategy_config.get('ml', {}))
 
+        # New Multi-Factor Confluence Strategy (2026 overhaul)
+        self.use_confluence_strategy = self.config.get('strategies', {}).get('confluence', {}).get('enabled', False)
+        if self.use_confluence_strategy:
+            self.confluence_strategy = ConfluenceStrategy.create_default(
+                self.config.get('strategies', {}).get('confluence', {})
+            )
+            self.logger.info("ConfluenceStrategy (neues Multi-Factor System) aktiviert")
+        else:
+            self.confluence_strategy = None
+
+        # Phase 6: Regime tracking for change alerting
+        self._last_regime_name: Optional[str] = None
+        self._last_regime_confidence: float = 0.0
+
+        # Phase 6: Macro event window tracking (for alerting)
+        self._was_in_macro_event: bool = False
+        self._last_macro_event_name: Optional[str] = None
+
+        # Phase 6: Lightweight Factor Performance Attribution (wins/losses per factor)
+        # Updated when confluence trades are closed
+        self.factor_attribution: Dict[str, Dict[str, float]] = {}  # factor_name -> {"wins": , "losses": , "pnl": }
+
+        # Phase 6: Cache last confluence factor breakdown per symbol (for later attribution on close)
+        self._last_confluence_breakdowns: Dict[str, dict] = {}
+
         # Reporter
         self.reporter = Reporter(config=self.config.get('notifications', {}))
 
@@ -260,6 +286,10 @@ class TradingBot:
             asyncio.create_task(self._reporting_loop()),
             asyncio.create_task(self._telegram_hourly_loop()),
         ]
+
+        # Neue Confluence Strategy Loop (wenn aktiviert)
+        if self.use_confluence_strategy:
+            tasks.append(asyncio.create_task(self._confluence_loop()))
 
         # Warte auf Beendigung
         try:
@@ -415,6 +445,97 @@ class TradingBot:
                 self.logger.error(f"Fehler im ML-Loop: {e}")
                 await asyncio.sleep(60)
 
+    async def _confluence_loop(self):
+        """Neue Multi-Factor Confluence Strategie Loop (Phase 1+ der Überarbeitung)"""
+        if not self.use_confluence_strategy or self.confluence_strategy is None:
+            return
+
+        self.logger.info("ConfluenceStrategy-Loop gestartet (neues Multi-Factor System)")
+
+        interval = self.config.get('strategies', {}).get('confluence', {}).get('interval_seconds', 45)
+
+        while self.running:
+            try:
+                # Phase 6: Macro Event Alerting (prüft auf CPI/FOMC/etc. Fenster)
+                self._check_macro_event_alert()
+
+                # Hole aktuelle empfohlene Assets vom UniverseManager
+                all_candles = {}
+                for symbol in self.momentum.pairs:  # vorerst noch die alten Pairs als Basis
+                    candles = self.crypto_feed.get_candles(symbol, '5m', n=80)
+                    if candles is not None:
+                        all_candles[symbol] = candles
+
+                universe = self.confluence_strategy.get_recommended_assets(all_candles)
+
+                for symbol in universe.get("symbols", []):
+                    candles = self.crypto_feed.get_candles(symbol, '5m', n=80)
+                    price = self.crypto_feed.get_price(symbol)
+
+                    if candles is None or price is None:
+                        continue
+
+                    signal = self.confluence_strategy.analyze_legacy(symbol, candles, price)
+
+                    if signal and signal.confidence >= 0.55:
+                        # Phase 6: Rich factor attribution logging + console
+                        regime_name = None
+                        cd = getattr(signal, '_confluence_data', None) or {}
+                        regime_obj = cd.get('regime')
+                        if regime_obj and hasattr(regime_obj, 'name'):
+                            regime_name = regime_obj.name
+
+                        self.logger.info(
+                            f"[CONFLUENCE] {signal.signal_type.value.upper()} {symbol} @ {price:.2f} "
+                            f"(Conf: {signal.confidence:.0%} | Score: {cd.get('confluence_score', 0):.2f}) | "
+                            f"Regime: {regime_name or 'unknown'} | {signal.reason}"
+                        )
+
+                        # Detailed per-factor breakdown into the log file (very valuable for debugging)
+                        breakdown = cd.get('factor_breakdown', {}) if cd else {}
+                        if breakdown:
+                            factor_lines = []
+                            for fname, fres in sorted(breakdown.items(), key=lambda x: getattr(x[1], 'score', 0), reverse=True):
+                                fscore = getattr(fres, 'score', 0)
+                                fdir = getattr(fres, 'direction', None) or "-"
+                                freason = getattr(fres, 'reason', '')
+                                factor_lines.append(f"    • {fname}: score={fscore:.2f} dir={fdir} | {freason}")
+                            if factor_lines:
+                                self.logger.info("[CONFLUENCE FACTORS]\n" + "\n".join(factor_lines))
+
+                        # Beautiful console table (Phase 6)
+                        self.reporter.print_factor_breakdown(signal, regime=regime_name)
+
+                        # Phase 6: Regime Change Alerting (CRITICAL for high-risk regimes)
+                        if regime_name:
+                            self._check_and_alert_regime_change(regime_name, getattr(regime_obj, 'confidence', 0.0) if regime_obj else 0.0)
+
+                        # Phase 6: Optional Telegram "Why did I take this trade?" message
+                        # (only if confluence is the source and telegram is configured)
+                        if self.reporter.telegram:
+                            breakdown = cd.get('factor_breakdown', {}) if cd else {}
+                            top_factor_names = [
+                                name.replace("_", " ").title()
+                                for name, _ in sorted(breakdown.items(), key=lambda x: getattr(x[1], 'score', 0), reverse=True)[:3]
+                            ]
+                            asyncio.create_task(
+                                self.reporter.send_confluence_signal_decision(
+                                    signal, regime=regime_name, top_factors=top_factor_names
+                                )
+                            )
+
+                        # Phase 6: Remember breakdown for attribution when this trade eventually closes
+                        if breakdown:
+                            self._last_confluence_breakdowns[signal.symbol] = breakdown
+
+                        await self._execute_confluence_signal(signal)
+
+                await asyncio.sleep(interval)
+
+            except Exception as e:
+                self.logger.error(f"Fehler im Confluence-Loop: {e}")
+                await asyncio.sleep(30)
+
     async def _risk_check_loop(self):
         """Risk-Check Loop (alle 5 Minuten)"""
         self.logger.info("Risk-Check-Loop gestartet")
@@ -473,6 +594,11 @@ class TradingBot:
                         self.portfolio,
                         self._get_strategy_stats()
                     )
+                    # Phase 6: Factor Attribution Summary (wenn Confluence aktiv war)
+                    if self.use_confluence_strategy and self.factor_attribution:
+                        attr_text = self.get_factor_attribution_summary()
+                        self.reporter.console.print("\n[bold cyan]Phase 6 Attribution[/bold cyan]")
+                        self.reporter.console.print(attr_text)
 
                 await asyncio.sleep(3600)  # 1 Stunde
 
@@ -480,7 +606,8 @@ class TradingBot:
                 self.logger.error(f"Fehler im Reporting: {e}")
                 await asyncio.sleep(60)
 
-    async def _execute_signal(self, signal, strategy_name: str = 'momentum'):
+    async def _execute_signal(self, signal, strategy_name: str = 'momentum',
+                             regime: str = None, macro_risk_multiplier: float = 1.0):
         """Führt Trading-Signal aus (Momentum oder Scalper)"""
         # Prüfe ob bereits Position für dieses Symbol existiert
         if signal.symbol in self.portfolio.positions:
@@ -500,7 +627,7 @@ class TradingBot:
         if signal.price > 0 and signal.stop_loss > 0:
             sl_distance_pct = abs(signal.price - signal.stop_loss) / signal.price
 
-        # Risk-Check
+        # Risk-Check (Phase 5: regime + macro aware)
         risk_check = self.risk_manager.check_trade(
             portfolio_equity=state.equity,
             position_size=state.equity * 0.1,
@@ -508,7 +635,9 @@ class TradingBot:
             current_positions=len(state.positions),
             consecutive_losses=self.portfolio.consecutive_losses,
             daily_drawdown=self.portfolio.get_daily_drawdown(),
-            sl_distance_pct=sl_distance_pct if sl_distance_pct > 0 else None
+            sl_distance_pct=sl_distance_pct if sl_distance_pct > 0 else None,
+            regime=regime,
+            macro_risk_multiplier=macro_risk_multiplier
         )
 
         if risk_check.action == RiskAction.BLOCK:
@@ -551,6 +680,7 @@ class TradingBot:
                 price=result.execution_price,
                 leverage=signal.suggested_leverage,
                 strategy=strategy_name,
+                market_type=strategy_name,
                 stop_loss=signal.stop_loss,
                 take_profit=signal.take_profit
             )
@@ -560,6 +690,190 @@ class TradingBot:
                 f"@ ${result.execution_price:.4f} (Conf: {signal.confidence:.0%})"
             )
 
+    async def _execute_confluence_signal(self, signal):
+        """
+        Führt ein Signal der neuen ConfluenceStrategy (Multi-Factor System) aus.
+        Berücksichtigt Regime + Macro-Risk für besseres Risikomanagement bei häufigerem Traden (Phase 5).
+        """
+        regime = None
+        macro_multiplier = 1.0
+
+        if self.confluence_strategy is not None:
+            last_regime = getattr(self.confluence_strategy, '_last_regime', None)
+            if last_regime:
+                regime = last_regime.name
+
+            macro_filter = next(
+                (f for f in self.confluence_strategy.factors if f.name == "macro_news_filter"),
+                None
+            )
+            if macro_filter:
+                macro_multiplier = macro_filter.get_risk_multiplier()
+
+        await self._execute_signal(
+            signal,
+            strategy_name='confluence',
+            regime=regime,
+            macro_risk_multiplier=macro_multiplier
+        )
+
+    def _check_and_alert_regime_change(self, new_regime: str, confidence: float = 0.0):
+        """
+        Phase 6: Überwacht Regime-Wechsel und sendet Alerts bei kritischen Übergängen.
+
+        Besonders wichtig:
+        - Wechsel in high_vol_event oder event_driven → stark reduzierte Positionen + Aufmerksamkeit
+        - Wechsel aus low_vol_chop → potenziell gute Trading-Gelegenheiten
+        """
+        old_regime = self._last_regime_name
+
+        if old_regime == new_regime:
+            return  # kein Wechsel
+
+        # Update State
+        self._last_regime_name = new_regime
+        self._last_regime_confidence = confidence
+
+        if old_regime is None:
+            # Erster Durchlauf
+            self.logger.info(f"[REGIME] Initiales Regime erkannt: {new_regime} (conf={confidence:.0%})")
+            return
+
+        # Log immer
+        self.logger.warning(f"[REGIME CHANGE] {old_regime} → {new_regime} (conf={confidence:.0%})")
+
+        # Kritische Regime, bei denen wir laut Alarm schlagen müssen
+        critical_regimes = {"high_vol_event", "event_driven"}
+
+        is_critical = new_regime in critical_regimes
+        was_critical = old_regime in critical_regimes
+
+        if is_critical or was_critical or new_regime == "low_vol_chop":
+            # Baue Alert-Nachricht
+            emoji = "🔴" if is_critical else ("🟠" if new_regime == "low_vol_chop" else "🟡")
+            direction = "BETRETEN" if is_critical else "VERLASSEN"
+
+            msg = (
+                f"{emoji} <b>REGIME WECHSEL</b>\n"
+                f"{old_regime} → <b>{new_regime}</b> (Conf {confidence:.0%})\n\n"
+            )
+
+            if new_regime == "high_vol_event":
+                msg += "⚠️ Hohe Volatilität / Event-Modus! Position Sizes stark reduziert. Sehr vorsichtig traden!"
+            elif new_regime == "event_driven":
+                msg += "📰 Makro-Event-Fenster (CPI/FOMC/etc.). Risk-Multiplier aktiv. Weniger Exposure!"
+            elif new_regime == "low_vol_chop":
+                msg += "😴 Sehr ruhiger Markt (Low-Vol Chop). Weniger Signale erwartet. Besser abwarten."
+            elif was_critical and new_regime == "trending":
+                msg += "✅ Aus kritischem Regime raus in sauberen Trend. Gute Bedingungen möglich."
+            else:
+                msg += f"Regime-Shift: {old_regime} → {new_regime}. Faktor-Gewichtungen werden automatisch angepasst."
+
+            # Console
+            self.reporter.print_warning(f"REGIME CHANGE: {old_regime} → {new_regime}")
+
+            # Telegram (sofort, nicht rate-limited — das ist wichtig)
+            if self.reporter.telegram:
+                asyncio.create_task(self.reporter.telegram.send_message(msg))
+
+    def _check_macro_event_alert(self):
+        """
+        Phase 6: Prüft ob wir in ein Macro-Event-Fenster (CPI, FOMC, NFP...) reingegangen sind
+        oder es verlassen haben und sendet entsprechende Alerts.
+        """
+        if not self.confluence_strategy:
+            return
+
+        macro_filter = next(
+            (f for f in self.confluence_strategy.factors if f.name == "macro_news_filter"),
+            None
+        )
+        if not macro_filter:
+            return
+
+        active_event = None
+        try:
+            active_event = macro_filter.calendar.is_in_event_window(
+                hours_before=getattr(macro_filter, 'hours_before', 4),
+                hours_after=getattr(macro_filter, 'hours_after', 2)
+            )
+        except Exception:
+            return
+
+        currently_in = active_event is not None
+        event_name = active_event.name if active_event else None
+
+        # State-Change Detection
+        if currently_in and not self._was_in_macro_event:
+            # Neu reingegangen
+            self._was_in_macro_event = True
+            self._last_macro_event_name = event_name
+            self.logger.warning(f"[MACRO EVENT] Betreten: {event_name or 'unbekanntes High-Impact Event'}")
+
+            msg = (
+                f"📰 <b>MACRO EVENT WINDOW AKTIV</b>\n"
+                f"<b>{event_name or 'High-Impact Event'}</b>\n\n"
+                f"Der Bot hat das Risiko automatisch reduziert (Risk-Multiplier aktiv).\n"
+                f"Erwarte deutlich weniger oder kleinere Positionen in den nächsten Stunden."
+            )
+            self.reporter.print_warning(f"MACRO EVENT: {event_name}")
+            if self.reporter.telegram:
+                asyncio.create_task(self.reporter.telegram.send_message(msg))
+
+        elif not currently_in and self._was_in_macro_event:
+            # Rausgegangen
+            self._was_in_macro_event = False
+            last = self._last_macro_event_name or "Macro Event"
+            self._last_macro_event_name = None
+            self.logger.info(f"[MACRO EVENT] Verlassen: {last}")
+
+            msg = (
+                f"✅ <b>MACRO EVENT VORBEI</b>\n"
+                f"{last} Fenster geschlossen.\n\n"
+                f"Risk-Multiplier zurück auf normal. Volles Exposure wieder möglich."
+            )
+            self.reporter.print_info(f"Macro Event vorbei: {last}")
+            if self.reporter.telegram:
+                asyncio.create_task(self.reporter.telegram.send_message(msg))
+
+    def _update_factor_attribution(self, trade, factor_breakdown: Dict):
+        """Phase 6: Aktualisiert die per-Factor Win/Loss/PnL Statistik."""
+        is_win = trade.pnl > 0
+        pnl = trade.pnl
+
+        for fname, fres in factor_breakdown.items():
+            if fname not in self.factor_attribution:
+                self.factor_attribution[fname] = {"wins": 0, "losses": 0, "pnl": 0.0, "trades": 0}
+
+            stats = self.factor_attribution[fname]
+            stats["trades"] += 1
+            stats["pnl"] += pnl
+            if is_win:
+                stats["wins"] += 1
+            else:
+                stats["losses"] += 1
+
+        self.logger.info(f"[ATTRIBUTION] Trade {trade.symbol} {'WIN' if is_win else 'LOSS'} {pnl:+.2f}€ → {len(factor_breakdown)} Faktoren aktualisiert")
+
+    def get_factor_attribution_summary(self) -> str:
+        """Phase 6: Gibt eine kurze Text-Zusammenfassung der Factor-Performance zurück."""
+        if not self.factor_attribution:
+            return "Noch keine Attribution-Daten (warte auf geschlossene Confluence-Trades)."
+
+        lines = ["FACTOR ATTRIBUTION (Confluence):"]
+        # Sortiere nach PnL absteigend
+        sorted_factors = sorted(
+            self.factor_attribution.items(),
+            key=lambda x: x[1]["pnl"],
+            reverse=True
+        )
+        for name, stats in sorted_factors[:6]:  # Top 6
+            wr = stats["wins"] / (stats["wins"] + stats["losses"]) if (stats["wins"] + stats["losses"]) > 0 else 0
+            lines.append(
+                f"  {name}: {stats['trades']} trades | WR {wr:.0%} | PnL {stats['pnl']:+.2f}€"
+            )
+        return "\n".join(lines)
+
     async def _check_exit_conditions(self, prices: Dict[str, float]):
         """Prüft Exit-Bedingungen für alle Positionen"""
         for symbol, position in list(self.portfolio.positions.items()):
@@ -568,8 +882,12 @@ class TradingBot:
 
             current_price = prices[symbol]
 
-            # Richtige Strategie für Exit-Check wählen
+            # Richtige Strategie für Exit-Check wählen (Phase 5)
             if position.market_type == 'momentum':
+                strategy = self.momentum
+            elif position.market_type == 'confluence':
+                # Für Confluence-Positionen nutzen wir die Momentum-Exit-Logik als Fallback.
+                # Langfristig sollte hier eine dedizierte Exit-Logik der ConfluenceStrategy kommen.
                 strategy = self.momentum
             else:
                 strategy = self.scalper
@@ -605,6 +923,12 @@ class TradingBot:
         if trade:
             self.reporter.print_trade_executed(trade)
             await self.reporter.send_trade_alert(trade)
+
+            # Phase 6: Factor Attribution Update (wenn der Trade aus dem Confluence-System kam)
+            if position.market_type == 'confluence':
+                breakdown = self._last_confluence_breakdowns.pop(trade.symbol, None)
+                if breakdown:
+                    self._update_factor_attribution(trade, breakdown)
 
     async def _telegram_hourly_loop(self):
         """Sendet stündlichen Telegram-Report"""
@@ -649,11 +973,19 @@ class TradingBot:
 
     def _get_strategy_stats(self) -> Dict:
         """Sammelt Strategie-Statistiken"""
-        return {
+        stats = {
             'momentum': self.momentum.get_statistics(),
             'scalper': self.scalper.get_statistics(),
             'ml': self.ml_predictor.get_statistics()
         }
+
+        if self.confluence_strategy is not None:
+            stats['confluence'] = {
+                'enabled': True,
+                'last_regime': getattr(self.confluence_strategy, '_last_regime', None),
+            }
+
+        return stats
 
 
 def main():

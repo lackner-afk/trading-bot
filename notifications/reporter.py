@@ -505,6 +505,49 @@ class Reporter:
         if self.telegram:
             await self.telegram.send_hourly_report(portfolio, metrics, uptime_hours)
 
+    async def send_confluence_signal_decision(self, signal, regime: str = None, top_factors: List[str] = None):
+        """
+        Phase 6: Sendet eine dedizierte "Warum habe ich getradet?" Nachricht via Telegram
+        mit den wichtigsten beitragenden Faktoren (Moneyboy-Stil).
+        """
+        if not self.telegram:
+            return
+
+        direction = getattr(signal, 'signal_type', None)
+        if direction:
+            side = direction.value.upper() if hasattr(direction, 'value') else str(direction).upper()
+        else:
+            side = getattr(signal, 'direction', '???').upper()
+
+        symbol = getattr(signal, 'symbol', '???')
+        price = getattr(signal, 'price', 0) or getattr(signal, 'entry_price', 0)
+        conf = getattr(signal, 'confidence', 0)
+
+        cd = getattr(signal, '_confluence_data', None) or {}
+        score = cd.get('confluence_score', getattr(signal, 'confluence_score', 0))
+
+        factors_text = ""
+        if top_factors:
+            factors_text = "\n".join([f"  • {f}" for f in top_factors[:4]])
+
+        vibe = random.choice([
+            f"Digga der Markt hat mir {side} auf {symbol} zugeflüstert, vong Confluence her war das 1 klares Setup 🔥",
+            f"Bruder {side} {symbol} — die Faktoren waren alle aligned. Das ist 1 Flex-Signal oida 💪",
+            f"I bims reingegangen weil {side} {symbol} grad richtig fly ausschaut (Conf {conf:.0%}) ✨",
+        ])
+
+        text = (
+            f"🧠 <b>CONFLUENCE SIGNAL — I bims am Analysieren</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>{side} {symbol}</b> @ <code>{price:.2f}</code>\n"
+            f"Confidence: <b>{conf:.0%}</b> | Score: <b>{score:.2f}</b>\n"
+            f"Regime: <b>{regime or 'unknown'}</b>\n\n"
+            f"<b>Top Faktoren:</b>\n{factors_text or '  (Details in Console/Log)'}\n\n"
+            f"<i>{vibe}</i>"
+        )
+
+        await self.telegram.send_message(text)
+
     def should_send_hourly_report(self) -> bool:
         """Prüft ob stündlicher Report fällig ist"""
         return (datetime.now() - self.last_hourly_report).total_seconds() >= 3600
@@ -537,3 +580,100 @@ class Reporter:
             f"PNL: [{pnl_color}]${trade.pnl:,.2f}[/{pnl_color}] | "
             f"Strategy: {trade.strategy}"
         )
+
+    # ============================================================
+    # PHASE 6: CONFLUENCE FACTOR ATTRIBUTION REPORTING
+    # ============================================================
+
+    def _extract_factor_breakdown(self, signal) -> Dict:
+        """Extrahiert factor_breakdown egal ob TradeSignal oder legacy ScalperSignal mit _confluence_data"""
+        # Modern TradeSignal (from signal_aggregator)
+        if hasattr(signal, 'factor_breakdown') and signal.factor_breakdown:
+            return signal.factor_breakdown
+
+        # Legacy path (analyze_legacy attaches this)
+        confluence_data = getattr(signal, '_confluence_data', None)
+        if confluence_data and isinstance(confluence_data, dict):
+            return confluence_data.get('factor_breakdown', {})
+
+        return {}
+
+    def print_factor_breakdown(self, signal, regime: str = None):
+        """
+        Phase 6: Zeigt detaillierte Factor-Attribution für ein Confluence-Signal.
+
+        Gibt eine schöne Rich-Tabelle aus mit:
+        - Faktor-Name
+        - Score (0-1)
+        - Direction
+        - Confidence
+        - Reason / Begründung
+        """
+        breakdown = self._extract_factor_breakdown(signal)
+
+        if not breakdown:
+            self.console.print("[dim]Keine Factor-Breakdown verfügbar für dieses Signal[/dim]")
+            return
+
+        # Header mit Gesamt-Score falls vorhanden
+        confluence_score = getattr(signal, 'confluence_score', None)
+        if confluence_score is None:
+            # Try to get from _confluence_data
+            cd = getattr(signal, '_confluence_data', None) or {}
+            confluence_score = cd.get('confluence_score')
+
+        title = "[bold cyan]Factor Attribution (Confluence)[/bold cyan]"
+        if confluence_score is not None:
+            title += f"  |  Total Score: [bold]{confluence_score:.2f}[/bold]"
+        if regime:
+            title += f"  |  Regime: [yellow]{regime}[/yellow]"
+
+        table = Table(title=title, box=box.ROUNDED)
+        table.add_column("Factor", style="cyan", no_wrap=True)
+        table.add_column("Score", justify="right")
+        table.add_column("Dir", justify="center")
+        table.add_column("Conf", justify="right")
+        table.add_column("Reason / Contribution", style="dim")
+
+        # Sort by score descending for readability
+        sorted_items = sorted(breakdown.items(), key=lambda x: x[1].score if hasattr(x[1], 'score') else 0, reverse=True)
+
+        for name, result in sorted_items:
+            if not hasattr(result, 'score'):
+                continue
+
+            score = result.score
+            direction = result.direction or "-"
+            conf = result.confidence
+
+            # Color coding
+            if score >= 0.75:
+                score_str = f"[green]{score:.2f}[/green]"
+            elif score >= 0.5:
+                score_str = f"[yellow]{score:.2f}[/yellow]"
+            else:
+                score_str = f"[red]{score:.2f}[/red]"
+
+            dir_color = "green" if direction == "long" else ("red" if direction == "short" else "white")
+            dir_str = f"[{dir_color}]{direction.upper()}[/{dir_color}]" if direction != "-" else "-"
+
+            conf_str = f"{conf:.0%}" if conf else "—"
+
+            reason = result.reason[:70] + "..." if len(result.reason) > 70 else result.reason
+
+            table.add_row(
+                name.replace("_", " ").title(),
+                score_str,
+                dir_str,
+                conf_str,
+                reason or "(no reason)"
+            )
+
+        self.console.print("\n")
+        self.console.print(table)
+
+        # Kurze Zusammenfassung der Top-Faktoren
+        top_factors = sorted_items[:3]
+        if top_factors:
+            top_names = ", ".join([n.replace("_", " ").title() for n, _ in top_factors])
+            self.console.print(f"[dim]Top Contributors: {top_names}[/dim]\n")
