@@ -169,10 +169,10 @@ class SignalAggregator:
             weights["macro_news"] = 0.35
 
         elif regime_name == "low_vol_chop":
-            # Test relaxation for more trades: give technical a bit more weight
-            weights["technical"] = 0.55
-            weights["sentiment"] = 0.35
-            weights["macro_news"] = 0.10
+            # Aggressive Test-Mode (A): heavily favor sentiment + macro, reduce technical penalty
+            weights["technical"] = 0.35
+            weights["sentiment"] = 0.50
+            weights["macro_news"] = 0.15
 
         elif regime_name == "event_driven":
             weights["technical"] = 0.40

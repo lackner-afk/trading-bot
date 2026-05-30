@@ -81,7 +81,7 @@ strategies:
   confluence:
     enabled: true
     interval_seconds: 45
-    min_confluence_score: 4.2   # Test: weiter gesenkt, Ziel = deutlich mehr Trades in low_vol_chop
+    min_confluence_score: 3.5   # Aggressive Test-Mode (A) - stark gesenkt für mehr Trades in low_vol_chop
     base_leverage: 8
     factor_weights:
       technical: 0.58

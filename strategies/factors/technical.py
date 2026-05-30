@@ -50,7 +50,12 @@ class MultiTimeframeTrendFactor(Factor):
         # Score based on trend strength (capped)
         score = min(strength * 8, 1.0)  # Strong trend → high score
 
-        reason = f"Trend {direction.upper()}: EMA{self.ema_fast}/{self.ema_slow} spread {strength:.2%}"
+        # Aggressive test mode (A): give weak trends a small floor in low vol chop
+        if score < 0.15:
+            score = 0.15
+            reason = f"Trend {direction.upper()}: EMA{self.ema_fast}/{self.ema_slow} spread {strength:.2%} (floored for test)"
+        else:
+            reason = f"Trend {direction.upper()}: EMA{self.ema_fast}/{self.ema_slow} spread {strength:.2%}"
 
         return FactorResult(
             name=self.name,
