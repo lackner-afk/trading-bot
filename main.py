@@ -470,6 +470,11 @@ class TradingBot:
 
                 universe = self.confluence_strategy.get_recommended_assets(all_candles)
 
+                analyzed = 0
+                best_score = 0.0
+                best_symbol = None
+                regime_name = None
+
                 for symbol in universe.get("symbols", []):
                     candles = self.crypto_feed.get_candles(symbol, '5m', n=80)
                     price = self.crypto_feed.get_price(symbol)
@@ -477,8 +482,27 @@ class TradingBot:
                     if candles is None or price is None:
                         continue
 
+                    analyzed += 1
                     signal = self.confluence_strategy.analyze_legacy(symbol, candles, price)
 
+                    # Get regime info even for rejected signals
+                    cd = getattr(signal, '_confluence_data', None) or {} if signal else {}
+                    regime_obj = cd.get('regime') if cd else None
+                    if regime_obj and hasattr(regime_obj, 'name'):
+                        regime_name = regime_obj.name
+
+                    score = cd.get('confluence_score', 0) if cd else 0
+                    if score > best_score:
+                        best_score = score
+                        best_symbol = symbol
+
+                    if signal:
+                        if signal.confidence < 0.55:
+                            # Visible rejection reason during test phase
+                            self.logger.info(
+                                f"[CONFLUENCE REJECT] {symbol} @ {price:.2f} | "
+                                f"Conf {signal.confidence:.0%} | Score {score:.2f} | Regime {regime_name or 'unknown'}"
+                            )
                     if signal and signal.confidence >= 0.55:
                         # Phase 6: Rich factor attribution logging + console
                         regime_name = None
@@ -531,6 +555,17 @@ class TradingBot:
                             self._last_confluence_breakdowns[signal.symbol] = breakdown
 
                         await self._execute_confluence_signal(signal)
+
+                # Phase 6 Improvement: Cycle summary for visibility (even when no trade)
+                if analyzed > 0:
+                    self.logger.info(
+                        f"[CONFLUENCE CYCLE] Analyzed {analyzed} symbols | "
+                        f"Best: {best_symbol} ({best_score:.2f}) | "
+                        f"Regime: {regime_name or 'unknown'} | "
+                        f"No high-confluence signal this cycle"
+                    )
+                else:
+                    self.logger.warning("[CONFLUENCE CYCLE] No symbols analyzed this cycle")
 
                 await asyncio.sleep(interval)
 
