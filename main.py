@@ -279,17 +279,19 @@ class TradingBot:
         # Haupt-Loops starten
         tasks = [
             asyncio.create_task(self._main_loop()),
-            asyncio.create_task(self._momentum_loop()),
-            asyncio.create_task(self._scalper_loop()),
-            asyncio.create_task(self._ml_loop()),
             asyncio.create_task(self._risk_check_loop()),
             asyncio.create_task(self._reporting_loop()),
             asyncio.create_task(self._telegram_hourly_loop()),
         ]
 
-        # Neue Confluence Strategy Loop (wenn aktiviert)
         if self.use_confluence_strategy:
+            # Nur das neue Multi-Factor Confluence System (Phase 1-6)
             tasks.append(asyncio.create_task(self._confluence_loop()))
+        else:
+            # Alte Strategien (wenn Confluence nicht als Haupt-System aktiviert ist)
+            tasks.append(asyncio.create_task(self._momentum_loop()))
+            tasks.append(asyncio.create_task(self._scalper_loop()))
+            tasks.append(asyncio.create_task(self._ml_loop()))
 
         # Warte auf Beendigung
         try:

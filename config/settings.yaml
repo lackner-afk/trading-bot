@@ -32,10 +32,10 @@ exchanges:
     api_secret: ${ONETRADING_API_SECRET}
 
 strategies:
-  # Haupt-Strategie: EMA 9/21 Crossover mit RSI-Filter
-  # Backtest: +4.2%, Sharpe 1.14, Win Rate 60%, Max DD 6.3%
+  # Alte Momentum-Strategie (EMA 9/21) — DEAKTIVIERT seit Phase 6
+  # Wird durch das neue Confluence Multi-Factor System ersetzt.
   momentum:
-    enabled: true
+    enabled: false
     leverage: 10
     pairs:
       - BTC_EUR
@@ -71,7 +71,7 @@ strategies:
     volume_spike_threshold: 2.0  # war 3.0 — weniger streng
 
   ml:
-    enabled: true
+    enabled: false          # Deaktiviert für sauberen Confluence-Only Betrieb (Phase 6)
     retrain_hours: 6
     min_confidence: 0.65
 
