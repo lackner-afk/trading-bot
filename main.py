@@ -483,14 +483,16 @@ class TradingBot:
                         continue
 
                     analyzed += 1
+
+                    # Always get fresh regime for this symbol (even if no signal)
+                    regime = self.confluence_strategy.regime_detector.detect(symbol, candles)
+                    if regime and regime.name:
+                        regime_name = regime.name
+
                     signal = self.confluence_strategy.analyze_legacy(symbol, candles, price)
 
                     # Get regime info even for rejected signals
                     cd = getattr(signal, '_confluence_data', None) or {} if signal else {}
-                    regime_obj = cd.get('regime') if cd else None
-                    if regime_obj and hasattr(regime_obj, 'name'):
-                        regime_name = regime_obj.name
-
                     score = cd.get('confluence_score', 0) if cd else 0
                     if score > best_score:
                         best_score = score

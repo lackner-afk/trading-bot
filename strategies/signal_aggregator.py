@@ -88,12 +88,17 @@ class SignalAggregator:
             if short_score > long_score and total_score >= self.min_confluence:
                 direction = "short"
             else:
+                # Detailed rejection logging for diagnosis
+                print(f"[AGGREGATOR REJECT] {symbol} | total={total_score:.2f} (min {self.min_confluence}) | "
+                      f"tech={tech_score:.2f} sent={sent_score:.2f} macro={macro_score:.2f} | "
+                      f"long_vote={long_score:.2f} short_vote={short_score:.2f} | tech_factors={len(tech_results)}")
                 return None
         else:
             direction = "long"
 
         # Require at least X technical factors to have decent conviction
         if len(tech_results) < self.min_technical_factors:
+            print(f"[AGGREGATOR REJECT] {symbol} | Not enough technical factors: {len(tech_results)} < {self.min_technical_factors}")
             return None
 
         confidence = min(total_score / 9.5, 1.0)

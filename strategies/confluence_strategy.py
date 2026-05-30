@@ -122,6 +122,15 @@ class ConfluenceStrategy:
         if not factor_results:
             return None
 
+        # === Phase 6 Debug Logging: Show exactly what each factor scored ===
+        if factor_results:
+            factor_debug = []
+            for fr in sorted(factor_results, key=lambda x: x.score, reverse=True):
+                factor_debug.append(
+                    f"{fr.name}: score={fr.score:.2f} dir={fr.direction or '-'} | {fr.reason[:60]}"
+                )
+            print(f"[CONFLUENCE FACTORS] {symbol} | Regime={regime.name} | " + " || ".join(factor_debug))
+
         # 3. Get macro risk adjustment
         macro_filter = next((f for f in self.factors if f.name == "macro_news_filter"), None)
         macro_risk = macro_filter.get_risk_multiplier() if macro_filter else 1.0
