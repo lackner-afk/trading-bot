@@ -154,8 +154,9 @@ class VolatilityFilter(Factor):
         atr_pct = latest_atr / current_price
 
         if atr_pct < self.min_atr_pct:
-            score = 0.2
-            reason = f"Very low volatility (ATR {atr_pct:.3%}) - reduced conviction"
+            # Test relaxation for low_vol_chop regimes (user wants more trades)
+            score = 0.65
+            reason = f"Very low volatility (ATR {atr_pct:.3%}) - relaxed for testing (more trades)"
         elif atr_pct > self.max_atr_pct:
             score = 0.4
             reason = f"Extremely high volatility (ATR {atr_pct:.2%}) - caution"
@@ -275,8 +276,9 @@ class VolumeConfirmationFactor(Factor):
             score = 0.8
             reason = f"Above average volume ({volume_ratio:.1f}x)"
         elif volume_ratio < 0.6:
-            score = 0.25
-            reason = f"Very low volume ({volume_ratio:.1f}x) - weak conviction"
+            # Test relaxation: less penalty for low volume in quiet markets
+            score = 0.55
+            reason = f"Very low volume ({volume_ratio:.1f}x) - relaxed for testing (more trades)"
         else:
             score = 0.6
             reason = f"Normal volume ({volume_ratio:.1f}x)"

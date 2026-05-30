@@ -43,7 +43,7 @@ class SignalAggregator:
         self.config = config or {}
         self.min_confluence = self.config.get("min_confluence_score", 5.8)
         self.base_leverage = self.config.get("base_leverage", 8)
-        self.min_technical_factors = self.config.get("min_technical_factors", 2)
+        self.min_technical_factors = self.config.get("min_technical_factors", 1)  # lowered for test (more trades)
 
         # Base weights (will be adjusted by regime)
         self.base_weights = self.config.get("factor_weights", {
@@ -169,10 +169,10 @@ class SignalAggregator:
             weights["macro_news"] = 0.35
 
         elif regime_name == "low_vol_chop":
-            # Be very selective — higher bar for technical, use sentiment for extremes
-            weights["technical"] = 0.45
-            weights["sentiment"] = 0.40
-            weights["macro_news"] = 0.15
+            # Test relaxation for more trades: give technical a bit more weight
+            weights["technical"] = 0.55
+            weights["sentiment"] = 0.35
+            weights["macro_news"] = 0.10
 
         elif regime_name == "event_driven":
             weights["technical"] = 0.40

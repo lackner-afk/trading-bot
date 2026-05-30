@@ -81,7 +81,7 @@ strategies:
   confluence:
     enabled: true
     interval_seconds: 45
-    min_confluence_score: 4.9   # Temporär gesenkt für Testphase (bessere Sichtbarkeit + mehr Trades in low-vol)
+    min_confluence_score: 4.2   # Test: weiter gesenkt, Ziel = deutlich mehr Trades in low_vol_chop
     base_leverage: 8
     factor_weights:
       technical: 0.58
