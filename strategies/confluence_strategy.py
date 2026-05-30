@@ -40,7 +40,10 @@ class ConfluenceStrategy:
         self.regime_detector = RegimeDetector(self.config.get("regime", {}))
         self.asset_selector = AssetSelector(self.config.get("asset_selector", {}))
         self.universe_manager = UniverseManager(self.config.get("universe", {}))
-        self.aggregator = SignalAggregator(self.config.get("aggregator", {}))
+        # Pass either a nested "aggregator:" subsection (advanced) or the full
+        # confluence config (our normal case in settings.yaml).
+        aggregator_cfg = self.config.get("aggregator") or self.config
+        self.aggregator = SignalAggregator(aggregator_cfg)
 
         self.factors: List[Factor] = []
 
