@@ -57,6 +57,8 @@ class MultiTimeframeTrendFactor(Factor):
         else:
             reason = f"Trend {direction.upper()}: EMA{self.ema_fast}/{self.ema_slow} spread {strength:.2%}"
 
+        # Realistic Production: Remove or reduce the floor significantly (e.g. only 0.08–0.10)
+
         return FactorResult(
             name=self.name,
             score=score,
@@ -162,6 +164,10 @@ class VolatilityFilter(Factor):
             # Test relaxation for low_vol_chop regimes (user wants more trades)
             score = 0.65
             reason = f"Very low volatility (ATR {atr_pct:.3%}) - relaxed for testing (more trades)"
+
+            # Realistic Production Alternative:
+            # score = 0.45
+            # reason = f"Very low volatility (ATR {atr_pct:.3%}) - reduced conviction (realistic)"
         elif atr_pct > self.max_atr_pct:
             score = 0.4
             reason = f"Extremely high volatility (ATR {atr_pct:.2%}) - caution"
@@ -252,7 +258,9 @@ class BreakoutFactor(Factor):
 class VolumeConfirmationFactor(Factor):
     """
     Checks whether current volume supports the price move.
-    Low volume moves are generally less reliable.
+    Scoring is regime-aware:
+    - In trending / high_vol_event: strong volume confirmation is important.
+    - In low_vol_chop / ranging: low volume is normal and not penalized (can even be mildly positive).
     """
 
     name = "volume_confirmation"
@@ -273,20 +281,50 @@ class VolumeConfirmationFactor(Factor):
 
         volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1.0
 
-        # Score based on volume strength
-        if volume_ratio > 2.0:
-            score = 0.95
-            reason = f"Very strong volume ({volume_ratio:.1f}x average)"
-        elif volume_ratio > 1.3:
-            score = 0.8
-            reason = f"Above average volume ({volume_ratio:.1f}x)"
-        elif volume_ratio < 0.6:
-            # Test relaxation: less penalty for low volume in quiet markets
-            score = 0.55
-            reason = f"Very low volume ({volume_ratio:.1f}x) - relaxed for testing (more trades)"
+        regime = kwargs.get("regime", "unknown")
+
+        if regime in ["low_vol_chop", "ranging"]:
+            # In chop/range: low volume is normal (often compression before moves).
+            # We do not punish low volume. Very low volume can even be slightly positive.
+            if volume_ratio < 0.4:
+                score = 0.72
+                reason = f"Very low volume in {regime} ({volume_ratio:.1f}x) – potential compression"
+            elif volume_ratio < 0.8:
+                score = 0.68
+                reason = f"Below average volume in {regime} ({volume_ratio:.1f}x)"
+            else:
+                score = min(0.65 + (volume_ratio - 0.8) * 0.35, 0.92)
+                reason = f"Volume in {regime} ({volume_ratio:.1f}x)"
+
+        elif regime in ["trending", "high_vol_event"]:
+            # Strict volume confirmation required in directional or event-driven regimes
+            if volume_ratio > 2.0:
+                score = 0.95
+                reason = f"Very strong volume ({volume_ratio:.1f}x average)"
+            elif volume_ratio > 1.3:
+                score = 0.82
+                reason = f"Above average volume ({volume_ratio:.1f}x)"
+            elif volume_ratio < 0.6:
+                score = 0.35
+                reason = f"Very low volume ({volume_ratio:.1f}x) – weak confirmation"
+            else:
+                score = 0.60
+                reason = f"Normal volume ({volume_ratio:.1f}x)"
+
         else:
-            score = 0.6
-            reason = f"Normal volume ({volume_ratio:.1f}x)"
+            # Fallback (unknown regime)
+            if volume_ratio > 2.0:
+                score = 0.92
+                reason = f"Very strong volume ({volume_ratio:.1f}x)"
+            elif volume_ratio > 1.3:
+                score = 0.78
+                reason = f"Above average volume ({volume_ratio:.1f}x)"
+            elif volume_ratio < 0.6:
+                score = 0.50
+                reason = f"Very low volume ({volume_ratio:.1f}x)"
+            else:
+                score = 0.60
+                reason = f"Normal volume ({volume_ratio:.1f}x)"
 
         return FactorResult(
             name=self.name,
@@ -294,5 +332,5 @@ class VolumeConfirmationFactor(Factor):
             confidence=0.85,
             direction=None,
             reason=reason,
-            metadata={"volume_ratio": float(volume_ratio)}
+            metadata={"volume_ratio": float(volume_ratio), "regime": regime}
         )
