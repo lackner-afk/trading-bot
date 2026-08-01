@@ -11,6 +11,7 @@ Unterstützt zwei Modi:
 import asyncio
 import signal
 import logging
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -32,6 +33,7 @@ from strategies.crypto_scalper import CryptoScalper, SignalType
 from strategies.momentum import MomentumStrategy
 from strategies.ml_predictor import MLPredictor
 from strategies.confluence_strategy import ConfluenceStrategy  # New 2026 multi-factor system
+from strategies.confluence_exit import ConfluenceExitManager
 from notifications.reporter import Reporter
 
 
@@ -45,6 +47,11 @@ class TradingBot:
     Im Live-Modus werden echte Orders auf One Trading ausgeführt + Reconciliation
     beim Start durchgeführt.
     """
+
+    # Nach so vielen fehlgeschlagenen Exit-Versuchen für dasselbe Symbol
+    # stoppt der Bot. Wer Positionen nicht mehr schließen kann, darf keine
+    # neuen aufmachen.
+    MAX_EXIT_FAILURES = 5
 
     def __init__(self, config_path: str = 'config/settings.yaml'):
         # Logging einrichten
@@ -138,7 +145,6 @@ class TradingBot:
 
         if self.is_live:
             # === LIVE MODE ===
-            import os
             api_key = os.getenv('ONETRADING_API_KEY')
             api_secret = os.getenv('ONETRADING_API_SECRET')
 
@@ -151,11 +157,22 @@ class TradingBot:
             self.logger.critical("=== LIVE MODE INITIALISIERT ===")
             self.logger.critical("Verwende OneTradingCCXTFeed + LiveOrderEngine")
 
-            # Echte Execution Engine
+            # Echte Execution Engine.
+            # shadow_mode lag bisher nicht in der übergebenen Config: main.py
+            # reichte nur den fees:-Block durch, sodass sich Shadow Mode
+            # ausschließlich durch ein shadow_mode: true INNERHALB von fees:
+            # aktivieren ließ. Die in LIVE_TRADING.md empfohlene Rollout-Stufe 1
+            # war damit praktisch nicht erreichbar.
+            live_config = dict(fees_config)
+            live_config.update(self.config.get('live', {}) or {})
+
+            if live_config.get('shadow_mode'):
+                self.logger.critical("SHADOW MODE aktiv - es werden KEINE echten Orders platziert")
+
             self.order_engine = LiveOrderEngine(
                 api_key=api_key,
                 api_secret=api_secret,
-                config=fees_config
+                config=live_config
             )
 
             # Echter One Trading Feed (mit Keys für Balance etc.)
@@ -185,6 +202,13 @@ class TradingBot:
             self.logger.info("ConfluenceStrategy (neues Multi-Factor System) aktiviert")
         else:
             self.confluence_strategy = None
+
+        # Exit-Logik für Confluence-Positionen (eigenes Trailing-Tracking)
+        self.confluence_exit = ConfluenceExitManager.from_config(
+            self.config.get('strategies', {}).get('confluence', {})
+        )
+        # Fehlgeschlagene Exit-Versuche je Symbol (Kill-Switch-Zähler)
+        self._exit_failures: Dict[str, int] = {}
 
         # Phase 6: Regime tracking for change alerting
         self._last_regime_name: Optional[str] = None
@@ -226,25 +250,38 @@ class TradingBot:
         # ⚠️  EXTREM LAUTE LIVE-MODE WARNUNG (Phase 0 Sicherheitsmaßnahme)
         # ============================================================
         if mode == 'live':
+            # Hürde 1: die Umgebungsvariable. War dokumentiert (LIVE_TRADING.md,
+            # secrets.env.example) und wurde nur vom Checklisten-Tool gelesen —
+            # main.py hat sie ignoriert, die "dritte unabhängige Hürde"
+            # existierte faktisch nicht.
+            if not os.getenv('LIVE_TRADING_ENABLED'):
+                self.logger.critical("ABBRUCH: Umgebungsvariable LIVE_TRADING_ENABLED ist nicht gesetzt!")
+                self.logger.critical("  export LIVE_TRADING_ENABLED=1")
+                raise RuntimeError("Live mode blocked: LIVE_TRADING_ENABLED not set")
+
+            # Hürde 2: das Confirmation-Flag. Bewusst VOR dem Countdown —
+            # 10 Sekunden warten, um dann an einer Config-Prüfung zu scheitern,
+            # ist sinnlos.
+            if not live_confirmed:
+                self.logger.critical("ABBRUCH: live_explicit_confirmation ist nicht true!")
+                self.logger.critical("Setze in settings.yaml general.live_explicit_confirmation: true")
+                raise RuntimeError("Live mode blocked: missing explicit confirmation flag")
+
             self.logger.critical("=" * 70)
             self.logger.critical("!!! LIVE-MODUS AKTIVIERT !!!")
             self.logger.critical("!!! ECHTES GELD WIRD VERWENDET !!!")
             self.logger.critical("=" * 70)
             self.logger.critical(f"Mode: {mode}")
-            self.logger.critical(f"live_explicit_confirmation: {live_confirmed}")
+            self.logger.critical(f"Shadow-Mode: {self.config.get('live', {}).get('shadow_mode', False)}")
+            self.logger.critical(f"Beschraenkungen: {self.constraints.describe()}")
             self.logger.critical("Starte in 10 Sekunden... (Ctrl+C zum Abbrechen)")
             self.logger.critical("=" * 70)
 
-            # Harte Verzögerung + mehrfache Warnung
-            import time
+            # Harte Verzögerung + mehrfache Warnung (async, damit die anderen
+            # Loops nicht blockiert werden)
             for i in range(10, 0, -1):
                 self.logger.critical(f"  LIVE START IN {i} SEKUNDEN...")
-                time.sleep(1)
-
-            if not live_confirmed:
-                self.logger.critical("ABBRUCH: live_explicit_confirmation ist nicht true!")
-                self.logger.critical("Setze in settings.yaml general.live_explicit_confirmation: true")
-                raise RuntimeError("Live mode blocked: missing explicit confirmation flag")
+                await asyncio.sleep(1)
 
             self.logger.critical("!!! LETZTE WARNUNG: ECHTE ORDERS WERDEN JETZT PLATZIERT !!!")
         else:
@@ -277,7 +314,6 @@ class TradingBot:
             await self._initial_ml_training()
 
         # Telegram starten (falls konfiguriert und Token gesetzt)
-        import os
         tg = self._telegram_config
         if tg.get('enabled'):
             token = os.environ.get('TELEGRAM_BOT_TOKEN', tg.get('token', ''))
@@ -315,8 +351,25 @@ class TradingBot:
         self.running = False
         self.logger.info("Stoppe Bot-Komponenten...")
 
+        # Offene Orders stornieren, bevor die Verbindung fällt — sonst bleiben
+        # sie beim Exchange stehen und werden ohne laufenden Bot gefüllt.
+        try:
+            cancelled = await self.order_engine.cancel_all_orders()
+            if cancelled:
+                self.logger.info(f"{cancelled} offene Order(s) storniert")
+        except Exception as e:
+            self.logger.error(f"Konnte offene Orders nicht stornieren: {e}")
+
         await self.crypto_feed.stop()
         await self.reporter.stop()
+
+        # Live-Engine hält eine eigene aiohttp-Session (via CCXT)
+        close = getattr(self.order_engine, 'close', None)
+        if close is not None:
+            try:
+                await close()
+            except Exception as e:
+                self.logger.error(f"Fehler beim Schliessen der OrderEngine: {e}")
 
         # Final Report
         self.reporter.print_daily_report(self.portfolio, self._get_strategy_stats())
@@ -332,6 +385,11 @@ class TradingBot:
                 # Preis-Updates verarbeiten
                 prices = self.crypto_feed.get_prices()
                 self.portfolio.update_position_prices(prices)
+
+                # Hoch/Tief seit Entry fortschreiben — ohne diesen Schritt
+                # hat der Trailing-Stop keine Datengrundlage.
+                for sym, px in prices.items():
+                    self.confluence_exit.update_price(sym, px)
 
                 # Pending Orders prüfen
                 filled = await self.order_engine.check_pending_orders(prices)
@@ -770,7 +828,7 @@ class TradingBot:
         )
 
         if result.success:
-            self.portfolio.open_position(
+            position = self.portfolio.open_position(
                 symbol=signal.symbol,
                 side='long' if signal.signal_type == SignalType.LONG else 'short',
                 size=position_size,
@@ -780,6 +838,21 @@ class TradingBot:
                 market_type=strategy_name,
                 stop_loss=signal.stop_loss,
                 take_profit=signal.take_profit
+            )
+
+            if position is None:
+                # Order ausgeführt, aber lokal nicht buchbar — das darf nicht
+                # unbemerkt bleiben, sonst existiert real eine Position, die
+                # der Bot nicht kennt und folglich nie schließt.
+                self.logger.critical(
+                    f"Order fuer {signal.symbol} ausgefuehrt, aber Position konnte "
+                    f"lokal nicht gebucht werden! Bestand manuell pruefen."
+                )
+                return
+
+            # Trailing-Tracking starten
+            self.confluence_exit.register(
+                signal.symbol, result.execution_price, position.timestamp
             )
 
             self.reporter.print_info(
@@ -1008,45 +1081,109 @@ class TradingBot:
 
             current_price = prices[symbol]
 
-            # Richtige Strategie für Exit-Check wählen (Phase 5)
-            if position.market_type == 'momentum':
-                strategy = self.momentum
-            elif position.market_type == 'confluence':
-                # Für Confluence-Positionen nutzen wir die Momentum-Exit-Logik als Fallback.
-                # Langfristig sollte hier eine dedizierte Exit-Logik der ConfluenceStrategy kommen.
-                strategy = self.momentum
+            if position.market_type == 'confluence':
+                # Eigene Exit-Logik mit funktionierendem Trailing-Stop.
+                # Vorher lief das über self.momentum, dessen highest_prices
+                # nirgends befüllt wird — der Trailing-Zweig war toter Code.
+                should_exit, reason = self.confluence_exit.check_exit(
+                    symbol=symbol,
+                    entry_price=position.entry_price,
+                    current_price=current_price,
+                    side=position.side,
+                    stop_loss=position.stop_loss,
+                    take_profit=position.take_profit,
+                    atr=self._get_atr(symbol),
+                    entry_time=position.timestamp
+                )
             else:
-                strategy = self.scalper
-
-            should_exit, reason = strategy.check_exit_conditions(
-                symbol=symbol,
-                entry_price=position.entry_price,
-                current_price=current_price,
-                side=position.side,
-                highest_since_entry=strategy.highest_prices.get(symbol),
-                stop_loss_price=position.stop_loss if hasattr(position, 'stop_loss') else None,
-                take_profit_price=position.take_profit if hasattr(position, 'take_profit') else None
-            )
+                strategy = self.momentum if position.market_type == 'momentum' else self.scalper
+                should_exit, reason = strategy.check_exit_conditions(
+                    symbol=symbol,
+                    entry_price=position.entry_price,
+                    current_price=current_price,
+                    side=position.side,
+                    highest_since_entry=strategy.highest_prices.get(symbol),
+                    stop_loss_price=position.stop_loss if hasattr(position, 'stop_loss') else None,
+                    take_profit_price=position.take_profit if hasattr(position, 'take_profit') else None
+                )
 
             if should_exit:
                 await self._close_position(symbol, current_price, reason)
 
+    def _get_atr(self, symbol: str, period: int = 14) -> Optional[float]:
+        """
+        ATR aus dem Feed statt aus dem Momentum-Cache, der bei
+        Confluence-Trades nie gefüllt wird (ScalperSignal.atr_value = 0.0).
+        """
+        try:
+            candles = self.crypto_feed.get_candles(symbol, '5m', n=period + 5)
+            if candles is None or len(candles) < period:
+                return None
+            tr = (candles['high'] - candles['low']).rolling(period).mean()
+            value = tr.iloc[-1]
+            return float(value) if value == value and value > 0 else None
+        except Exception:
+            return None
+
     async def _close_position(self, symbol: str, price: float, reason: str):
-        """Schließt eine Position"""
+        """
+        Schließt eine Position — über die OrderEngine, nicht nur im Portfolio.
+
+        Vorher buchte diese Methode ausschließlich portfolio.close_position()
+        und schickte nie eine Order los. Im Live-Modus hätte der Bot damit real
+        gekauft, aber Stop-Loss und Take-Profit nur lokal in die SQLite
+        geschrieben — die echte Position wäre unbegrenzt offen geblieben.
+        """
         position = self.portfolio.positions.get(symbol)
         if not position:
             return
 
-        fees = position.size * 0.0006  # Taker Fee (size ist bereits in USD)
+        close_side = 'sell' if position.side == 'long' else 'buy'
 
+        try:
+            result = await self.order_engine.execute_market_order(
+                symbol=symbol,
+                side=close_side,
+                size=position.size,
+                current_price=price,
+                leverage=position.leverage,
+                strategy=position.market_type
+            )
+        except Exception as e:
+            self.logger.critical(
+                f"EXIT FEHLGESCHLAGEN (Exception) {symbol}: {e} - Position bleibt offen!"
+            )
+            self._register_exit_failure(symbol, reason)
+            return
+
+        if not result.success:
+            # Position NICHT aus dem Portfolio entfernen. Ein lokal geschlossener,
+            # real aber offener Trade ist der gefährlichste denkbare Zustand.
+            self.logger.critical(
+                f"EXIT FEHLGESCHLAGEN {symbol}: {getattr(result, 'message', 'unbekannt')} "
+                f"- Position bleibt offen, Retry im naechsten Tick"
+            )
+            self._register_exit_failure(symbol, reason)
+            return
+
+        self._exit_failures.pop(symbol, None)
+
+        # Exit-Preis und Gebühren kommen aus der tatsächlichen Ausführung,
+        # nicht aus dem Signalpreis und nicht aus einer hartcodierten Fee.
         trade = self.portfolio.close_position(
             symbol=symbol,
-            exit_price=price,
-            fees=fees,
+            exit_price=result.execution_price,
+            fees=result.total_fees,
             strategy=position.market_type
         )
 
+        self.confluence_exit.forget(symbol)
+
         if trade:
+            self.logger.info(
+                f"[EXIT] {symbol} @ {result.execution_price:.4f} | {reason} | "
+                f"PNL {trade.pnl:+.2f}€ | Fees {trade.fees:.4f}€"
+            )
             self.reporter.print_trade_executed(trade)
             await self.reporter.send_trade_alert(trade)
 
@@ -1055,6 +1192,26 @@ class TradingBot:
                 breakdown = self._last_confluence_breakdowns.pop(trade.symbol, None)
                 if breakdown:
                     self._update_factor_attribution(trade, breakdown)
+
+    def _register_exit_failure(self, symbol: str, reason: str):
+        """
+        Zählt fehlgeschlagene Exit-Versuche. Nach MAX_EXIT_FAILURES wird der
+        Bot gestoppt — wenn Positionen nicht mehr geschlossen werden können,
+        ist Weiterhandeln die schlechteste aller Optionen.
+        """
+        count = self._exit_failures.get(symbol, 0) + 1
+        self._exit_failures[symbol] = count
+
+        if count >= self.MAX_EXIT_FAILURES:
+            self.logger.critical(
+                f"KILL-SWITCH: {count} fehlgeschlagene Exit-Versuche fuer {symbol} "
+                f"({reason}). Bot wird gestoppt - Position manuell pruefen!"
+            )
+            asyncio.create_task(self.reporter.send_message(
+                f"🚨 KILL-SWITCH: Exit fuer {symbol} scheitert seit {count} Versuchen. "
+                f"Bot gestoppt. Position bitte manuell pruefen!"
+            ))
+            self.running = False
 
     async def _telegram_hourly_loop(self):
         """Sendet stündlichen Telegram-Report"""
@@ -1117,7 +1274,6 @@ class TradingBot:
 def main():
     """Haupteinstiegspunkt"""
     # PID-Lock: verhindert mehrfache Instanzen
-    import os
     pid_file = Path('/tmp/trading-bot.pid')
     if pid_file.exists():
         old_pid = int(pid_file.read_text().strip())

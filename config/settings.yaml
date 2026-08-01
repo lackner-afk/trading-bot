@@ -41,6 +41,16 @@ trading:
   short_signal_policy: exit_only
   min_order_notional_eur: 10.0
 
+# ============================================================
+# LIVE-MODUS (nur relevant wenn general.mode: live)
+# ============================================================
+# Wird an die LiveOrderEngine durchgereicht. Vorher bekam die Engine nur
+# den fees:-Block, weshalb sich shadow_mode ausschließlich durch einen
+# Eintrag INNERHALB von fees: aktivieren ließ — die in LIVE_TRADING.md
+# empfohlene Rollout-Stufe 1 war praktisch nicht erreichbar.
+live:
+  shadow_mode: true    # true = loggt Orders, platziert aber keine echten
+
 exchanges:
   onetrading:
     # API Key aus secrets.env (ONETRADING_API_KEY)
@@ -126,6 +136,14 @@ strategies:
       technical: 0.58
       sentiment: 0.25
       macro_news: 0.17
+    # Exit-Logik für Confluence-Positionen (ConfluenceExitManager).
+    # Vorher liefen diese Exits über die deaktivierte Momentum-Strategie,
+    # deren highest_prices nie befüllt wurde — der Trailing-Stop war toter Code.
+    exit:
+      trailing_atr_multiplier: 1.2
+      trailing_pct_fallback: 0.005
+      trailing_arm_profit_pct: 0.005
+      max_hold_hours: 0        # 0 = kein Zeit-Stop
 
 risk:
   max_risk_per_trade: 0.02      # 2% des Portfolios
