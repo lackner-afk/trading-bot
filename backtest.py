@@ -103,6 +103,40 @@ def load_settings(path: str = 'config/settings.yaml') -> dict:
         return yaml.safe_load(f) or {}
 
 
+def check_sentiment_history(confluence_cfg: dict) -> bool:
+    """
+    Stellt sicher, dass der Sentiment-Faktor echte Tages-Historie hat.
+
+    Ohne sie wuerde der Backtest den heutigen Fear-&-Greed-Wert auf den
+    gesamten Zeitraum anwenden. Da Sentiment im aktuellen Faktorenset der
+    einzige verlaessliche Richtungsgeber ist, waere das Ergebnis nicht nur
+    ungenau, sondern systematisch falsch — und aeusserlich unauffaellig.
+    """
+    if not (confluence_cfg.get('factors', {}) or {}).get('sentiment', True):
+        return True     # Faktor ist aus, Historie irrelevant
+
+    from strategies.factors.sentiment import SentimentFactor
+
+    factor = SentimentFactor(confluence_cfg.get('sentiment', {}))
+    factor._ensure_history()
+
+    if not factor.is_historical():
+        print("\n" + "!" * 70)
+        print("FEHLER: Keine Fear-&-Greed-Historie verfuegbar.")
+        print("Der Backtest wuerde den heutigen Wert auf den ganzen Zeitraum")
+        print("anwenden — und Sentiment ist der einzige Faktor, der zuverlaessig")
+        print("eine Richtung liefert. Das Ergebnis waere wertlos.")
+        print("\n  python tools/fetch_fng_history.py")
+        print("!" * 70)
+        return False
+
+    days = sorted(factor._history)
+    fear = sum(1 for v in factor._history.values() if v < 45)
+    print(f"Fear & Greed: {len(days)} Tage ({days[0]} bis {days[-1]}), "
+          f"davon {fear / len(days):.0%} im Fear-Bereich (Entries moeglich)")
+    return True
+
+
 async def run_backtests(data_exchange: str = 'binance', timeframe: str = '1h',
                         days: int = 90, allow_synthetic: bool = False):
     """
@@ -184,6 +218,11 @@ async def run_backtests(data_exchange: str = 'binance', timeframe: str = '1h',
     confluence_cfg = settings.get('strategies', {}).get('confluence', {})
     if confluence_cfg.get('enabled', True):
         print("\nTeste: Confluence (Multi-Factor, AKTIVE Strategie)...")
+
+        if not check_sentiment_history(confluence_cfg):
+            print("\nABBRUCH: Backtest ohne Sentiment-Historie waere irrefuehrend.")
+            return
+
         available = [s for s in symbols if s in backtester.price_data]
         strategy_funcs = build_strategy_funcs(
             lambda: ConfluenceStrategy.create_default(confluence_cfg, constraints=constraints),
