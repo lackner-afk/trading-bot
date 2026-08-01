@@ -37,10 +37,34 @@ general:
 ```
 
 ```bash
-export LIVE_TRADING_ENABLED=1          # oder mit Datum: 2026-06-02
+export LIVE_TRADING_ENABLED=1
 ```
 
-Beim Start erscheint ein **lauter 10-Sekunden-Countdown** mit CRITICAL-Logs. Reconciliation muss erfolgreich sein.
+### Die Hürden im Einzelnen (in dieser Reihenfolge geprüft)
+
+| # | Hürde | Wo |
+|---|-------|-----|
+| 1 | `LIVE_TRADING_ENABLED` gesetzt | `main.py::start` |
+| 2 | `live_explicit_confirmation: true` | `main.py::start` |
+| 3 | **Profitabilitäts-Gate grün** | `main.py::_check_profitability_gate` |
+| 4 | 10-Sekunden-Countdown mit CRITICAL-Logs | `main.py::start` |
+| 5 | Startup-Reconciliation erfolgreich | `core/reconciliation.py` |
+
+Hürde 3 ist neu und der einzige Check, der die **tatsächliche Performance**
+ansieht: elf Kriterien gegen die echte Trade-Historie in `trades.db` (siehe
+`tools/profitability_gate.py`, Schwellen im `go_live_gate:`-Block). Jederzeit
+manuell prüfbar mit:
+
+```bash
+python tools/profitability_gate.py
+```
+
+Übergehbar ist das Gate nur explizit über `general.skip_profitability_gate: true`
+— und dann mit lautem CRITICAL-Log. Das ist bewusst unbequem.
+
+Zusätzlich steht `live.shadow_mode` per Default auf `true`: der Bot loggt
+im Live-Modus exakt, was er tun würde, platziert aber keine echten Orders.
+Erst nach einer sauberen Shadow-Phase auf `false` setzen.
 
 **Nur wenn alle Hürden genommen sind, darf der Bot echte Orders platzieren.**
 
@@ -78,21 +102,43 @@ Später wird es zusätzliche automatische Kill-Switches geben (max daily DD, API
 
 ---
 
-## Was aktuell (Phase 0) noch fehlt (wichtig!)
+## Was aktuell noch fehlt
 
-- Kein `LiveOrderEngine` (echte Orders via CCXT onetrading)
-- Keine Reconciliation-Logik (was passiert nach Bot-Crash mit offenen Positionen?)
-- Keine echte Balance-Sync mit der Exchange
-- Backtest verwendet teilweise andere Datenquellen als Live (Parity-Problem)
-- Keine Shadow-Trading-Funktion
-
-**Solange diese Punkte nicht implementiert und getestet sind, ist Live-Trading fahrlässig.**
+- **Bitpanda Fusion ist nicht angebunden.** Der einzige implementierte
+  Exchange-Zugang ist `ccxt.onetrading` (One Trading, ehemals Bitpanda Pro —
+  seit 2023 ein eigenständiges Unternehmen, *nicht* Bitpanda). CCXT
+  unterstützt Fusion nicht (Issue #25354, offen seit Feb 2025, kein PR), die
+  Anbindung braucht also einen eigenen REST-Client gegen die Fusion-API.
+- **Der offizielle Bitpanda MCP-Server kann nicht traden.** Er ist strikt
+  read-only (`get_portfolio`, `list_wallets`, `get_price`, `list_prices`,
+  `get_asset`, `list_transactions`, `list_trades`); die Doku sagt ausdrücklich,
+  er könne keine Orders platzieren. Er taugt als Kontrollinstanz für
+  Reconciliation, nicht als Ausführungsweg.
+- **Order-Reconciliation ist ein Platzhalter.** `_reconcile_open_orders` zählt
+  offene Orders und loggt sie; der Abgleich offline gefüllter Orders fehlt.
+  `_reconcile_positions` warnt nur, statt wirklich zu vergleichen. Im
+  Spot-Modell *ist* die Base-Asset-Balance die Position — damit wäre ein
+  echter Abgleich implementierbar.
+- **Keine automatischen Kill-Switches** ausser dem Exit-Fehlschlag-Zähler
+  (`MAX_EXIT_FAILURES`) und dem Tagesdrawdown-Limit.
 
 ---
 
-## Nächste Schritte (laut Plan)
+## Bitpanda Fusion: bekannte Randbedingungen
 
-Siehe [plan.md](../.grok/sessions/%2FUsers%2Fnici/019e74ea-2dc2-7e03-98fb-3ef5a3215e9d/plan.md) → Phase 1–4 für die eigentliche Live-Execution-Implementierung.
+- **Spot-only.** Kein Leverage, keine Shorts (Margin ist bei Bitpanda als
+  "coming soon" angekündigt). Der Bot läuft deshalb auch im Paper-Modus
+  long-only mit Leverage 1 — siehe `trading:`-Block in `settings.yaml`.
+- **Eigene REST-API**, dokumentiert unter `docs.fusion.bitpanda.com` bzw.
+  `techsolutions.bitpanda.com`. Beide antworten auf automatisierte Abrufe mit
+  HTTP 403; für die Implementierung wird die OpenAPI-Spezifikation aus dem
+  eingeloggten Browser gebraucht.
+- **Getrennte Keys.** Ein künftiger `BITPANDA_FUSION_API_KEY` (Trading) muss
+  strikt vom read-only `BITPANDA_API_KEY` (MCP/Broker-API) getrennt bleiben.
+- **Offene Fragen vor der Anbindung:** Liefert Fusion OHLCV, oder muss der
+  Feed Marktdaten von Kraken beziehen (mit Preisbasis-Risiko)? Zeigt das
+  read-only Broker-Konto denselben Bestandstopf wie Fusion? Liegt eine
+  20-EUR-Position (20 % von 100 EUR) über der Mindestordergröße?
 
 ---
 

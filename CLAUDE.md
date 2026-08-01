@@ -11,15 +11,32 @@ pip install -r requirements.txt
 # Run the paper-trading bot
 python main.py
 
-# Run backtester (90 days historical data)
+# Run backtester (defaults: Kraken EUR data, 5m candles, 90 days)
 python backtest.py
+
+# Backtest against a specific source / timeframe
+python backtest.py --data-exchange onetrading --timeframe 5m --days 90
 
 # Run parameter grid search for strategy optimization
 python backtest.py --grid
 
+# Check whether the bot is provably profitable (go-live gate)
+python tools/profitability_gate.py
+
+# Full paper -> live checklist
+python tools/paper_to_live_checklist.py
+
+# Run tests
+pip install -r requirements-dev.txt
+pytest -q
+
 # Monitor logs in real-time
 tail -f bot.log
 ```
+
+Note: on Debian-based systems the `ta` package can fail to build against the
+patched system setuptools. A venv resolves it: `python -m venv .venv &&
+.venv/bin/pip install -r requirements.txt`.
 
 ## Architecture Overview
 
@@ -127,18 +144,68 @@ All feeds compute these on candle data:
 - **VWAP**: Volume-weighted average price
 - **Volume Delta**: Buy vs. sell volume estimate
 
+## Spot Mode (core/market_constraints.py)
+
+The target venue (Bitpanda Fusion) is **spot-only**: no leverage, no shorts.
+These constraints apply in paper mode too — otherwise the test phase would
+measure a strategy that cannot be executed live, and the numbers would be
+useless for a go-live decision.
+
+Enforced at four independent points (defense in depth):
+
+1. `SignalAggregator` — leverage fixed at 1.0, SHORT becomes `is_exit_signal`
+2. `main.py::_handle_exit_signal` — a SHORT signal closes an open long
+   ("sell what you hold"); no-op otherwise
+3. `RiskManager` — BLOCK on leverage > 1, as check 0 before everything else
+4. `Portfolio.open_position` — refuses to book a short or leveraged position
+
+Configured via the `trading:` block in `settings.yaml`.
+
+## Go-Live Gate (tools/profitability_gate.py)
+
+Eleven criteria evaluated against the real trade history in `trades.db`.
+Enforced hard in `main.py` as the third live hurdle (after
+`LIVE_TRADING_ENABLED` and `live_explicit_confirmation`), checked in
+`paper_to_live_checklist.py`, and shown advisory in the daily report.
+
+Thresholds live in the `go_live_gate:` block in `settings.yaml`. All
+metrics come from `core/performance.py` — one implementation for every
+consumer.
+
 ## Strategies
 
-### Momentum (strategies/momentum.py) — ENABLED
+### Confluence (strategies/confluence_strategy.py) — ENABLED, primary
+
+The only active strategy. `main.py` starts its loop exclusively; when
+`confluence.enabled: true`, the momentum/scalper/ML loops do not run at all,
+regardless of their own flags.
+
+- **Factors**: `multi_timeframe_trend`, `momentum`, `volatility_filter`,
+  `breakout`, `volume_confirmation`, `sentiment` (Fear & Greed, contrarian).
+  `macro_news_filter` is off by default — the `EconomicCalendar` is never
+  populated, so it would contribute a constant score of 1.0.
+- **Scoring**: weighted mean of factor scores, renormalized over the
+  categories actually present. **The score is in [0, 1]** — thresholds must
+  be on that scale. `min_confluence_score > 1.0` raises at startup.
+- **Direction**: weighted by `score * confidence`, requires a margin over the
+  opposing direction, plus `min_directional_score` so that directionless
+  filters cannot carry a signal on their own.
+- **Regimes**: `RegimeDetector` yields `trending` / `ranging` / `low_vol_chop` /
+  `high_vol_event`, steering factor weights and asset selection.
+- **Exits**: `strategies/confluence_exit.py` (`ConfluenceExitManager`) with its
+  own high/low tracking fed from the main loop, ATR from the feed.
+- **Backtest**: via `data/confluence_backtest_adapter.py`.
+
+### Momentum (strategies/momentum.py) — DISABLED
 
 - **Signal**: EMA9 crosses EMA21 on 5m candles + RSI filter
   - LONG: EMA9 > EMA21 + RSI in [35, 55]
   - SHORT: EMA9 < EMA21 + RSI in [45, 65]
 - **1h trend filter**: Blocks longs in downtrends, blocks shorts in uptrends
 - **ATR-based sizing**: SL = ATR×2.0, TP = ATR×4.0, trailing = ATR×1.2
-- **Cooldown**: 300s per symbol after signal
-- **Leverage**: 10–20x depending on confidence (RSI + EMA spread)
-- **Backtest results**: +4.2% return, 60% win rate, 6.3% max DD, Sharpe 1.14
+- **Old backtest results**: +4.2% return, 60% win rate, Sharpe 1.14 — note
+  these came from `generate_signal()`, which checks EMA *state* rather than
+  the crossover the live path used. They do not describe the live strategy.
 
 ### Scalper (strategies/crypto_scalper.py) — DISABLED
 
@@ -147,7 +214,7 @@ All feeds compute these on candle data:
 - **Leverage**: Base 20x, max 50x, scaled by confidence
 - Disabled via `scalper.enabled: false` in settings.yaml (too noisy on 1m timeframe)
 
-### ML Predictor (strategies/ml_predictor.py) — ENABLED
+### ML Predictor (strategies/ml_predictor.py) — DISABLED
 
 - **Model**: `GradientBoostingClassifier` (100 estimators, depth=5, lr=0.1)
 - **Features**: RSI, RSI-change, BB position, volume ratio, 5m/15m price change, EMA cross, momentum, volatility, sentiment
@@ -204,13 +271,19 @@ All feeds compute these on candle data:
 |-------|----------|
 | `positions` | Open positions (symbol, side, size, entry_price, leverage, SL/TP) |
 | `trades` | Closed trades with PNL, fees, entry/exit timestamps |
-| `portfolio_state` | Current balance, equity, unrealized/realized PNL snapshots |
+| `portfolio_state` | Balance, realized PNL, win/loss counts, daily start balance |
+| `equity_snapshots` | Persisted equity curve (throttled, default every 60s) |
+
+Trades **and** the equity curve are reloaded on startup — long-term
+performance would otherwise be unmeasurable across restarts.
 
 ### Key Metrics
 
-- `get_sharpe_ratio()`: Annualized Sharpe from hourly returns
-- `get_max_drawdown()`: Peak-to-trough drawdown percentage
+- `get_sharpe_ratio()`: Annualized Sharpe from **daily** returns (√365)
+- `get_max_drawdown()`: Peak-to-trough over the full persisted curve
 - `get_daily_drawdown()`: Intraday drawdown from today's peak
+- `get_profit_factor()`: gross profit / gross loss — **not** the payoff ratio
+- `get_expectancy()`, `get_net_pnl()`, `get_total_fees()`
 
 ## Configuration (config/settings.yaml)
 
@@ -282,22 +355,23 @@ Copy `config/secrets.env.example` to `config/secrets.env` and set:
 
 - Loads 90 days of hourly OHLCV from Binance via CCXT
 - Simulates positions with leverage, realistic fees (0.04%/0.06%)
-- Hard stops: 0.8% SL, 1.5% TP
-- Max 3 concurrent positions, 10% max per position, 5-period cooldown
+- Loads OHLCV via CCXT; source selectable (`--data-exchange kraken|onetrading|binance`)
+- Timeframe configurable (`--timeframe`, default **5m** — Confluence runs on 5m live)
+- Uses capital, fees and risk limits from `config/settings.yaml`
+- Honours signal-provided SL/TP and the `close` signal
+- **Never falls back to synthetic data silently** — pass `--allow-synthetic` to permit it.
+  `BacktestResult.data_source` records where the data came from.
 - Generates: Return%, Sharpe, Max DD, Win rate, Profit factor, Alpha vs. Buy&Hold
 
-<<<<<<< HEAD
 **Live Mode** is heavily guarded (see `LIVE_TRADING.md` and `tools/paper_to_live_checklist.py`). The bot supports both Paper and Live mode with proper branching in `main.py`.
 
-## Testing Strategies
-=======
 ### Strategies Tested in Backtest
->>>>>>> 9b3f3a1453c8b75481e9d6b3c1503aeaaedb5af7
 
-1. Scalper (RSI+BB+Volume)
-2. Momentum (EMA Cross)
-3. Mean Reversion (RSI+BB)
-4. Breakout (20-period high/low)
+1. **Confluence (Multi-Factor)** — the active strategy, via `data/confluence_backtest_adapter.py`
+2. Scalper (RSI+BB+Volume)
+3. Momentum (EMA Cross)
+4. Mean Reversion (RSI+BB)
+5. Breakout (20-period high/low)
 
 ## Notifications (notifications/reporter.py)
 
@@ -315,3 +389,15 @@ Copy `config/secrets.env.example` to `config/secrets.env` and set:
 4. The **scalper strategy is intentionally disabled** — do not re-enable without testing
 5. All Telegram messages intentionally use casual Austrian dialect — do not "fix" the style
 6. The backtester uses **Binance data**, not CoinGecko (the existing CLAUDE.md was outdated on this point)
+7. **`min_confluence_score` lives on a 0–1 scale.** The score is a weighted mean
+   of factor scores from [0, 1] with weights summing to 1.0, so it can never
+   exceed 1.0. A value like `3.5` is unreachable and silently blocks every
+   trade — that bug cost this project its entire runtime. `SignalAggregator`
+   now raises at startup on such a value; do not "fix" that by removing the check.
+8. **Exits must go through the OrderEngine.** `_close_position` books into the
+   portfolio only after `result.success`. Never bypass it — a locally closed but
+   really open position is the worst possible state.
+9. **Spot constraints apply in paper mode too.** Do not relax them to get more
+   trades in testing; that would make the test data unusable for a go-live decision.
+10. **Do not weaken the go-live gate to make it pass.** It is the only check
+    that looks at actual performance.

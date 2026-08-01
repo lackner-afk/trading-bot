@@ -158,14 +158,24 @@ Dieses Script (Phase 6) zeigt explizit, ob der Bot im **LIVE MODE** läuft, letz
 
 **Vor dem ersten Live-Einsatz unbedingt ausführen:**
 ```bash
+# Prüft Konfiguration UND tatsächliche Profitabilität
 python tools/paper_to_live_checklist.py
+
+# Nur der Profitabilitäts-Nachweis
+python tools/profitability_gate.py
 ```
+
 Siehe auch `LIVE_TRADING.md` für die vollständige Cutover-Checklist.
-```
 
-## Bitpanda / Real Portfolio Oversight (Phase 6)
+## Bitpanda / Real Portfolio Oversight
 
-Wenn du echtes Geld auf Bitpanda hast, nutze in dieser Grok-Session die integrierten `bitpanda-broker` MCP Tools für tägliche Checks:
+Der offizielle Bitpanda MCP-Server ist **strikt read-only** — er kann laut
+Doku ausdrücklich keine Orders platzieren, keine Mittel bewegen und das Konto
+nicht verändern. Er eignet sich damit für Kontrolle und Reconciliation, nicht
+als Handelsweg. Für die Ausführung auf Bitpanda Fusion wäre ein eigener
+REST-Client nötig (CCXT unterstützt Fusion nicht).
+
+Nützliche Tools für tägliche Checks:
 
 - `get_portfolio` → Dein reales Exposure in EUR
 - `list_trades` → Echte Trades abgleichen mit Bot-Logs
