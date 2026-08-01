@@ -169,13 +169,19 @@ Siehe auch `LIVE_TRADING.md` für die vollständige Cutover-Checklist.
 
 ## Bitpanda / Real Portfolio Oversight
 
-Der offizielle Bitpanda MCP-Server ist **strikt read-only** — er kann laut
-Doku ausdrücklich keine Orders platzieren, keine Mittel bewegen und das Konto
-nicht verändern. Er eignet sich damit für Kontrolle und Reconciliation, nicht
-als Handelsweg. Für die Ausführung auf Bitpanda Fusion wäre ein eigener
-REST-Client nötig (CCXT unterstützt Fusion nicht).
+Es gibt **zwei verschiedene Bitpanda-MCPs**:
 
-Nützliche Tools für tägliche Checks:
+- **Public-/Broker-MCP** (`bitpanda-labs/bitpanda-mcp`) — strikt read-only,
+  kann keine Orders platzieren. Auth über `BITPANDA_API_KEY`. Gut für die
+  tägliche Kontrolle deines echten Bestands.
+- **Fusion MCP** — kann traden. Bitpanda hat am 16.07.2026 API *und* MCP für
+  automatisiertes Trading auf Fusion gelauncht. Auth über `FUSION_API_KEY`.
+
+Für die Ausführung ist also entweder der Fusion-MCP oder die Fusion-REST-API
+nutzbar (CCXT unterstützt Fusion nicht — Issue #25354). Details zur
+API-Oberfläche in `LIVE_TRADING.md`.
+
+Nützliche read-only Tools für tägliche Checks:
 
 - `get_portfolio` → Dein reales Exposure in EUR
 - `list_trades` → Echte Trades abgleichen mit Bot-Logs

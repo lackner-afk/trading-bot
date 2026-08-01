@@ -109,11 +109,15 @@ Später wird es zusätzliche automatische Kill-Switches geben (max daily DD, API
   seit 2023 ein eigenständiges Unternehmen, *nicht* Bitpanda). CCXT
   unterstützt Fusion nicht (Issue #25354, offen seit Feb 2025, kein PR), die
   Anbindung braucht also einen eigenen REST-Client gegen die Fusion-API.
-- **Der offizielle Bitpanda MCP-Server kann nicht traden.** Er ist strikt
-  read-only (`get_portfolio`, `list_wallets`, `get_price`, `list_prices`,
-  `get_asset`, `list_transactions`, `list_trades`); die Doku sagt ausdrücklich,
-  er könne keine Orders platzieren. Er taugt als Kontrollinstanz für
-  Reconciliation, nicht als Ausführungsweg.
+- **Es gibt zwei verschiedene Bitpanda-MCPs — nicht verwechseln:**
+  - `bitpanda-labs/bitpanda-mcp` (Public-/Broker-API) ist **read-only**:
+    `get_portfolio`, `list_wallets`, `get_price`, `list_prices`, `get_asset`,
+    `list_transactions`, `list_trades`. Auth über `BITPANDA_API_KEY`.
+    Gut für Oversight, kann keine Orders platzieren.
+  - **Fusion MCP** kann traden. Bitpanda hat am 16.07.2026 API *und* MCP für
+    automatisiertes Trading auf Fusion gelauncht; laut Ankündigung lassen sich
+    darüber Orders platzieren, Positionen abrufen und das Buch verwalten.
+    Auth über einen eigenen Fusion-API-Key (`FUSION_API_KEY`).
 - **Order-Reconciliation ist ein Platzhalter.** `_reconcile_open_orders` zählt
   offene Orders und loggt sie; der Abgleich offline gefüllter Orders fehlt.
   `_reconcile_positions` warnt nur, statt wirklich zu vergleichen. Im
@@ -124,21 +128,57 @@ Später wird es zusätzliche automatische Kill-Switches geben (max daily DD, API
 
 ---
 
-## Bitpanda Fusion: bekannte Randbedingungen
+## Bitpanda Fusion: API-Oberfläche
 
-- **Spot-only.** Kein Leverage, keine Shorts (Margin ist bei Bitpanda als
-  "coming soon" angekündigt). Der Bot läuft deshalb auch im Paper-Modus
-  long-only mit Leverage 1 — siehe `trading:`-Block in `settings.yaml`.
-- **Eigene REST-API**, dokumentiert unter `docs.fusion.bitpanda.com` bzw.
-  `techsolutions.bitpanda.com`. Beide antworten auf automatisierte Abrufe mit
-  HTTP 403; für die Implementierung wird die OpenAPI-Spezifikation aus dem
-  eingeloggten Browser gebraucht.
-- **Getrennte Keys.** Ein künftiger `BITPANDA_FUSION_API_KEY` (Trading) muss
-  strikt vom read-only `BITPANDA_API_KEY` (MCP/Broker-API) getrennt bleiben.
-- **Offene Fragen vor der Anbindung:** Liefert Fusion OHLCV, oder muss der
-  Feed Marktdaten von Kraken beziehen (mit Preisbasis-Risiko)? Zeigt das
-  read-only Broker-Konto denselben Bestandstopf wie Fusion? Liegt eine
-  20-EUR-Position (20 % von 100 EUR) über der Mindestordergröße?
+Abgeleitet aus dem offiziellen CLI [`bitpanda-labs/bitpanda-fusion-cli`](https://github.com/bitpanda-labs/bitpanda-fusion-cli)
+(Go, Apache 2.0). Die Doku unter `docs.fusion.bitpanda.com` antwortet auf
+automatisierte Abrufe mit HTTP 403 — das CLI-README ist die belastbarste
+öffentlich zugängliche Quelle.
+
+| Punkt | Wert |
+|-------|------|
+| Base-URL | `https://api.fusion.bitpanda.com` |
+| Auth | `FUSION_API_KEY` (eigener Key, **getrennt** vom read-only `BITPANDA_API_KEY`) |
+| **Paar-Format** | `BTC-EUR` (Bindestrich!) — nicht `BTC/EUR`, nicht `BTC_EUR` |
+| Ordertypen | `limit`, `market` |
+| Ordergröße | `quantity` (Base) **oder** `amount` (Quote, z.B. 30 EUR) — exklusiv |
+| Order-Status | `open`, `closed`, `new`, `partially-filled`, `filled`, `canceled`, `filled-and-canceled`, `done-for-day`, `rejected` |
+| Candles | OHLCV vorhanden; Intervalle `1m, 5m, 10m, 15m, 30m, 1h, 4h, 1d`, `limit` max 1440, `from`/`to` als RFC3339 |
+| Instrument-Metadaten | Endpoint für Trading-Pairs liefert min/max Ordergröße, Tick-Size, Increments |
+| Weiteres | Orderbook (Tiefe 1–100), Tickers (Mid + 24h), Balances, Gebührenstaffel/30d-Volumen, Trades-Historie |
+
+Damit sind drei zuvor offene Fragen beantwortet:
+
+- **Fusion liefert OHLCV** inklusive 5m — der Feed braucht keine Kraken-Daten
+  und es entsteht kein Preisbasis-Risiko.
+- **Das Symbol-Mapping** ist `BTC_EUR` → `BTC-EUR`.
+- **Mindestordergröße** ist pro Paar über den Pairs-Endpoint abrufbar; die
+  Rundung auf Tick-Size/Increments muss vor jedem Order-Versand passieren
+  (häufigste Ursache für Live-Rejects).
+
+Offen bleibt: Zeigt das read-only Broker-Konto denselben Bestandstopf wie
+Fusion? Davon hängt ab, ob der Broker-MCP als Reconciliation-Quelle taugt.
+
+### Spot-only
+
+Kein Leverage, keine Shorts (Margin ist bei Bitpanda als "coming soon"
+angekündigt); weder CLI noch API-Oberfläche kennen entsprechende Parameter.
+Der Bot läuft deshalb auch im Paper-Modus long-only mit Leverage 1 — siehe
+`trading:`-Block in `settings.yaml`.
+
+### Zwei mögliche Ausführungswege
+
+1. **REST direkt** — der Bot spricht `api.fusion.bitpanda.com` an. Native
+   Schnittstelle für ein Programm: kein Zusatzprozess, deterministisches
+   Fehlerverhalten, volle Kontrolle über Retries und Idempotenz.
+2. **Über den Fusion-MCP** — der Bot spricht als MCP-*Client* mit dem
+   Fusion-MCP-Server, der seinerseits die REST-API kapselt. Kein LLM im
+   Ausführungspfad; der Vorteil ist, dass Bitpanda die Tool-Oberfläche pflegt.
+   Preis: ein zusätzlicher Prozess-Hop in einem Pfad, der Stop-Loss-Orders
+   zuverlässig absetzen muss.
+
+Beide sind legitim. Für die Umsetzung wird die Transportschicht hinter
+`BaseOrderEngine` gekapselt, damit die Entscheidung nicht die Strategie berührt.
 
 ---
 
