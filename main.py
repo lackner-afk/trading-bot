@@ -34,6 +34,9 @@ from strategies.momentum import MomentumStrategy
 from strategies.ml_predictor import MLPredictor
 from strategies.confluence_strategy import ConfluenceStrategy  # New 2026 multi-factor system
 from strategies.confluence_exit import ConfluenceExitManager
+from core.bitpanda_fusion_engine import BitpandaFusionOrderEngine
+from core.spot_reconciliation import run_spot_reconciliation
+from data.bitpanda_fusion_feed import BitpandaFusionFeed
 from notifications.reporter import Reporter
 
 
@@ -143,21 +146,12 @@ class TradingBot:
         scalper_config = strategy_config.get('scalper', {})
         pairs = momentum_config.get('pairs', scalper_config.get('pairs', []))
 
+        # Ziel-Venue für den Live-Modus: 'fusion' (Bitpanda Fusion, Default)
+        # oder 'onetrading' (Alt-Pfad via CCXT).
+        self.live_venue = (self.config.get('live', {}) or {}).get('venue', 'fusion')
+
         if self.is_live:
             # === LIVE MODE ===
-            api_key = os.getenv('ONETRADING_API_KEY')
-            api_secret = os.getenv('ONETRADING_API_SECRET')
-
-            if not api_key or not api_secret:
-                raise RuntimeError(
-                    "LIVE MODE AKTIVIERT, aber ONETRADING_API_KEY / ONETRADING_API_SECRET fehlen in secrets.env!"
-                )
-
-            self.logger = logging.getLogger('TradingBot')  # re-fetch after possible config load
-            self.logger.critical("=== LIVE MODE INITIALISIERT ===")
-            self.logger.critical("Verwende OneTradingCCXTFeed + LiveOrderEngine")
-
-            # Echte Execution Engine.
             # shadow_mode lag bisher nicht in der übergebenen Config: main.py
             # reichte nur den fees:-Block durch, sodass sich Shadow Mode
             # ausschließlich durch ein shadow_mode: true INNERHALB von fees:
@@ -166,21 +160,54 @@ class TradingBot:
             live_config = dict(fees_config)
             live_config.update(self.config.get('live', {}) or {})
 
+            self.logger.critical("=== LIVE MODE INITIALISIERT ===")
+            self.logger.critical(f"Venue: {self.live_venue}")
+
             if live_config.get('shadow_mode'):
                 self.logger.critical("SHADOW MODE aktiv - es werden KEINE echten Orders platziert")
 
-            self.order_engine = LiveOrderEngine(
-                api_key=api_key,
-                api_secret=api_secret,
-                config=live_config
-            )
+            if self.live_venue == 'fusion':
+                # Eigener Key, strikt getrennt vom read-only BITPANDA_API_KEY
+                # (Broker-/MCP-Zugang). Verwechslung waere ein Sicherheitsproblem.
+                api_key = os.getenv('FUSION_API_KEY')
+                if not api_key:
+                    raise RuntimeError(
+                        "LIVE MODE auf Fusion, aber FUSION_API_KEY fehlt in secrets.env! "
+                        "Nicht mit BITPANDA_API_KEY (read-only) verwechseln."
+                    )
 
-            # Echter One Trading Feed (mit Keys für Balance etc.)
-            self.crypto_feed = OneTradingCCXTFeed(
-                api_key=api_key,
-                api_secret=api_secret,
-                config={'pairs': pairs}
-            )
+                self.logger.critical("Verwende BitpandaFusionFeed + BitpandaFusionOrderEngine")
+
+                self.order_engine = BitpandaFusionOrderEngine(
+                    api_key=api_key,
+                    config=live_config,
+                    constraints=self.constraints,
+                )
+                self.crypto_feed = BitpandaFusionFeed(
+                    api_key=api_key,
+                    config={**live_config, 'pairs': pairs},
+                )
+            else:
+                api_key = os.getenv('ONETRADING_API_KEY')
+                api_secret = os.getenv('ONETRADING_API_SECRET')
+
+                if not api_key or not api_secret:
+                    raise RuntimeError(
+                        "LIVE MODE AKTIVIERT, aber ONETRADING_API_KEY / ONETRADING_API_SECRET fehlen in secrets.env!"
+                    )
+
+                self.logger.critical("Verwende OneTradingCCXTFeed + LiveOrderEngine")
+
+                self.order_engine = LiveOrderEngine(
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    config=live_config
+                )
+                self.crypto_feed = OneTradingCCXTFeed(
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    config={'pairs': pairs}
+                )
         else:
             # === PAPER MODE (Standard) ===
             self.order_engine = OrderEngine(config=fees_config)
@@ -302,15 +329,38 @@ class TradingBot:
         await self.crypto_feed.start()
         await self.reporter.start()
 
-        # === Reconciliation im Live-Modus (Phase 3/4) ===
+        # === Reconciliation im Live-Modus ===
         if self.is_live:
-            self.logger.critical("Starte Reconciliation mit One Trading (Exchange als Source of Truth)...")
             try:
-                report = await run_startup_reconciliation(self.portfolio, self.order_engine)
+                if self.live_venue == 'fusion':
+                    # Preflight zuerst: die URL-Pfade der Fusion-API sind aus dem
+                    # offiziellen CLI abgeleitet, nicht gegen die (nicht abrufbare)
+                    # Doku verifiziert. Lieber hier sauber scheitern als beim
+                    # ersten echten Order-Versuch.
+                    self.logger.critical("Fusion-Preflight (Auth + Endpunkte)...")
+                    preflight = await self.order_engine.preflight()
+                    if not preflight.get('ok'):
+                        raise RuntimeError(
+                            "Fusion-Preflight fehlgeschlagen: "
+                            + "; ".join(preflight.get('errors', []))
+                        )
+
+                    self.logger.critical("Spot-Reconciliation (Kontobestand = Position)...")
+                    report = await run_spot_reconciliation(
+                        self.portfolio, self.order_engine,
+                        prices=self.crypto_feed.get_prices(),
+                        quote_currency=self.config.get('general', {}).get('base_currency', 'EUR'),
+                    )
+                else:
+                    self.logger.critical("Starte Reconciliation mit One Trading (Exchange als Source of Truth)...")
+                    report = await run_startup_reconciliation(self.portfolio, self.order_engine)
+
                 if not report.success:
                     self.logger.critical("RECONCILIATION FEHLGESCHLAGEN — Live-Start wird aus Sicherheitsgründen abgebrochen!")
                     raise RuntimeError("Reconciliation failed. Bot refuses to start in live mode.")
                 self.logger.critical("Reconciliation erfolgreich abgeschlossen.")
+            except RuntimeError:
+                raise
             except Exception as recon_err:
                 self.logger.critical(f"Reconciliation Fehler: {recon_err}")
                 raise RuntimeError("Reconciliation error — aborting live start for safety") from recon_err

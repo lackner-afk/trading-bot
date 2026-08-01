@@ -71,7 +71,38 @@ go_live_gate:
 # Eintrag INNERHALB von fees: aktivieren ließ — die in LIVE_TRADING.md
 # empfohlene Rollout-Stufe 1 war praktisch nicht erreichbar.
 live:
+  # Ziel-Venue: fusion (Bitpanda Fusion, Default) | onetrading (Alt-Pfad via CCXT)
+  venue: fusion
   shadow_mode: true    # true = loggt Orders, platziert aber keine echten
+
+  # Bitpanda Fusion. API-Key kommt aus FUSION_API_KEY in secrets.env —
+  # NICHT mit BITPANDA_API_KEY verwechseln, das ist der read-only
+  # Broker-/MCP-Zugang ohne Handelsrechte.
+  host: https://api.fusion.bitpanda.com
+  timeout_seconds: 20
+  max_retries: 3
+
+  # Auth-Header. Bitpanda nutzt bei seinen anderen APIs X-Api-Key; falls
+  # Fusion Bearer erwartet, hier umstellen statt Code anzufassen:
+  #   auth_header: Authorization
+  #   auth_scheme: Bearer
+  auth_header: X-Api-Key
+
+  # URL-Pfade. Aus dem offiziellen CLI bitpanda-labs/bitpanda-fusion-cli
+  # abgeleitet, aber NICHT gegen docs.fusion.bitpanda.com verifiziert (die
+  # Doku blockt automatisierte Abrufe). Der Preflight beim Live-Start prüft
+  # sie gegen die echte API; bei Abweichung hier korrigieren.
+  endpoints:
+    tickers: /v1/tickers
+    pairs: /v1/pairs
+    candles: /v1/candles/{pair}
+    orderbook: /v1/orderbook/{pair}
+    assets: /v1/assets
+    account: /v1/account
+    balances: /v1/account/balances
+    orders: /v1/orders
+    order_by_id: /v1/orders/{order_id}
+    trades: /v1/trades
 
 exchanges:
   onetrading:

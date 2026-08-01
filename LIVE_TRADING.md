@@ -166,19 +166,44 @@ angekündigt); weder CLI noch API-Oberfläche kennen entsprechende Parameter.
 Der Bot läuft deshalb auch im Paper-Modus long-only mit Leverage 1 — siehe
 `trading:`-Block in `settings.yaml`.
 
-### Zwei mögliche Ausführungswege
+### Ausführungsweg: REST direkt
 
-1. **REST direkt** — der Bot spricht `api.fusion.bitpanda.com` an. Native
-   Schnittstelle für ein Programm: kein Zusatzprozess, deterministisches
-   Fehlerverhalten, volle Kontrolle über Retries und Idempotenz.
-2. **Über den Fusion-MCP** — der Bot spricht als MCP-*Client* mit dem
-   Fusion-MCP-Server, der seinerseits die REST-API kapselt. Kein LLM im
-   Ausführungspfad; der Vorteil ist, dass Bitpanda die Tool-Oberfläche pflegt.
-   Preis: ein zusätzlicher Prozess-Hop in einem Pfad, der Stop-Loss-Orders
-   zuverlässig absetzen muss.
+Umgesetzt ist der direkte REST-Weg (`core/fusion_client.py` +
+`core/bitpanda_fusion_engine.py`). Für einen Dauerläufer-Bot ist das die
+native Schnittstelle: kein Zusatzprozess, deterministisches Fehlerverhalten,
+volle Kontrolle über Retries und Idempotenz — wichtig in einem Pfad, der
+Stop-Loss-Orders zuverlässig absetzen muss.
 
-Beide sind legitim. Für die Umsetzung wird die Transportschicht hinter
-`BaseOrderEngine` gekapselt, damit die Entscheidung nicht die Strategie berührt.
+Der **Fusion-MCP** bleibt parallel nutzbar, um aus Claude oder Cursor heraus
+manuell auf dasselbe Konto zuzugreifen. Beide Wege enden bei derselben
+Execution-Engine von Fusion.
+
+### Was implementiert ist
+
+| Komponente | Datei |
+|---|---|
+| REST-Client (Auth, Backoff, Antwort-Normalisierung) | `core/fusion_client.py` |
+| Order-Engine (Market/Limit, Präzision, Idempotenz, Shadow) | `core/bitpanda_fusion_engine.py` |
+| Marktdaten-Feed (Tickers 5s, Candles 60s) | `data/bitpanda_fusion_feed.py` |
+| Spot-Reconciliation (Bestand = Position) | `core/spot_reconciliation.py` |
+| Gemeinsames Engine-Interface | `core/execution_base.py` |
+| Zentrales Symbol-Mapping | `data/symbols.py` |
+
+Aktiviert über `live.venue: fusion` in `settings.yaml`. Key kommt aus
+`FUSION_API_KEY`.
+
+### Preflight — bevor scharf geschaltet wird
+
+Die URL-Pfade in `live.endpoints` sind aus dem CLI abgeleitet, **nicht** gegen
+die Doku verifiziert (die blockt automatisierte Abrufe). Beim Live-Start läuft
+deshalb zuerst ein Preflight gegen Pairs, Tickers und Balances. Schlägt er
+fehl, startet der Bot nicht — dann sind entweder die Pfade oder der
+`auth_header` in `settings.yaml` zu korrigieren. Beides ist reine Konfiguration,
+ohne Codeänderung.
+
+`live.shadow_mode` steht per Default auf `true`: die Engine loggt exakt, was
+sie tun würde, schickt aber nichts los. Erst nach grünem Preflight und einer
+sauberen Shadow-Phase auf `false` setzen.
 
 ---
 

@@ -17,13 +17,14 @@ from typing import Dict, Optional, Callable, List
 
 import ccxt.async_support as ccxt
 
+from .execution_base import BaseOrderEngine
 # Gemeinsame Typen aus der Paper-Engine wiederverwenden
 from .order_engine import (
     Order, OrderType, OrderStatus, ExecutionResult
 )
 
 
-class LiveOrderEngine:
+class LiveOrderEngine(BaseOrderEngine):
     """
     Echte Order-Ausführung auf One Trading via CCXT.
 

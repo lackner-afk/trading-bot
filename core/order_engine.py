@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Callable
 from enum import Enum
 
+from core.execution_base import BaseOrderEngine
+
 
 class OrderType(Enum):
     """Order-Typen"""
@@ -68,7 +70,7 @@ class ExecutionResult:
     latency_ms: int
 
 
-class OrderEngine:
+class OrderEngine(BaseOrderEngine):
     """
     Simulierte Order-Execution mit realistischen Marktbedingungen
     """
