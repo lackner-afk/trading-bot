@@ -36,13 +36,40 @@ def check_settings_yaml() -> tuple[bool, str]:
     return True, "settings.yaml sieht für Live gut aus"
 
 def check_secrets() -> tuple[bool, str]:
+    """
+    Prüft die Keys des tatsächlich konfigurierten Ziel-Venues.
+
+    Vorher wurde ausschliesslich auf ONETRADING_API_KEY/SECRET getestet —
+    auch dann, wenn live.venue auf fusion steht. Die Checkliste wäre also
+    für das eigentliche Ziel-Venue grün geworden, ohne dessen Key zu prüfen.
+    """
     secrets_path = PROJECT_ROOT / "config" / "secrets.env"
     if not secrets_path.exists():
         return False, "secrets.env fehlt"
 
     content = secrets_path.read_text()
+
+    venue = "fusion"
+    settings = PROJECT_ROOT / "config" / "settings.yaml"
+    if settings.exists():
+        try:
+            import yaml
+            cfg = yaml.safe_load(settings.read_text()) or {}
+            venue = (cfg.get("live", {}) or {}).get("venue", "fusion")
+        except Exception:
+            pass
+
+    if venue == "fusion":
+        # Der Key muss gesetzt sein, nicht nur genannt — ein leeres
+        # FUSION_API_KEY= reicht nicht.
+        for line in content.splitlines():
+            if line.strip().startswith("FUSION_API_KEY="):
+                if line.split("=", 1)[1].strip():
+                    return True, "FUSION_API_KEY gesetzt (Validierung beim Preflight)"
+                return False, "FUSION_API_KEY ist leer"
+        return False, "FUSION_API_KEY nicht in secrets.env gefunden (Ziel-Venue: fusion)"
+
     if "ONETRADING_API_KEY=" in content and "ONETRADING_API_SECRET=" in content:
-        # Very basic check – real validation happens at runtime
         return True, "secrets.env vorhanden (Keys werden beim Start validiert)"
     return False, "ONETRADING_API_KEY / SECRET nicht in secrets.env gefunden"
 

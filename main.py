@@ -57,12 +57,20 @@ class TradingBot:
     MAX_EXIT_FAILURES = 5
 
     def __init__(self, config_path: str = 'config/settings.yaml'):
-        # Logging einrichten
+        # Vorläufiges Logging, damit das Laden der Config schon protokolliert wird
         self._setup_logging()
 
         # Konfiguration laden
         self.config = self._load_config(config_path)
         self.logger = logging.getLogger('TradingBot')
+
+        # general.log_level wurde bisher nirgends ausgewertet — INFO war hart
+        # verdrahtet. Jetzt wirkt der Config-Wert wirklich.
+        self._setup_logging(self.config.get('general', {}).get('log_level', 'INFO'))
+
+        # Stop-Signal für sauberes Herunterfahren. Alle Loops warten darauf
+        # statt auf ein blindes asyncio.sleep — siehe _sleep().
+        self._stop_event: Optional[asyncio.Event] = None
 
         # Komponenten initialisieren
         self._init_components()
@@ -71,16 +79,68 @@ class TradingBot:
         self.running = False
         self.start_time = None
 
-    def _setup_logging(self):
-        """Konfiguriert Logging — schreibt in bot.log"""
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s [%(name)s] %(levelname)s: %(message)s',
+    async def _sleep(self, seconds: float) -> bool:
+        """
+        Wartet, lässt sich aber vom Stop-Signal unterbrechen.
+
+        Vorher schliefen die Loops blind (`_reporting_loop` und
+        `_telegram_hourly_loop` bis zu 3600 s) und prüften `self.running` erst
+        danach. `systemctl stop` lief deshalb in den 90-s-Timeout und dann in
+        SIGKILL — `stop()` mit `cancel_all_orders()` kam nie durch.
+
+        Returns True, wenn regulär gewartet wurde; False, wenn gestoppt wird.
+        """
+        if self._stop_event is None:
+            await asyncio.sleep(seconds)
+            return self.running
+
+        try:
+            await asyncio.wait_for(self._stop_event.wait(), timeout=seconds)
+            return False        # Event gesetzt -> Stop
+        except asyncio.TimeoutError:
+            return self.running
+
+    def request_stop(self):
+        """Fordert ein geordnetes Herunterfahren an (aus dem Signal-Handler)."""
+        self.running = False
+        if self._stop_event is not None:
+            try:
+                self._stop_event.set()
+            except RuntimeError:
+                pass
+
+    def _setup_logging(self, level: str = 'INFO'):
+        """
+        Logging nach bot.log UND auf stdout.
+
+        Zwei Korrekturen gegenüber vorher:
+        - `RotatingFileHandler` statt `FileHandler`: bei 45-s-Zyklen mit
+          Faktor-Breakdowns wächst bot.log über Wochen unbegrenzt.
+        - Zusätzlich ein `StreamHandler`: bisher gab es nur den FileHandler,
+          weshalb `journalctl -u trading-bot` und `deploy/status.sh` praktisch
+          nichts zu sehen bekamen — das Monitoring lief ins Leere.
+        """
+        from logging.handlers import RotatingFileHandler
+
+        formatter = logging.Formatter(
+            '%(asctime)s [%(name)s] %(levelname)s: %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S',
-            handlers=[
-                logging.FileHandler('bot.log', encoding='utf-8'),
-            ]
         )
+
+        file_handler = RotatingFileHandler(
+            'bot.log', maxBytes=10 * 1024 * 1024, backupCount=5, encoding='utf-8'
+        )
+        file_handler.setFormatter(formatter)
+
+        stream_handler = logging.StreamHandler(sys.stdout)
+        stream_handler.setFormatter(formatter)
+
+        root = logging.getLogger()
+        root.setLevel(getattr(logging, str(level).upper(), logging.INFO))
+        for handler in list(root.handlers):
+            root.removeHandler(handler)
+        root.addHandler(file_handler)
+        root.addHandler(stream_handler)
 
     def _load_config(self, config_path: str) -> Dict:
         """Lädt Konfiguration aus YAML"""
@@ -278,6 +338,10 @@ class TradingBot:
         self.running = True
         self.start_time = datetime.now()
 
+        # Das Event braucht einen laufenden Event-Loop, wird also hier erzeugt
+        # und nicht im Konstruktor.
+        self._stop_event = asyncio.Event()
+
         mode = self.config.get('general', {}).get('mode', 'paper')
         live_confirmed = self.config.get('general', {}).get('live_explicit_confirmation', False)
 
@@ -463,11 +527,11 @@ class TradingBot:
                 # Exit-Conditions prüfen
                 await self._check_exit_conditions(prices)
 
-                await asyncio.sleep(1)
+                await self._sleep(1)
 
             except Exception as e:
                 self.logger.error(f"Fehler im Haupt-Loop: {e}")
-                await asyncio.sleep(5)
+                await self._sleep(5)
 
     def _get_trend(self, candles) -> bool:
         """Ermittelt Trendrichtung anhand 1h EMA9/EMA21. True = Aufwärtstrend, False = Abwärtstrend, None = unklar"""
@@ -513,11 +577,11 @@ class TradingBot:
 
                         await self._execute_signal(signal, strategy_name='momentum')
 
-                await asyncio.sleep(30)
+                await self._sleep(30)
 
             except Exception as e:
                 self.logger.error(f"Fehler im Momentum-Loop: {e}")
-                await asyncio.sleep(10)
+                await self._sleep(10)
 
     async def _scalper_loop(self):
         """Scalper-Strategie Loop (alle 15 Sekunden)"""
@@ -541,11 +605,11 @@ class TradingBot:
                         if signal.confidence >= 0.6:
                             await self._execute_signal(signal, strategy_name='scalper')
 
-                await asyncio.sleep(15)
+                await self._sleep(15)
 
             except Exception as e:
                 self.logger.error(f"Fehler im Scalper-Loop: {e}")
-                await asyncio.sleep(10)
+                await self._sleep(10)
 
     async def _ml_loop(self):
         """ML-Predictor Loop (alle 5 Minuten)"""
@@ -572,11 +636,11 @@ class TradingBot:
                             self.logger.info(f"ML-Signal: {symbol} {prediction.direction} "
                                            f"(Prob: {prediction.probability:.0%})")
 
-                await asyncio.sleep(300)  # 5 Minuten
+                await self._sleep(300)  # 5 Minuten
 
             except Exception as e:
                 self.logger.error(f"Fehler im ML-Loop: {e}")
-                await asyncio.sleep(60)
+                await self._sleep(60)
 
     async def _confluence_loop(self):
         """Neue Multi-Factor Confluence Strategie Loop (Phase 1+ der Überarbeitung)"""
@@ -726,11 +790,11 @@ class TradingBot:
                 else:
                     self.logger.warning("[CONFLUENCE CYCLE] No symbols analyzed this cycle")
 
-                await asyncio.sleep(interval)
+                await self._sleep(interval)
 
             except Exception as e:
                 self.logger.error(f"Fehler im Confluence-Loop: {e}")
-                await asyncio.sleep(30)
+                await self._sleep(30)
 
     async def _risk_check_loop(self):
         """Risk-Check Loop (alle 5 Minuten)"""
@@ -751,18 +815,18 @@ class TradingBot:
                 elif metrics['status'] == 'WARNING' and daily_dd > 0:
                     self.reporter.print_warning(f"Drawdown bei {daily_dd:.1%}")
 
-                await asyncio.sleep(300)
+                await self._sleep(300)
 
             except Exception as e:
                 self.logger.error(f"Fehler im Risk-Check: {e}")
-                await asyncio.sleep(60)
+                await self._sleep(60)
 
     async def _reporting_loop(self):
         """Reporting Loop"""
         self.logger.info("Reporting-Loop gestartet")
 
         # Erster Report nach 5 Minuten
-        await asyncio.sleep(300)
+        await self._sleep(300)
 
         while self.running:
             try:
@@ -796,11 +860,11 @@ class TradingBot:
                         self.reporter.console.print("\n[bold cyan]Phase 6 Attribution[/bold cyan]")
                         self.reporter.console.print(attr_text)
 
-                await asyncio.sleep(3600)  # 1 Stunde
+                await self._sleep(3600)  # 1 Stunde
 
             except Exception as e:
                 self.logger.error(f"Fehler im Reporting: {e}")
-                await asyncio.sleep(60)
+                await self._sleep(60)
 
     async def _execute_signal(self, signal, strategy_name: str = 'momentum',
                              regime: str = None, macro_risk_multiplier: float = 1.0):
@@ -869,13 +933,34 @@ class TradingBot:
         # und die Reduktionen wieder aufgehoben.
         position_size = min(position_size, state.equity * self.risk_manager.max_position_size)
 
-        # Mindest-Ordervolumen des Venues
+        # Mindest-Ordervolumen des Venues.
+        #
+        # Achtung, das ist eine Falle mit Dauerwirkung: die Positionsgröße ist
+        # ein fester Anteil des Equity. Fällt das Equity unter
+        # min_order_notional / max_position_size (bei 10 € und 15 % also unter
+        # ~67 €), liegt JEDE künftige Order unter dem Minimum — der Bot handelt
+        # nie wieder, ohne dass etwas kaputt wäre. Das darf nicht still
+        # passieren, sonst steht der Trade-Zähler wochenlang und niemand weiß warum.
         if position_size < self.constraints.min_order_notional_eur:
-            self.logger.info(
-                f"Order zu klein: {position_size:.2f}€ < "
-                f"{self.constraints.min_order_notional_eur:.2f}€ Mindestvolumen"
-            )
+            if not getattr(self, '_min_notional_warned', False):
+                self._min_notional_warned = True
+                schwelle = (self.constraints.min_order_notional_eur
+                            / max(self.risk_manager.max_position_size, 1e-9))
+                self.logger.critical(
+                    f"KAPITAL ZU KLEIN: Order waere {position_size:.2f}€, Minimum ist "
+                    f"{self.constraints.min_order_notional_eur:.2f}€. Bei einem Equity "
+                    f"unter {schwelle:.0f}€ kann der Bot dauerhaft nicht mehr handeln. "
+                    f"Kapital aufstocken oder max_position_size erhoehen."
+                )
+                if getattr(self, 'reporter', None):
+                    asyncio.create_task(self.reporter.send_message(
+                        f"⚠️ Bot kann nicht mehr handeln: Order waere {position_size:.2f}€, "
+                        f"Minimum {self.constraints.min_order_notional_eur:.2f}€. "
+                        f"Equity zu klein."
+                    ))
             return
+
+        self._min_notional_warned = False
 
         if position_size > state.balance or state.balance < 20:
             return
@@ -1313,7 +1398,7 @@ class TradingBot:
 
     async def _telegram_hourly_loop(self):
         """Sendet stündlichen Telegram-Report"""
-        await asyncio.sleep(3600)   # erste Sendung nach 1h
+        await self._sleep(3600)   # erste Sendung nach 1h
         while self.running:
             try:
                 state = self.portfolio.get_state()
@@ -1328,7 +1413,7 @@ class TradingBot:
                 )
             except Exception as e:
                 self.logger.error(f"Telegram-Loop Fehler: {e}")
-            await asyncio.sleep(3600)
+            await self._sleep(3600)
 
     async def _close_all_positions(self, reason: str):
         """Schließt alle Positionen"""
@@ -1383,8 +1468,13 @@ def main():
     bot = TradingBot()
 
     def signal_handler(sig, frame):
+        # request_stop() setzt zusätzlich das asyncio-Event, sodass die Loops
+        # sofort aus ihrem Warten kommen. Vorher wurde nur running=False
+        # gesetzt und die Reporting-Loops schliefen bis zu 3600 s weiter —
+        # systemctl stop lief in den Timeout und dann in SIGKILL, wodurch
+        # stop() mit cancel_all_orders() nie durchlief.
         print("\nBeende Bot...")
-        bot.running = False
+        bot.request_stop()
         pid_file.unlink(missing_ok=True)
 
     signal.signal(signal.SIGINT, signal_handler)

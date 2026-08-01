@@ -9,6 +9,10 @@ SERVER_IP="${1:?Fehler: Server-IP angeben! Usage: ./deploy.sh 123.45.67.89}"
 BOT_USER="botuser"
 BOT_DIR="/home/$BOT_USER/trading-bot"
 
+# Projektwurzel relativ zum Skript. Vorher stand hier ein hart codierter Pfad
+# (/Users/nici/Projects/trading-bot/), das Skript lief nur von einem Rechner.
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 echo "================================================"
 echo "  Deploy nach $SERVER_IP"
 echo "================================================"
@@ -33,7 +37,7 @@ rsync -avz --delete \
     --exclude 'bot.pid' \
     --exclude 'deploy/' \
     -e ssh \
-    /Users/nici/Projects/trading-bot/ \
+    "${PROJECT_ROOT}/" \
     root@${SERVER_IP}:${BOT_DIR}/
 
 # Ownership fixen
