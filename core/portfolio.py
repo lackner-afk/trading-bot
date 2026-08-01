@@ -80,7 +80,8 @@ class Portfolio:
     Fake-Portfolio-Management mit SQLite-Persistenz
     """
 
-    def __init__(self, start_capital: float = 10000.0, db_path: str = 'trades.db'):
+    def __init__(self, start_capital: float = 10000.0, db_path: str = 'trades.db',
+                 snapshot_interval_seconds: int = 60):
         self.start_capital = start_capital
         self.balance = start_capital
         self.equity = start_capital
@@ -100,6 +101,12 @@ class Portfolio:
         # Historische Daten für Metriken
         self.equity_history: List[tuple] = []  # (timestamp, equity)
         self.pnl_history: List[float] = []
+
+        # Equity-Snapshots werden gedrosselt geschrieben. update_position_prices()
+        # läuft im 1s-Main-Loop; ungedrosselt entstünden 86.400 Punkte pro Tag,
+        # und genau diese Sekunden-Auflösung hat die Sharpe-Berechnung verfälscht.
+        self.snapshot_interval_seconds = snapshot_interval_seconds
+        self._last_snapshot: Optional[datetime] = None
 
         self._init_db()
         self._load_state()
@@ -145,6 +152,27 @@ class Portfolio:
             )
         ''')
 
+        # Equity-Verlauf dauerhaft speichern — Basis für Sharpe, Max-Drawdown
+        # und das Profitabilitäts-Gate. Vorher lag die Kurve nur im RAM und
+        # war nach jedem Neustart weg.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS equity_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                equity REAL NOT NULL,
+                balance REAL NOT NULL
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_equity_ts ON equity_snapshots(ts)')
+
+        # Migration: portfolio_state um Tagesstart-Felder erweitern (additiv,
+        # damit bestehende trades.db auf dem Server nicht kaputtgeht).
+        cursor.execute('PRAGMA table_info(portfolio_state)')
+        existing_cols = {row[1] for row in cursor.fetchall()}
+        for col, coltype in (('daily_start_balance', 'REAL'), ('day_start', 'TEXT')):
+            if col not in existing_cols:
+                cursor.execute(f'ALTER TABLE portfolio_state ADD COLUMN {col} {coltype}')
+
         conn.commit()
         conn.close()
 
@@ -153,14 +181,30 @@ class Portfolio:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
-        # Lade Portfolio-State
-        cursor.execute('SELECT * FROM portfolio_state WHERE id = 1')
+        # Lade Portfolio-State (explizite Spalten, damit spätere Migrationen
+        # die Indizes nicht verschieben)
+        cursor.execute('''
+            SELECT balance, realized_pnl, win_count, loss_count,
+                   daily_start_balance, day_start
+            FROM portfolio_state WHERE id = 1
+        ''')
         row = cursor.fetchone()
         if row:
-            self.balance = row[1]
-            self.realized_pnl = row[2]
-            self.win_count = row[3]
-            self.loss_count = row[4]
+            self.balance = row[0]
+            self.realized_pnl = row[1]
+            self.win_count = row[2]
+            self.loss_count = row[3]
+            # Tagesstart weiterführen, sonst resettet der Daily-Drawdown-Guard
+            # bei jedem Neustart und der Kill-Switch wäre umgehbar.
+            if row[4] is not None and row[5]:
+                saved_day = datetime.fromisoformat(row[5]).date()
+                if saved_day == datetime.now().date():
+                    self.daily_start_balance = row[4]
+                    self.day_start = saved_day
+                else:
+                    self.daily_start_balance = self.balance
+            else:
+                self.daily_start_balance = self.balance
 
         # Lade offene Positionen
         cursor.execute('SELECT * FROM positions')
@@ -168,6 +212,35 @@ class Portfolio:
             data = json.loads(row[1])
             data['timestamp'] = datetime.fromisoformat(data['timestamp'])
             self.positions[row[0]] = Position(**data)
+
+        # Lade abgeschlossene Trades — ohne das sind get_avg_win_loss(),
+        # get_recent_trades() und die Factor-Attribution nach jedem Neustart
+        # leer, während win_count/loss_count überleben. Die Metriken haben
+        # sich dadurch widersprochen.
+        cursor.execute('''
+            SELECT id, symbol, side, size, entry_price, exit_price, leverage,
+                   pnl, fees, entry_time, exit_time, strategy, market_type
+            FROM trades ORDER BY id
+        ''')
+        for r in cursor.fetchall():
+            self.trades.append(Trade(
+                id=r[0], symbol=r[1], side=r[2], size=r[3],
+                entry_price=r[4], exit_price=r[5], leverage=r[6],
+                pnl=r[7], fees=r[8],
+                entry_time=datetime.fromisoformat(r[9]),
+                exit_time=datetime.fromisoformat(r[10]),
+                strategy=r[11], market_type=r[12] or 'crypto'
+            ))
+
+        # Equity-Kurve der letzten 24h in den RAM-Puffer zurückholen
+        cutoff = (datetime.now() - timedelta(hours=24)).isoformat()
+        cursor.execute(
+            'SELECT ts, equity FROM equity_snapshots WHERE ts > ? ORDER BY ts',
+            (cutoff,)
+        )
+        self.equity_history = [
+            (datetime.fromisoformat(ts), eq) for ts, eq in cursor.fetchall()
+        ]
 
         conn.close()
         self._update_equity()
@@ -178,9 +251,13 @@ class Portfolio:
         cursor = conn.cursor()
 
         cursor.execute('''
-            INSERT OR REPLACE INTO portfolio_state (id, balance, realized_pnl, win_count, loss_count, last_update)
-            VALUES (1, ?, ?, ?, ?, ?)
-        ''', (self.balance, self.realized_pnl, self.win_count, self.loss_count, datetime.now().isoformat()))
+            INSERT OR REPLACE INTO portfolio_state
+                (id, balance, realized_pnl, win_count, loss_count, last_update,
+                 daily_start_balance, day_start)
+            VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+        ''', (self.balance, self.realized_pnl, self.win_count, self.loss_count,
+              datetime.now().isoformat(),
+              self.daily_start_balance, self.day_start.isoformat()))
 
         # Speichere Positionen
         cursor.execute('DELETE FROM positions')
@@ -257,9 +334,11 @@ class Portfolio:
             self.loss_count += 1
             self.consecutive_losses += 1
 
-        # Trade Record erstellen
+        # Trade Record erstellen. Die ID kommt nach dem Insert aus SQLite
+        # (AUTOINCREMENT) — len(self.trades)+1 hat nach einem Neustart mit
+        # bereits vorhandenen Trades kollidiert.
         trade = Trade(
-            id=len(self.trades) + 1,
+            id=0,
             symbol=symbol,
             side=pos.side,
             size=pos.size,
@@ -274,8 +353,8 @@ class Portfolio:
             market_type=pos.market_type
         )
 
+        trade.id = self._save_trade(trade)
         self.trades.append(trade)
-        self._save_trade(trade)
 
         del self.positions[symbol]
         self._update_equity()
@@ -283,8 +362,8 @@ class Portfolio:
 
         return trade
 
-    def _save_trade(self, trade: Trade):
-        """Speichert Trade in DB"""
+    def _save_trade(self, trade: Trade) -> int:
+        """Speichert Trade in DB und gibt die vergebene Zeilen-ID zurück"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
@@ -295,8 +374,10 @@ class Portfolio:
               trade.leverage, trade.pnl, trade.fees, trade.entry_time.isoformat(),
               trade.exit_time.isoformat(), trade.strategy, trade.market_type))
 
+        trade_id = cursor.lastrowid
         conn.commit()
         conn.close()
+        return trade_id
 
     def update_position_prices(self, prices: Dict[str, float]):
         """Aktualisiert unrealized PNL für alle Positionen"""
@@ -304,12 +385,59 @@ class Portfolio:
             if symbol in prices:
                 pos.calculate_pnl(prices[symbol])
         self._update_equity()
+        self._record_equity_snapshot()
 
-        # Equity-History für Sharpe-Berechnung
-        self.equity_history.append((datetime.now(), self.equity))
-        # Nur letzte 24h behalten
-        cutoff = datetime.now() - timedelta(hours=24)
+    def _record_equity_snapshot(self, force: bool = False):
+        """
+        Schreibt einen Equity-Punkt — gedrosselt auf snapshot_interval_seconds.
+
+        Wird aus dem 1s-Main-Loop aufgerufen; ohne Drosselung entstünden
+        Sekundendaten, auf denen jede annualisierte Kennzahl unbrauchbar ist.
+        """
+        now = datetime.now()
+        if not force and self._last_snapshot is not None:
+            elapsed = (now - self._last_snapshot).total_seconds()
+            if elapsed < self.snapshot_interval_seconds:
+                return
+        self._last_snapshot = now
+
+        self.equity_history.append((now, self.equity))
+        # RAM-Puffer auf 24h begrenzen; die Langfrist-Kurve liegt in der DB
+        cutoff = now - timedelta(hours=24)
         self.equity_history = [(t, e) for t, e in self.equity_history if t > cutoff]
+
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            'INSERT INTO equity_snapshots (ts, equity, balance) VALUES (?, ?, ?)',
+            (now.isoformat(), self.equity, self.balance)
+        )
+        conn.commit()
+        conn.close()
+
+    def get_equity_snapshots(self, since: Optional[datetime] = None) -> List[tuple]:
+        """Liest die persistierte Equity-Kurve als [(datetime, equity), ...]"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        if since is not None:
+            cursor.execute(
+                'SELECT ts, equity FROM equity_snapshots WHERE ts >= ? ORDER BY ts',
+                (since.isoformat(),)
+            )
+        else:
+            cursor.execute('SELECT ts, equity FROM equity_snapshots ORDER BY ts')
+        rows = cursor.fetchall()
+        conn.close()
+        return [(datetime.fromisoformat(ts), eq) for ts, eq in rows]
+
+    def get_daily_equity_curve(self) -> List[tuple]:
+        """
+        Verdichtet die Snapshots auf einen Punkt pro Kalendertag (letzter Wert
+        des Tages). Grundlage für Sharpe und Drawdown auf Tagesbasis.
+        """
+        daily: Dict[object, tuple] = {}
+        for ts, eq in self.get_equity_snapshots():
+            daily[ts.date()] = (ts, eq)
+        return [daily[d] for d in sorted(daily)]
 
     def get_state(self) -> PortfolioState:
         """Gibt aktuellen Portfolio-Zustand zurück"""
@@ -333,15 +461,21 @@ class Portfolio:
         return self.win_count / total
 
     def get_sharpe_ratio(self, risk_free_rate: float = 0.0) -> float:
-        """Berechnet Sharpe-Ratio basierend auf stündlichen Returns"""
-        if len(self.equity_history) < 2:
+        """
+        Sharpe-Ratio auf Basis *täglicher* Returns, annualisiert mit sqrt(365).
+
+        Vorher wurden Sekunden-Snapshots mit sqrt(24*365) annualisiert, also
+        unter der Annahme stündlicher Returns — der Wert lag um Größenordnungen
+        daneben. Braucht mindestens drei Tage Historie.
+        """
+        curve = self.get_daily_equity_curve()
+        if len(curve) < 3:
             return 0.0
 
-        # Stündliche Returns berechnen
         returns = []
-        for i in range(1, len(self.equity_history)):
-            prev_eq = self.equity_history[i-1][1]
-            curr_eq = self.equity_history[i][1]
+        for i in range(1, len(curve)):
+            prev_eq = curve[i - 1][1]
+            curr_eq = curve[i][1]
             if prev_eq > 0:
                 returns.append((curr_eq - prev_eq) / prev_eq)
 
@@ -349,31 +483,62 @@ class Portfolio:
             return 0.0
 
         returns = np.array(returns)
-        mean_return = np.mean(returns)
-        std_return = np.std(returns)
-
+        std_return = np.std(returns, ddof=1)
         if std_return == 0:
             return 0.0
 
-        # Annualisiert (24h * 365 Tage)
-        return (mean_return - risk_free_rate) / std_return * np.sqrt(24 * 365)
+        daily_rf = risk_free_rate / 365.0
+        return float((np.mean(returns) - daily_rf) / std_return * np.sqrt(365))
 
     def get_max_drawdown(self) -> float:
-        """Berechnet maximalen Drawdown"""
-        if len(self.equity_history) < 2:
+        """
+        Maximaler Peak-to-Trough-Drawdown über die gesamte persistierte
+        Equity-Kurve (nicht mehr nur über die letzten 24h im RAM).
+        """
+        snapshots = self.get_equity_snapshots()
+        equities = [e for _, e in snapshots]
+        if len(equities) < 2:
             return 0.0
 
-        equities = [e for _, e in self.equity_history]
         peak = equities[0]
         max_dd = 0.0
-
         for eq in equities:
             if eq > peak:
                 peak = eq
-            dd = (peak - eq) / peak if peak > 0 else 0
+            dd = (peak - eq) / peak if peak > 0 else 0.0
             max_dd = max(max_dd, dd)
 
         return max_dd
+
+    def get_profit_factor(self) -> float:
+        """
+        Echter Profit Factor: Bruttogewinn / Bruttoverlust.
+
+        Nicht zu verwechseln mit der Payoff-Ratio (avg_win/avg_loss), die an
+        zwei Stellen im Reporter fälschlich als Profit Factor gemeldet wurde —
+        die weist ein Verlustsystem als profitabel aus.
+        Rückgabe inf, wenn es Gewinne, aber keine Verluste gibt.
+        """
+        gross_profit = sum(t.pnl for t in self.trades if t.pnl > 0)
+        gross_loss = abs(sum(t.pnl for t in self.trades if t.pnl < 0))
+
+        if gross_loss == 0:
+            return float('inf') if gross_profit > 0 else 0.0
+        return gross_profit / gross_loss
+
+    def get_expectancy(self) -> float:
+        """Durchschnittliches PNL pro abgeschlossenem Trade (nach Gebühren)"""
+        if not self.trades:
+            return 0.0
+        return sum(t.pnl for t in self.trades) / len(self.trades)
+
+    def get_net_pnl(self) -> float:
+        """Netto-PNL aller abgeschlossenen Trades (Gebühren bereits abgezogen)"""
+        return sum(t.pnl for t in self.trades)
+
+    def get_total_fees(self) -> float:
+        """Summe aller gezahlten Gebühren"""
+        return sum(t.fees for t in self.trades)
 
     def get_daily_drawdown(self) -> float:
         """Berechnet täglichen Drawdown"""
@@ -407,6 +572,9 @@ class Portfolio:
         self.loss_count = 0
         self.consecutive_losses = 0
         self.equity_history.clear()
+        self.daily_start_balance = self.start_capital
+        self.day_start = datetime.now().date()
+        self._last_snapshot = None
 
         # DB leeren
         conn = sqlite3.connect(self.db_path)
@@ -414,5 +582,6 @@ class Portfolio:
         cursor.execute('DELETE FROM trades')
         cursor.execute('DELETE FROM portfolio_state')
         cursor.execute('DELETE FROM positions')
+        cursor.execute('DELETE FROM equity_snapshots')
         conn.commit()
         conn.close()
