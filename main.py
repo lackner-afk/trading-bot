@@ -141,10 +141,18 @@ class TradingBot:
         )
         self.risk_manager = RiskManager(config=risk_config, constraints=self.constraints)
 
-        # Trading-Pairs aus Momentum oder Scalper Config
+        # Trading-Pairs. Die aktive Strategie bestimmt das Universum — vorher
+        # kam die Liste aus momentum.pairs, also der Config einer DEAKTIVIERTEN
+        # Strategie. XRP und BNB stehen im base_universe des AssetSelectors,
+        # bekamen aber nie Kerzen und waren damit unerreichbar.
         momentum_config = strategy_config.get('momentum', {})
         scalper_config = strategy_config.get('scalper', {})
-        pairs = momentum_config.get('pairs', scalper_config.get('pairs', []))
+        confluence_config = strategy_config.get('confluence', {})
+
+        pairs = (confluence_config.get('pairs')
+                 or momentum_config.get('pairs')
+                 or scalper_config.get('pairs', []))
+        self.trading_pairs = list(pairs)
 
         # Ziel-Venue für den Live-Modus: 'fusion' (Bitpanda Fusion, Default)
         # oder 'onetrading' (Alt-Pfad via CCXT).
@@ -586,7 +594,7 @@ class TradingBot:
 
                 # Hole aktuelle empfohlene Assets vom UniverseManager
                 all_candles = {}
-                for symbol in self.momentum.pairs:  # vorerst noch die alten Pairs als Basis
+                for symbol in self.trading_pairs:
                     candles = self.crypto_feed.get_candles(symbol, '5m', n=80)
                     if candles is not None:
                         all_candles[symbol] = candles

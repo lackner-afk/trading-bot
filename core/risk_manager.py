@@ -69,7 +69,14 @@ class RiskManager:
             self.config.get('max_leverage', self.MAX_LEVERAGE),
             self.MAX_LEVERAGE
         )
-        self.cooldown_seconds = self.config.get('cooldown_seconds', self.COOLDOWN_DURATION)
+        # settings.yaml nannte den Schlüssel `cooldown_after_losses`, gelesen
+        # wurde aber `cooldown_seconds` — der Config-Wert war damit wirkungslos
+        # (und stimmte nur zufällig mit dem Default überein). Beide Namen
+        # werden akzeptiert.
+        self.cooldown_seconds = self.config.get(
+            'cooldown_seconds',
+            self.config.get('cooldown_after_losses', self.COOLDOWN_DURATION)
+        )
 
         # Phase 5: More frequent trading support
         self.max_concurrent_positions = min(

@@ -161,6 +161,17 @@ strategies:
   confluence:
     enabled: true
     interval_seconds: 45
+    # Handelsuniversum der aktiven Strategie. Vorher zog main.py die Liste aus
+    # momentum.pairs — der Config einer deaktivierten Strategie — weshalb XRP
+    # und BNB nie Kerzen bekamen, obwohl sie im base_universe des
+    # AssetSelectors stehen. Fünf statt drei Symbole erhöhen den Durchsatz
+    # linear, ohne an der Signalqualität zu drehen.
+    pairs:
+      - BTC_EUR
+      - ETH_EUR
+      - SOL_EUR
+      - XRP_EUR
+      - BNB_EUR
     # Skala 0.0–1.0. Der Score ist ein gewichteter Mittelwert von Faktor-Scores
     # aus [0,1] bei Gewichten mit Summe 1.0 und kann 1.0 nie überschreiten.
     # Der frühere Wert 3.5 stammte aus einer 0–10-Skala und war damit
@@ -201,10 +212,14 @@ strategies:
 risk:
   max_risk_per_trade: 0.02      # 2% des Portfolios
   max_daily_drawdown: 0.10       # 10% → Pause bis nächster Tag
-  max_position_size: 0.20        # 20% des Portfolios pro Position
+  # 15% statt 20%: die offenen Positionen sind faktisch perfekt korreliert,
+  # weil der Fear-&-Greed-Index als einziger verlässlicher Richtungsgeber für
+  # alle Symbole gleichzeitig kippt. Drei Slots sind damit wirtschaftlich ein
+  # einziger Trade — 3 × 15% = 45% Exposure statt 60%.
+  max_position_size: 0.15
   max_leverage: 50               # Absolutes Leverage-Limit
-  max_concurrent_positions: 2
-  cooldown_after_losses: 300     # 5 Min Pause nach 3 Verlusten
+  max_concurrent_positions: 3
+  cooldown_seconds: 300          # 5 Min Pause nach 3 Verlusten in Folge
 
 fees:
   crypto_maker: 0.0004  # 0.04%
