@@ -42,6 +42,28 @@ trading:
   min_order_notional_eur: 10.0
 
 # ============================================================
+# GO-LIVE-GATE (Profitabilitäts-Nachweis)
+# ============================================================
+# Wird beim Live-Start hart geprüft (main.py) und beratend im Tagesreport
+# angezeigt. Die bestehende paper_to_live_checklist.py prüft nur
+# Config-Dateien und würde einen dauerhaft verlierenden Bot durchwinken.
+#
+# Konservatives Profil: mehrere Kennzahlen müssen gemeinsam stimmen, weil
+# jede einzelne für sich manipulierbar oder zufällig ist. Die letzten vier
+# sind Robustheitschecks gegen Glückstreffer und Gebührenrauschen.
+go_live_gate:
+  min_trades: 100
+  min_days: 30
+  min_net_pnl: 0.0
+  min_profit_factor: 1.30
+  max_drawdown: 0.10
+  min_sharpe: 1.0
+  min_win_rate: 0.45
+  min_expectancy_fee_multiple: 2.0   # Erwartungswert > 2x Round-Trip-Fee
+  max_largest_win_share: 0.25        # kein Glückstrade trägt das Ergebnis
+  min_positive_week_share: 0.55      # Konsistenz statt Einmaleffekt
+
+# ============================================================
 # LIVE-MODUS (nur relevant wenn general.mode: live)
 # ============================================================
 # Wird an die LiveOrderEngine durchgereicht. Vorher bekam die Engine nur

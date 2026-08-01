@@ -387,6 +387,28 @@ class Reporter:
 
         text.append("\n")
 
+        # Fortschritt Richtung Go-Live. Beratend, nicht blockierend — der
+        # harte Gate-Check sitzt im Live-Start von main.py. Hier soll der Weg
+        # zum Ziel sichtbar sein statt nur ein binäres Nein.
+        try:
+            from tools.profitability_gate import evaluate_gate
+
+            gate = evaluate_gate(str(portfolio.db_path))
+            text.append("GO-LIVE-GATE\n", style="bold underline cyan")
+            if gate.criteria:
+                text.append(f"  {gate.summary()}\n",
+                            style="green" if gate.passed else "yellow")
+                for c in gate.criteria:
+                    style = "green" if c.passed else "dim"
+                    mark = "✓" if c.passed else "·"
+                    text.append(f"  {mark} {c.label}: {c.actual} (Ziel {c.required})\n",
+                                style=style)
+            else:
+                text.append(f"  {'; '.join(gate.blockers) or 'keine Daten'}\n", style="dim")
+            text.append("\n")
+        except Exception:
+            pass
+
         # Empfehlungen
         text.append("EMPFEHLUNGEN\n", style="bold underline cyan")
         if win_rate < 0.4:

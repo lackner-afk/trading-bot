@@ -66,6 +66,31 @@ def check_shadow_mode_usage() -> tuple[bool, str]:
     except Exception:
         return True, "Log konnte nicht gelesen werden"
 
+def check_profitability() -> tuple[bool, str]:
+    """
+    Der einzige Check hier, der die tatsächliche Performance ansieht.
+
+    Alle anderen Checks prüfen Dateiinhalte per Substring und würden einen
+    dauerhaft verlierenden Bot ohne Einwand durchwinken.
+    """
+    sys.path.insert(0, str(PROJECT_ROOT))
+    try:
+        from tools.profitability_gate import evaluate_gate
+    except ImportError as e:
+        return False, f"Gate nicht ladbar: {e}"
+
+    result = evaluate_gate(str(PROJECT_ROOT / "trades.db"))
+    if result.passed:
+        return True, f"Profitabilitaets-Gate GRUEN ({result.summary()})"
+
+    if not result.criteria:
+        return False, "; ".join(result.blockers) or "Keine Trade-Daten"
+
+    offen = ", ".join(result.blockers[:3])
+    if len(result.blockers) > 3:
+        offen += f" (+{len(result.blockers) - 3} weitere)"
+    return False, f"{result.summary()} – offen: {offen}"
+
 def main():
     print("\n" + "=" * 70)
     print("PAPER → LIVE CUTOVER CHECKLIST  |  " + datetime.now().strftime("%Y-%m-%d %H:%M"))
@@ -77,6 +102,7 @@ def main():
         ("secrets.env", check_secrets),
         ("LIVE_TRADING.md", check_live_trading_md),
         ("Shadow Mode History", check_shadow_mode_usage),
+        ("Profitabilitaet", check_profitability),
     ]
 
     all_ok = True

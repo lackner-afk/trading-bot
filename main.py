@@ -267,6 +267,12 @@ class TradingBot:
                 self.logger.critical("Setze in settings.yaml general.live_explicit_confirmation: true")
                 raise RuntimeError("Live mode blocked: missing explicit confirmation flag")
 
+            # Hürde 3: nachgewiesene Profitabilität. Die bestehende
+            # Go-Live-Checkliste prüft nur Config-Dateien und würde einen
+            # dauerhaft verlierenden Bot durchwinken. Dieses Gate liest die
+            # tatsächliche Trade-Historie.
+            self._check_profitability_gate()
+
             self.logger.critical("=" * 70)
             self.logger.critical("!!! LIVE-MODUS AKTIVIERT !!!")
             self.logger.critical("!!! ECHTES GELD WIRD VERWENDET !!!")
@@ -885,6 +891,40 @@ class TradingBot:
             strategy_name='confluence',
             regime=regime,
             macro_risk_multiplier=macro_multiplier
+        )
+
+    def _check_profitability_gate(self):
+        """
+        Blockiert den Live-Start, solange die Testphase keine Profitabilität
+        belegt. Kann über general.skip_profitability_gate übergangen werden —
+        bewusst nur explizit und mit lautem Log.
+        """
+        from tools.profitability_gate import evaluate_gate, format_report
+
+        general = self.config.get('general', {})
+        db_path = general.get('db_path', 'trades.db')
+        criteria = self.config.get('go_live_gate', {}) or None
+
+        result = evaluate_gate(db_path, criteria=criteria)
+        self.logger.critical(format_report(result))
+
+        if result.passed:
+            self.logger.critical(f"Profitabilitaets-Gate GRUEN ({result.summary()})")
+            return
+
+        if general.get('skip_profitability_gate'):
+            self.logger.critical("=" * 70)
+            self.logger.critical("WARNUNG: Profitabilitaets-Gate wurde bewusst uebergangen!")
+            self.logger.critical(f"Offene Punkte: {', '.join(result.blockers)}")
+            self.logger.critical("=" * 70)
+            return
+
+        self.logger.critical("ABBRUCH: Profitabilitaets-Gate nicht bestanden.")
+        for blocker in result.blockers:
+            self.logger.critical(f"  - {blocker}")
+        raise RuntimeError(
+            f"Live mode blocked: Profitabilitaets-Gate nicht bestanden "
+            f"({result.summary()})"
         )
 
     async def _handle_exit_signal(self, signal, price: float):
