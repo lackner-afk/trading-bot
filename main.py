@@ -25,6 +25,7 @@ from core.risk_manager import RiskManager, RiskAction
 from core.order_engine import OrderEngine
 from core.live_order_engine import LiveOrderEngine
 from core.reconciliation import run_startup_reconciliation
+from core.market_constraints import MarketConstraints
 from data.kraken_feed import KrakenFeed
 from data.onetrading_ccxt_feed import OneTradingCCXTFeed
 from strategies.crypto_scalper import CryptoScalper, SignalType
@@ -117,11 +118,18 @@ class TradingBot:
         mode = general.get('mode', 'paper')
         self.is_live = mode == 'live'
 
+        # Marktbeschränkungen des Ziel-Venues (Bitpanda Fusion: Spot-only).
+        # Gelten auch im Paper-Modus, damit die Testphase genau das misst,
+        # was live überhaupt ausführbar wäre.
+        self.constraints = MarketConstraints.from_config(self.config)
+        self.logger.info(f"Marktbeschränkungen: {self.constraints.describe()}")
+
         # Core (Portfolio + Risk immer gleich)
         self.portfolio = Portfolio(
-            start_capital=general.get('start_capital', 10000)
+            start_capital=general.get('start_capital', 10000),
+            constraints=self.constraints
         )
-        self.risk_manager = RiskManager(config=risk_config)
+        self.risk_manager = RiskManager(config=risk_config, constraints=self.constraints)
 
         # Trading-Pairs aus Momentum oder Scalper Config
         momentum_config = strategy_config.get('momentum', {})
@@ -171,7 +179,8 @@ class TradingBot:
         self.use_confluence_strategy = self.config.get('strategies', {}).get('confluence', {}).get('enabled', False)
         if self.use_confluence_strategy:
             self.confluence_strategy = ConfluenceStrategy.create_default(
-                self.config.get('strategies', {}).get('confluence', {})
+                self.config.get('strategies', {}).get('confluence', {}),
+                constraints=self.constraints
             )
             self.logger.info("ConfluenceStrategy (neues Multi-Factor System) aktiviert")
         else:
@@ -485,12 +494,11 @@ class TradingBot:
                         f"[CONFLUENCE HEALTH] Input candidates: {input_count} → selected: {selected_count}"
                     )
 
-                # Temporary starvation fallback (aggressive test mode)
-                if selected_count == 0 and input_count > 0:
-                    self.logger.warning("[CONFLUENCE HEALTH] Activating starvation fallback - analyzing raw input list")
-                    symbols_to_analyze = list(all_candles.keys())
-                else:
-                    symbols_to_analyze = selected_symbols
+                # Kein Starvation-Fallback mehr: der frühere Fallback hat bei
+                # leerer Auswahl einfach die komplette Rohliste analysiert und
+                # damit den AssetSelector wirkungslos gemacht. Wenn der Selector
+                # nichts durchlässt, ist das Marktumfeld das Signal.
+                symbols_to_analyze = selected_symbols
 
                 analyzed = 0
                 best_score = 0.0
@@ -520,14 +528,19 @@ class TradingBot:
                         best_score = score
                         best_symbol = symbol
 
+                    # Spot-Modus: ein SHORT-Signal ist kein Entry, sondern die
+                    # Aufforderung eine offene Long-Position zu schließen.
+                    if signal is not None and getattr(signal, 'is_exit_signal', False):
+                        await self._handle_exit_signal(signal, price)
+                        continue
+
+                    # Kein zweites Confidence-Gate mehr. Vorher stand hier eine
+                    # zusätzliche Schwelle von 0.55 gegen eine confidence, die
+                    # durch den /9.5-Divisor nie über 0.105 kam — zwei Schwellen
+                    # für dieselbe Größe haben den Bot doppelt blockiert.
+                    # Die einzige Schwelle ist jetzt min_confluence_score im
+                    # Aggregator; kommt ein Signal hier an, ist es akzeptiert.
                     if signal:
-                        if signal.confidence < 0.55:
-                            # Visible rejection reason during test phase
-                            self.logger.info(
-                                f"[CONFLUENCE REJECT] {symbol} @ {price:.2f} | "
-                                f"Conf {signal.confidence:.0%} | Score {score:.2f} | Regime {regime_name or 'unknown'}"
-                            )
-                    if signal and signal.confidence >= 0.55:
                         # Phase 6: Rich factor attribution logging + console
                         regime_name = None
                         cd = getattr(signal, '_confluence_data', None) or {}
@@ -676,11 +689,19 @@ class TradingBot:
 
         state = self.portfolio.get_state()
 
-        # Max 5 gleichzeitige Positionen
-        if len(state.positions) >= 5:
-            return
+        # Positionslimit kommt ausschließlich vom RiskManager. Das frühere
+        # hartcodierte >= 5 hier war die dritte von drei widersprüchlichen
+        # Obergrenzen (Klassenkonstante 5, Config 2, hier 5).
 
         if state.equity < 20:
+            return
+
+        # Spot-Venue: SHORT-Signale sind keine Entries. Sie werden im
+        # Confluence-Loop als Exit geroutet und dürfen hier nicht ankommen.
+        if self.constraints.spot_only and signal.signal_type != SignalType.LONG:
+            self.logger.warning(
+                f"SHORT-Entry auf Spot-Venue verworfen: {signal.symbol}"
+            )
             return
 
         # SL-Distanz aus Signal ableiten (ATR-basiert)
@@ -713,11 +734,26 @@ class TradingBot:
         if sl_distance_pct > 0 and hasattr(signal, 'atr_value') and signal.atr_value > 0:
             position_size = self.risk_manager.size_from_risk(state.equity, sl_distance_pct)
         else:
-            position_size = state.equity * 0.20
-        # Skaliert auf Kapital: Min 15% des Equity, Max 25% des Equity
-        min_size = max(10.0, state.equity * 0.15)
-        max_size = state.equity * 0.25
-        position_size = max(min_size, min(max_size, position_size))
+            position_size = state.equity * self.risk_manager.max_position_size
+
+        # REDUCE_SIZE wurde bisher ignoriert — damit waren die Macro-Reduktion,
+        # die Drawdown-Reduktion und das Beta-Limit wirkungslos.
+        if risk_check.action == RiskAction.REDUCE_SIZE and risk_check.suggested_size:
+            position_size = min(position_size, risk_check.suggested_size)
+            self.logger.info(f"Positionsgröße reduziert: {risk_check.reason}")
+
+        # Obergrenze ist das konfigurierte max_position_size. Der frühere
+        # Clamp auf 15–25% des Equity hat die 20%-Grenze nach oben überschritten
+        # und die Reduktionen wieder aufgehoben.
+        position_size = min(position_size, state.equity * self.risk_manager.max_position_size)
+
+        # Mindest-Ordervolumen des Venues
+        if position_size < self.constraints.min_order_notional_eur:
+            self.logger.info(
+                f"Order zu klein: {position_size:.2f}€ < "
+                f"{self.constraints.min_order_notional_eur:.2f}€ Mindestvolumen"
+            )
+            return
 
         if position_size > state.balance or state.balance < 20:
             return
@@ -777,6 +813,35 @@ class TradingBot:
             regime=regime,
             macro_risk_multiplier=macro_multiplier
         )
+
+    async def _handle_exit_signal(self, signal, price: float):
+        """
+        Verarbeitet ein SHORT-Signal im Spot-Modus.
+
+        Auf einem Spot-Venue lässt sich nicht short gehen — die sinnvolle
+        Entsprechung ist "verkauf, was du hast": existiert eine offene
+        Long-Position auf dem Symbol, wird sie geschlossen. Sonst passiert
+        nichts. Bewusst getrennt vom Entry-Pfad (_execute_signal), damit
+        Ein- und Ausstieg nicht dieselbe Risikologik durchlaufen.
+        """
+        symbol = signal.symbol
+        position = self.portfolio.positions.get(symbol)
+
+        if position is None:
+            self.logger.info(
+                f"[CONFLUENCE EXIT] {symbol}: Short-Signal ohne offene Position - ignoriert "
+                f"(Conf {signal.confidence:.0%})"
+            )
+            return
+
+        if position.side != 'long':
+            return
+
+        self.logger.info(
+            f"[CONFLUENCE EXIT] {symbol} @ {price:.2f}: Short-Signal schließt Long-Position "
+            f"(Conf {signal.confidence:.0%})"
+        )
+        await self._close_position(symbol, price, "Confluence-Flip short")
 
     def _check_and_alert_regime_change(self, new_regime: str, confidence: float = 0.0):
         """

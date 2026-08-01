@@ -35,9 +35,10 @@ class TestPnL:
         trade = _roundtrip(portfolio, "BTC_EUR", 100.0, 95.0, size=20.0)
         assert trade.pnl == pytest.approx(-1.0)
 
-    def test_leverage_skaliert_pnl(self, portfolio):
+    def test_leverage_skaliert_pnl(self, margin_portfolio):
+        # Nur im Margin-Modus möglich; im Spot-Modus blockt das Portfolio.
         # Balance reicht: margin = size/leverage = 20/10 = 2 EUR
-        trade = _roundtrip(portfolio, "BTC_EUR", 100.0, 110.0, size=20.0, leverage=10.0)
+        trade = _roundtrip(margin_portfolio, "BTC_EUR", 100.0, 110.0, size=20.0, leverage=10.0)
         assert trade.pnl == pytest.approx(20.0)
 
     def test_gebuehren_werden_abgezogen(self, portfolio):
@@ -221,3 +222,35 @@ class TestMetriken:
 
         p2 = Portfolio(start_capital=100.0, db_path=db, snapshot_interval_seconds=0)
         assert p2.get_max_drawdown() > 0
+
+
+class TestSpotGuard:
+    """Portfolio als letzte Verteidigungslinie gegen nicht-handelbare Positionen."""
+
+    def test_short_wird_abgelehnt(self, portfolio):
+        pos = portfolio.open_position("BTC_EUR", "short", 20.0, 100.0, 1.0, "test")
+        assert pos is None
+        assert "BTC_EUR" not in portfolio.positions
+
+    def test_leverage_wird_abgelehnt(self, portfolio):
+        pos = portfolio.open_position("BTC_EUR", "long", 20.0, 100.0, 5.0, "test")
+        assert pos is None
+        assert "BTC_EUR" not in portfolio.positions
+
+    def test_long_mit_leverage_eins_geht_durch(self, portfolio):
+        pos = portfolio.open_position("BTC_EUR", "long", 20.0, 100.0, 1.0, "test")
+        assert pos is not None
+        assert pos.leverage == 1.0
+
+    def test_margin_modus_erlaubt_short(self, margin_portfolio):
+        pos = margin_portfolio.open_position("BTC_EUR", "short", 20.0, 100.0, 1.0, "test")
+        assert pos is not None
+
+    def test_keine_shorts_in_der_db(self, portfolio):
+        """Gegenprobe fuer die Testphase: trades.db darf keine Shorts enthalten."""
+        portfolio.open_position("BTC_EUR", "long", 20.0, 100.0, 1.0, "test")
+        portfolio.close_position("BTC_EUR", 110.0, 0.0, "test")
+        portfolio.open_position("ETH_EUR", "short", 20.0, 100.0, 1.0, "test")
+
+        assert all(t.side == "long" for t in portfolio.trades)
+        assert all(t.leverage == 1.0 for t in portfolio.trades)

@@ -51,6 +51,21 @@ def portfolio(tmp_path):
 
 
 @pytest.fixture
+def margin_portfolio(tmp_path):
+    """Portfolio ohne Spot-Beschränkung — für Tests von Leverage und Shorts."""
+    from core.market_constraints import MarketConstraints
+
+    return Portfolio(
+        start_capital=100.0,
+        db_path=str(tmp_path / "margin_trades.db"),
+        snapshot_interval_seconds=0,
+        constraints=MarketConstraints(
+            spot_only=False, allow_short=True, max_leverage=50.0
+        ),
+    )
+
+
+@pytest.fixture
 def sample_candles():
     """
     Deterministischer OHLCV-DataFrame mit Indikatoren (200 5m-Kerzen).

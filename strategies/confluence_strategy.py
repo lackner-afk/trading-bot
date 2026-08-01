@@ -34,7 +34,7 @@ class ConfluenceStrategy:
         signal = strategy.analyze(symbol, candles, current_price)
     """
 
-    def __init__(self, config: Dict = None):
+    def __init__(self, config: Dict = None, constraints=None):
         self.config = config or {}
 
         self.regime_detector = RegimeDetector(self.config.get("regime", {}))
@@ -43,7 +43,8 @@ class ConfluenceStrategy:
         # Pass either a nested "aggregator:" subsection (advanced) or the full
         # confluence config (our normal case in settings.yaml).
         aggregator_cfg = self.config.get("aggregator") or self.config
-        self.aggregator = SignalAggregator(aggregator_cfg)
+        self.aggregator = SignalAggregator(aggregator_cfg, constraints=constraints)
+        self.constraints = self.aggregator.constraints
 
         self.factors: List[Factor] = []
 
@@ -52,13 +53,26 @@ class ConfluenceStrategy:
         self._last_universe = None
 
     @classmethod
-    def create_default(cls, config: Dict = None):
+    def create_default(cls, config: Dict = None, constraints=None):
         """
         Factory method that creates a ConfluenceStrategy with a strong
         default set of factors. This is the recommended way to get started.
+
+        Der Macro-Faktor ist per Default AUS: der EconomicCalendar wird
+        nirgends befüllt (`self.events = []`, kein Aufrufer von add_event),
+        weshalb MacroNewsFilter konstant score=1.0 liefert. Das ist ein reiner
+        Score-Bonus ohne Informationsgehalt, der den effektiven Schwellwert
+        nach unten verschiebt. Wieder aktivierbar über
+        `strategies.confluence.factors.macro_news: true`, sobald der Kalender
+        eine Datenquelle hat.
         """
-        strategy = cls(config)
-        strategy.add_common_factors(include_sentiment=True, include_macro=True)
+        cfg = config or {}
+        factor_cfg = cfg.get("factors", {}) or {}
+        strategy = cls(cfg, constraints=constraints)
+        strategy.add_common_factors(
+            include_sentiment=bool(factor_cfg.get("sentiment", True)),
+            include_macro=bool(factor_cfg.get("macro_news", False)),
+        )
         return strategy
 
     def add_factor(self, factor: Factor):
@@ -195,6 +209,11 @@ class ConfluenceStrategy:
             atr_value=0.0,  # Can be improved later
             timestamp=signal.timestamp
         )
+
+        # Spot-Modus: ein SHORT-Signal ist kein Entry, sondern die Aufforderung
+        # eine offene Long-Position zu schließen. Das Flag wird im Loop
+        # ausgewertet (siehe TradingBot._handle_exit_signal).
+        legacy.is_exit_signal = signal.is_exit_signal
 
         # Phase 6: Carry rich confluence attribution data on the legacy signal
         # Access via getattr(signal, '_confluence_data', None)

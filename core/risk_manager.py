@@ -42,14 +42,24 @@ class RiskManager:
     COOLDOWN_AFTER_LOSSES = 3       # Anzahl Verluste für Cooldown
     COOLDOWN_DURATION = 300         # 5 Minuten Pause
 
-    def __init__(self, config: Dict = None):
+    def __init__(self, config: Dict = None, constraints=None):
         self.logger = logging.getLogger('RiskManager')
         self.config = config or {}
+
+        from core.market_constraints import MarketConstraints
+        self.constraints = constraints or MarketConstraints()
 
         # Überschreibbare Parameter (mit Limits)
         self.max_risk_per_trade = min(
             self.config.get('max_risk_per_trade', self.MAX_RISK_PER_TRADE),
             self.MAX_RISK_PER_TRADE
+        )
+        # max_position_size stand in settings.yaml, wurde aber nie gelesen —
+        # überall im Code stand die Klassenkonstante. Jetzt konfigurierbar,
+        # aber weiterhin nach oben durch die Konstante gedeckelt.
+        self.max_position_size = min(
+            self.config.get('max_position_size', self.MAX_POSITION_SIZE),
+            self.MAX_POSITION_SIZE
         )
         self.max_daily_drawdown = min(
             self.config.get('max_daily_drawdown', self.MAX_DAILY_DRAWDOWN),
@@ -62,7 +72,10 @@ class RiskManager:
         self.cooldown_seconds = self.config.get('cooldown_seconds', self.COOLDOWN_DURATION)
 
         # Phase 5: More frequent trading support
-        self.max_concurrent_positions = self.config.get('max_concurrent_positions', self.MAX_CONCURRENT_POSITIONS)
+        self.max_concurrent_positions = min(
+            self.config.get('max_concurrent_positions', self.MAX_CONCURRENT_POSITIONS),
+            self.MAX_CONCURRENT_POSITIONS
+        )
 
         # State
         self.cooldown_until: Optional[datetime] = None
@@ -83,7 +96,7 @@ class RiskManager:
         if sl_distance_pct <= 0:
             return equity * 0.05   # Fallback
         raw_size = (equity * self.max_risk_per_trade) / sl_distance_pct
-        return min(raw_size, equity * self.MAX_POSITION_SIZE)
+        return min(raw_size, equity * self.max_position_size)
 
     def check_trade(self, portfolio_equity: float, position_size: float,
                    leverage: float, current_positions: int,
@@ -108,6 +121,15 @@ class RiskManager:
         Returns:
             RiskCheck mit Aktion und Begründung
         """
+
+        # 0. Venue-Beschränkungen. Steht bewusst ganz oben: auf einem
+        # Spot-Venue ist ein gehebelter Trade schlicht nicht ausführbar,
+        # unabhängig von jeder Risikorechnung.
+        if self.constraints.spot_only and leverage > 1.0:
+            return RiskCheck(
+                action=RiskAction.BLOCK,
+                reason=f"Spot-Venue: Leverage {leverage}x nicht handelbar (max 1x)"
+            )
 
         # 1. Cooldown aktiv?
         if self.cooldown_until and datetime.now() < self.cooldown_until:
@@ -144,11 +166,15 @@ class RiskManager:
                 cooldown_until=self.cooldown_until
             )
 
-        # 5. Max Positionen
-        if current_positions >= self.MAX_CONCURRENT_POSITIONS:
+        # 5. Max Positionen — der konfigurierte Wert, nicht die Klassenkonstante.
+        # Vorher stand hier MAX_CONCURRENT_POSITIONS (5), während die Config 2
+        # sagte; zusammen mit einem dritten hartcodierten Limit in main.py gab
+        # es drei widersprüchliche Obergrenzen. Der konfigurierte Wert ist in
+        # __init__ bereits gegen die Konstante gedeckelt.
+        if current_positions >= self.max_concurrent_positions:
             return RiskCheck(
                 action=RiskAction.BLOCK,
-                reason=f"Maximum Positionen ({self.MAX_CONCURRENT_POSITIONS}) erreicht"
+                reason=f"Maximum Positionen ({self.max_concurrent_positions}) erreicht"
             )
 
         # 6. Leverage-Limit
@@ -159,11 +185,11 @@ class RiskManager:
             )
 
         # 7. Position-Size-Limit
-        max_size = portfolio_equity * self.MAX_POSITION_SIZE
+        max_size = portfolio_equity * self.max_position_size
         if position_size > max_size:
             return RiskCheck(
                 action=RiskAction.REDUCE_SIZE,
-                reason=f"Positionsgröße reduziert auf {self.MAX_POSITION_SIZE:.0%} des Portfolios",
+                reason=f"Positionsgröße reduziert auf {self.max_position_size:.0%} des Portfolios",
                 suggested_size=max_size
             )
 
@@ -265,7 +291,7 @@ class RiskManager:
         half_kelly = kelly / 2
 
         # Begrenzen auf MAX_POSITION_SIZE
-        half_kelly = max(0, min(half_kelly, self.MAX_POSITION_SIZE))
+        half_kelly = max(0, min(half_kelly, self.max_position_size))
 
         # Position Size berechnen
         position_size = portfolio_equity * half_kelly

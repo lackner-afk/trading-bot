@@ -18,6 +18,10 @@ class MultiTimeframeTrendFactor(Factor):
 
     name = "multi_timeframe_trend"
 
+    # Untergrenze für den Trend-Score. Ein schwacher Trend soll wenig, aber
+    # nicht null beitragen — sonst kippt der Faktor in Seitwärtsphasen komplett aus.
+    SCORE_FLOOR = 0.08
+
     def __init__(self, config: Dict = None):
         super().__init__(config)
         self.timeframes = self.config.get("timeframes", ["5m", "15m", "1h"])
@@ -50,14 +54,13 @@ class MultiTimeframeTrendFactor(Factor):
         # Score based on trend strength (capped)
         score = min(strength * 8, 1.0)  # Strong trend → high score
 
-        # Aggressive test mode (A): give weak trends a small floor in low vol chop
-        if score < 0.15:
-            score = 0.15
-            reason = f"Trend {direction.upper()}: EMA{self.ema_fast}/{self.ema_slow} spread {strength:.2%} (floored for test)"
-        else:
-            reason = f"Trend {direction.upper()}: EMA{self.ema_fast}/{self.ema_slow} spread {strength:.2%}"
-
-        # Realistic Production: Remove or reduce the floor significantly (e.g. only 0.08–0.10)
+        # Produktions-Floor. Der vorherige Wert 0.15 stammt aus dem
+        # "Aggressive Test Mode" und wurde nur eingebaut, weil der Bot wegen
+        # des unerreichbaren Confluence-Schwellwerts nie gehandelt hat. Mit
+        # behobenem Schwellwert würde er die Score-Untergrenze künstlich
+        # anheben und in ruhigen Phasen Trades erzwingen.
+        score = max(score, self.SCORE_FLOOR)
+        reason = f"Trend {direction.upper()}: EMA{self.ema_fast}/{self.ema_slow} spread {strength:.2%}"
 
         return FactorResult(
             name=self.name,
@@ -161,13 +164,11 @@ class VolatilityFilter(Factor):
         atr_pct = latest_atr / current_price
 
         if atr_pct < self.min_atr_pct:
-            # Test relaxation for low_vol_chop regimes (user wants more trades)
-            score = 0.65
-            reason = f"Very low volatility (ATR {atr_pct:.3%}) - relaxed for testing (more trades)"
-
-            # Realistic Production Alternative:
-            # score = 0.45
-            # reason = f"Very low volatility (ATR {atr_pct:.3%}) - reduced conviction (realistic)"
+            # Produktionswert. Vorher 0.65 ("relaxed for testing") — in einem
+            # Markt ohne Bewegung ist die Ertragserwartung nach Gebühren
+            # negativ, der Faktor muss die Konviktion also senken, nicht heben.
+            score = 0.45
+            reason = f"Very low volatility (ATR {atr_pct:.3%}) - reduced conviction"
         elif atr_pct > self.max_atr_pct:
             score = 0.4
             reason = f"Extremely high volatility (ATR {atr_pct:.2%}) - caution"

@@ -5,11 +5,14 @@ Trackt Balances, Positionen, PNL und speichert alles in SQLite
 
 import sqlite3
 import json
+import logging
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional
 from pathlib import Path
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -81,7 +84,12 @@ class Portfolio:
     """
 
     def __init__(self, start_capital: float = 10000.0, db_path: str = 'trades.db',
-                 snapshot_interval_seconds: int = 60):
+                 snapshot_interval_seconds: int = 60, constraints=None):
+        # Letzte Verteidigungslinie gegen Positionen, die das Ziel-Venue nicht
+        # ausführen kann (Spot: keine Shorts, kein Hebel).
+        from core.market_constraints import MarketConstraints
+        self.constraints = constraints or MarketConstraints()
+
         self.start_capital = start_capital
         self.balance = start_capital
         self.equity = start_capital
@@ -287,6 +295,23 @@ class Portfolio:
         """Öffnet eine neue Position"""
         if symbol in self.positions:
             return None  # Position existiert bereits
+
+        # Spot-Venue: eine Short-Position kann physisch nicht gebucht werden.
+        # Käme sie hier an, wäre oberhalb (Aggregator, Loop, RiskManager) etwas
+        # durchgerutscht — deshalb CRITICAL statt stiller Ablehnung.
+        if self.constraints.spot_only and side == 'short':
+            logger.critical(
+                f"SHORT-Position auf Spot-Venue abgelehnt: {symbol}. "
+                f"Das haette der Aggregator bereits verhindern muessen."
+            )
+            return None
+
+        if self.constraints.spot_only and leverage > 1.0:
+            logger.critical(
+                f"Gehebelte Position auf Spot-Venue abgelehnt: {symbol} "
+                f"mit Leverage {leverage}."
+            )
+            return None
 
         # Margin berechnen
         margin_required = size / leverage

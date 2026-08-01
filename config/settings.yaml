@@ -24,6 +24,23 @@ general:
   # max_real_capital_exposure_eur: 500
   # require_live_env_var: true
 
+# ============================================================
+# MARKTBESCHRÄNKUNGEN DES ZIEL-VENUES
+# ============================================================
+# Bitpanda Fusion ist derzeit Spot-only: kein Leverage, keine Shorts
+# (Margin ist als "coming soon" angekündigt). Diese Beschränkungen gelten
+# auch im Paper-Modus — sonst misst die Testphase eine Strategie, die live
+# gar nicht ausführbar wäre, und die Zahlen taugen nicht für eine
+# Go-Live-Entscheidung.
+trading:
+  spot_only: true
+  allow_short: false
+  max_leverage: 1.0
+  # exit_only = SHORT-Signal schließt eine offene Long-Position
+  # ignore    = SHORT-Signal wird verworfen
+  short_signal_policy: exit_only
+  min_order_notional_eur: 10.0
+
 exchanges:
   onetrading:
     # API Key aus secrets.env (ONETRADING_API_KEY)
@@ -81,8 +98,30 @@ strategies:
   confluence:
     enabled: true
     interval_seconds: 45
-    min_confluence_score: 3.5   # Aggressive Test-Mode (A) - stark gesenkt für mehr Trades in low_vol_chop
-    base_leverage: 8
+    # Skala 0.0–1.0. Der Score ist ein gewichteter Mittelwert von Faktor-Scores
+    # aus [0,1] bei Gewichten mit Summe 1.0 und kann 1.0 nie überschreiten.
+    # Der frühere Wert 3.5 stammte aus einer 0–10-Skala und war damit
+    # unerreichbar — der Bot hat deshalb nie einen Trade ausgeführt.
+    # Anzeige erfolgt weiterhin als x/10 (0.55 → "5.5/10").
+    min_confluence_score: 0.55
+    # Mindestanzahl technischer Faktoren für hinreichende Konviktion
+    min_technical_factors: 2
+    # Mindestvorsprung der Gewinnerrichtung gegenüber der Gegenrichtung
+    direction_margin: 1.2
+    # Mindest-Konviktion der Faktoren, die eine Richtung nennen. Verhindert,
+    # dass richtungslose Filter (Volatilität, Volumen) allein die Schwelle
+    # reißen und im Seitwärtsmarkt Trades erzeugen. Startwert — wird im
+    # Backtest (P3) kalibriert.
+    min_directional_score: 0.35
+    base_leverage: 8            # im Spot-Modus wirkungslos (Leverage fix 1.0)
+    factors:
+      sentiment: true
+      # MacroNewsFilter ist aus: der EconomicCalendar wird nirgends befüllt,
+      # der Faktor liefert konstant score=1.0 und ist damit ein reiner
+      # Score-Bonus ohne Informationsgehalt, der den effektiven Schwellwert
+      # nach unten verschiebt. Erst einschalten, wenn der Kalender eine
+      # echte Datenquelle hat.
+      macro_news: false
     factor_weights:
       technical: 0.58
       sentiment: 0.25
