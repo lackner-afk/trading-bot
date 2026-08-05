@@ -100,8 +100,10 @@ class Backtester:
         self.data_source = "unknown"
 
         # Fee-Struktur
-        self.maker_fee = self.config.get('maker_fee', 0.0004)
-        self.taker_fee = self.config.get('taker_fee', 0.0006)
+        # Defaults = Bitpanda Fusion Level 1 (0,25 %) plus ~0,05 % Spread.
+        # Die alten 0,04/0,06 % stammten aus einer Futures-Struktur.
+        self.maker_fee = self.config.get('maker_fee', 0.003)
+        self.taker_fee = self.config.get('taker_fee', 0.003)
 
         # Risk-Limits
         self.max_positions = self.config.get('max_positions', 3)

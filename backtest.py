@@ -175,8 +175,10 @@ async def run_backtests(data_exchange: str = 'binance', timeframe: str = '1h',
             'data_exchange': data_exchange,
             'timeframe': timeframe,
             'allow_synthetic': allow_synthetic,
-            'maker_fee': fees.get('crypto_maker', 0.0004),
-            'taker_fee': fees.get('crypto_taker', 0.0006),
+            # Spread wird auf die Gebuehr aufgeschlagen — Fusion hat neben der
+            # Stufengebuehr einen variablen Spread von ~0,05 % je Seite.
+            'maker_fee': fees.get('crypto_maker', 0.0025) + fees.get('spread_estimate', 0.0005),
+            'taker_fee': fees.get('crypto_taker', 0.0025) + fees.get('spread_estimate', 0.0005),
             'max_positions': risk.get('max_concurrent_positions', 3),
             'max_position_pct': risk.get('max_position_size', 0.10),
         }

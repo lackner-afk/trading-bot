@@ -470,6 +470,32 @@ class FusionClient:
         data = await self.request("GET", self.endpoints.orders, params=params or None)
         return [e for e in self._as_list(data) if isinstance(e, dict)]
 
+    async def get_fee_tier(self) -> Optional[float]:
+        """
+        Tatsächliche Gebührenrate des Kontos (als Bruchteil, z.B. 0.0025).
+
+        Fusion staffelt über 7 Stufen nach 30-Tage-Volumen; Level 1 sind
+        0,25 %. Maker und Taker sind identisch. Die Rate kann als Prozentzahl
+        (0.25) oder als Bruchteil (0.0025) kommen — beides wird erkannt.
+        """
+        data = await self.request("GET", self.endpoints.account)
+        if not isinstance(data, dict):
+            return None
+
+        for key in ("fee", "fee_rate", "taker_fee", "trading_fee", "current_fee"):
+            value = data.get(key)
+            if isinstance(value, dict):
+                value = value.get("taker") or value.get("rate") or value.get("value")
+            if value is None:
+                continue
+            rate = _f(value, -1.0)
+            if rate < 0:
+                continue
+            # 0.25 bedeutet 0,25 % — nicht 25 %
+            return rate / 100.0 if rate > 0.02 else rate
+
+        return None
+
     # ----- Diagnose -------------------------------------------------
 
     async def preflight(self) -> Dict[str, Any]:

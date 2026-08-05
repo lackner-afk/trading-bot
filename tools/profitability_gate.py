@@ -33,6 +33,7 @@ from core.performance import (  # noqa: E402
     DEFAULT_ROUND_TRIP_FEE,
     PerformanceReport,
     compute_performance,
+    round_trip_fee_from_config,
 )
 
 
@@ -111,15 +112,36 @@ def _fmt(value: float, kind: str = "num") -> str:
     return f"{value:.2f}"
 
 
+def _load_settings() -> Dict:
+    """settings.yaml lesen, ohne bei Fehlern das Gate zu blockieren."""
+    path = Path(__file__).resolve().parent.parent / "config" / "settings.yaml"
+    if not path.exists():
+        return {}
+    try:
+        import yaml
+        return yaml.safe_load(path.read_text()) or {}
+    except Exception:
+        return {}
+
+
 def evaluate_gate(db_path: str = "trades.db",
                   criteria: Dict = None,
-                  round_trip_fee: float = DEFAULT_ROUND_TRIP_FEE) -> GateResult:
+                  round_trip_fee: float = None) -> GateResult:
     """
     Wertet die Trade-Historie gegen die Kriterien aus.
 
     Wird sowohl vom CLI als auch von main.py (als harter Live-Guard) und von
     paper_to_live_checklist.py genutzt.
+
+    `round_trip_fee` kommt per Default aus dem `fees:`-Block der settings.yaml.
+    Die frühere feste 0.0012 stammte aus einer Futures-Gebührenstruktur und
+    war für Bitpanda Fusion (Level 1: 0,25 % je Seite plus Spread) um Faktor
+    ~4,5 zu niedrig — das Kriterium "Erwartungswert > 2x Round-Trip-Fee" wäre
+    damit viel zu leicht zu erfüllen gewesen.
     """
+    if round_trip_fee is None:
+        round_trip_fee = round_trip_fee_from_config(_load_settings())
+
     crit = {**DEFAULT_CRITERIA, **(criteria or {})}
     report = compute_performance(db_path, round_trip_fee=round_trip_fee)
     result = GateResult(passed=False, report=report)

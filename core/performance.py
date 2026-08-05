@@ -19,7 +19,25 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 # Round-Trip-Kosten: Entry + Exit als Taker
-DEFAULT_ROUND_TRIP_FEE = 0.0012
+# Round-Trip-Kosten: Entry + Exit, je inklusive Spread.
+# Bitpanda Fusion Level 1: 0,25 % Gebühr + ~0,05 % Spread pro Seite.
+# Wird von round_trip_fee_from_config() aus der settings.yaml abgeleitet —
+# diese Konstante ist nur der Fallback.
+DEFAULT_ROUND_TRIP_FEE = 0.006
+
+
+def round_trip_fee_from_config(config: Dict = None) -> float:
+    """
+    Leitet die Round-Trip-Kosten aus dem `fees:`-Block ab.
+
+    Wichtig für das Gate-Kriterium "Erwartungswert > 2x Round-Trip-Fee": eine
+    zu optimistische Gebührenannahme lässt eine Strategie profitabel
+    aussehen, die real Geld verbrennt.
+    """
+    fees = (config or {}).get("fees", {}) or {}
+    taker = float(fees.get("crypto_taker", 0.0025))
+    spread = float(fees.get("spread_estimate", 0.0005))
+    return 2 * (taker + spread)
 
 
 @dataclass

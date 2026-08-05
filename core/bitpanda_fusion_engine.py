@@ -79,12 +79,60 @@ class BitpandaFusionOrderEngine(BaseOrderEngine):
         report = await self.client.preflight()
         self._preflight_ok = bool(report.get("ok"))
 
+        await self._check_fee_tier(report)
+
         if self._preflight_ok:
             self.logger.info("Fusion-Preflight OK")
         else:
             for err in report.get("errors", []):
                 self.logger.critical(f"Fusion-Preflight: {err}")
         return report
+
+    async def _check_fee_tier(self, report: Dict):
+        """
+        Gleicht die konfigurierte Gebühr gegen die echte Stufe des Kontos ab.
+
+        Eine zu optimistische Annahme verfälscht Backtest, Paper-Ergebnisse
+        und das Profitabilitäts-Gate gleichermaßen — und zwar in die
+        gefährliche Richtung: die Strategie sieht besser aus als sie ist.
+        """
+        try:
+            actual = await self.client.get_fee_tier()
+        except FusionAPIError as e:
+            report.setdefault("checks", {})["fee_tier"] = {"ok": False, "detail": str(e)}
+            self.logger.warning(f"Gebuehrenstufe nicht abrufbar: {e}")
+            return
+
+        if actual is None:
+            self.logger.warning(
+                "Gebuehrenstufe nicht aus der Account-Antwort lesbar - "
+                "konfigurierten Wert manuell gegen 'bp-fusion account info' pruefen"
+            )
+            return
+
+        configured = self.fees["crypto_taker"]
+        report.setdefault("checks", {})["fee_tier"] = {
+            "ok": True, "detail": f"{actual:.4%} (Config: {configured:.4%})"
+        }
+
+        # Nur wenn die Realität teurer ist, ist es gefaehrlich
+        if actual > configured * 1.05:
+            self.logger.critical(
+                f"GEBUEHREN ZU NIEDRIG KONFIGURIERT: Konto zahlt {actual:.3%}, "
+                f"settings.yaml rechnet mit {configured:.3%}. Alle bisherigen "
+                f"Backtest- und Paper-Ergebnisse sind zu optimistisch. "
+                f"fees.crypto_maker/crypto_taker auf {actual:.4f} setzen."
+            )
+            report.setdefault("errors", []).append(
+                f"Gebuehrenstufe weicht ab: real {actual:.3%} vs. Config {configured:.3%}"
+            )
+            report["ok"] = False
+            self._preflight_ok = False
+        elif actual < configured * 0.95:
+            self.logger.info(
+                f"Gebuehrenstufe guenstiger als konfiguriert: {actual:.3%} statt "
+                f"{configured:.3%} - Ergebnisse sind konservativ gerechnet."
+            )
 
     async def _pair_info(self, symbol: str) -> Optional[PairInfo]:
         """Handelsregeln für ein Bot-Symbol (BTC_EUR -> BTC-EUR)."""

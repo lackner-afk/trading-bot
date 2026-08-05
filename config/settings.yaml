@@ -206,7 +206,12 @@ strategies:
     exit:
       trailing_atr_multiplier: 1.2
       trailing_pct_fallback: 0.005
-      trailing_arm_profit_pct: 0.005
+      # Ab wann der Trailing-Stop scharf wird. MUSS deutlich über den
+      # Round-Trip-Gebühren liegen (aktuell 0,6 %): der Stop folgt mit
+      # ~0,2 % ATR-Abstand, ein Exit bei arm=0,5 % läge also bei ~+0,3 %
+      # brutto — netto ein Verlust. Bei 1,0 % bleibt nach Gebühren ~+0,2 %.
+      # Startwert, wird im Backtest kalibriert (Kandidaten 0.010/0.015/0.020).
+      trailing_arm_profit_pct: 0.010
       max_hold_hours: 0        # 0 = kein Zeit-Stop
 
 risk:
@@ -221,9 +226,30 @@ risk:
   max_concurrent_positions: 3
   cooldown_seconds: 300          # 5 Min Pause nach 3 Verlusten in Folge
 
+# ============================================================
+# GEBÜHREN — Bitpanda Fusion
+# ============================================================
+# Fusion hat 7 volumenabhängige Stufen (30-Tage-Volumen), und anders als bei
+# den meisten Börsen kostet MAKER dasselbe wie TAKER:
+#
+#   Level 1  bis 100.000 €        0,25 %   <- hier stehst du mit 100 € Kapital
+#   ...
+#   Level 7  > 250 Mio. $/Monat   0,02 %
+#
+# Dazu kommt ein variabler Spread von ~0,05 %.
+#
+# Die alten Werte (0,04 % / 0,06 %) stammten aus einer Futures-Börse und waren
+# um Faktor ~4,5 zu niedrig. Das ist keine Kosmetik: bei 0,55 % Round-Trip
+# steigt die für Break-even nötige Win-Rate von 37,7 % auf 50 %, und typische
+# Trailing-Exits (+0,2–0,4 % brutto) liegen UNTER den Gebühren — sie wären
+# real Verluste.
+#
+# Deine tatsächliche Stufe zeigt `bp-fusion account info`. Der Preflight
+# gleicht sie beim Live-Start gegen diesen Wert ab und warnt bei Abweichung.
 fees:
-  crypto_maker: 0.0004  # 0.04%
-  crypto_taker: 0.0006  # 0.06%
+  crypto_maker: 0.0025   # 0.25% — Level 1
+  crypto_taker: 0.0025   # 0.25% — identisch zu Maker
+  spread_estimate: 0.0005  # ~0.05% variabler Spread, je Seite
 
 slippage:
   min: 0.0001  # 0.01%
