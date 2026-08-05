@@ -37,7 +37,22 @@ DEFAULT_HOST = "https://api.fusion.bitpanda.com"
 # Vom CLI belegte Order-Status
 OPEN_STATES = {"open", "new", "partially-filled"}
 FILLED_STATES = {"filled", "closed", "filled-and-canceled"}
-DEAD_STATES = {"canceled", "rejected", "done-for-day"}
+DEAD_STATES = {"canceled", "cancelled", "rejected", "done-for-day", "expired"}
+
+# Fusion kennt fünf Ordertypen. Das CLI-README dokumentiert nur die ersten
+# beiden; Stop- und Take-Profit-Orders sind aber verfügbar und der einzige
+# Weg, eine Position abzusichern, während der Bot-Prozess nicht läuft.
+ORDER_TYPE_MARKET = "market"
+ORDER_TYPE_LIMIT = "limit"
+ORDER_TYPE_STOP_MARKET = "stop_market"
+ORDER_TYPE_STOP_LIMIT = "stop_limit"
+ORDER_TYPE_TAKE_PROFIT_LIMIT = "take_profit_limit"
+
+STOP_ORDER_TYPES = {
+    ORDER_TYPE_STOP_MARKET,
+    ORDER_TYPE_STOP_LIMIT,
+    ORDER_TYPE_TAKE_PROFIT_LIMIT,
+}
 
 
 class FusionAPIError(RuntimeError):
@@ -427,10 +442,14 @@ class FusionClient:
 
     async def create_order(self, pair: str, side: str, order_type: str,
                            quantity: float = None, amount: float = None,
-                           limit_price: float = None,
+                           limit_price: float = None, stop_price: float = None,
                            client_order_id: str = None) -> Dict:
         """
         Legt eine Order an.
+
+        `order_type` ist einer der fünf Fusion-Typen: `market`, `limit`,
+        `stop_market`, `stop_limit`, `take_profit_limit`. Die Stop-Varianten
+        brauchen zusätzlich `stop_price`.
 
         `quantity` ist die Base-Menge, `amount` das Quote-Volumen — laut CLI
         schliessen sich beide gegenseitig aus. Der Request wird **nie**
@@ -439,6 +458,8 @@ class FusionClient:
         """
         if (quantity is None) == (amount is None):
             raise ValueError("Genau eines von quantity oder amount angeben")
+        if order_type in STOP_ORDER_TYPES and stop_price is None:
+            raise ValueError(f"{order_type} benoetigt einen stop_price")
 
         body: Dict[str, Any] = {"pair": pair, "side": side, "type": order_type}
         if quantity is not None:
@@ -447,6 +468,8 @@ class FusionClient:
             body["amount"] = str(amount)
         if limit_price is not None:
             body["limit_price"] = str(limit_price)
+        if stop_price is not None:
+            body["stop_price"] = str(stop_price)
         if client_order_id:
             body["client_order_id"] = client_order_id
 

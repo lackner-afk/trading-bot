@@ -524,6 +524,11 @@ class TradingBot:
                 for order in filled:
                     await self._process_filled_order(order)
 
+                # Hat ein venue-seitiger Stop ausgelöst? Muss VOR den
+                # Exit-Conditions laufen, sonst versucht der Bot eine bereits
+                # geschlossene Position noch einmal zu schließen.
+                await self._check_venue_stops()
+
                 # Exit-Conditions prüfen
                 await self._check_exit_conditions(prices)
 
@@ -1004,6 +1009,11 @@ class TradingBot:
                 signal.symbol, result.execution_price, position.timestamp
             )
 
+            # Schutz-Stop beim Venue: der lokale Stop-Loss hilft nur, solange
+            # dieser Prozess lebt. Bei Crash oder VPS-Neustart waere die
+            # Position sonst voellig ungesichert.
+            await self._place_protective_stop(position, result.execution_price)
+
             self.reporter.print_info(
                 f"{strategy_name.upper()}: {signal.signal_type.value.upper()} {signal.symbol} "
                 f"@ ${result.execution_price:.4f} (Conf: {signal.confidence:.0%})"
@@ -1323,6 +1333,19 @@ class TradingBot:
 
         close_side = 'sell' if position.side == 'long' else 'buy'
 
+        # Schutz-Stop ZUERST stornieren. Bleibt er stehen, verkauft das Venue
+        # nach unserem Exit ein zweites Mal — bei Spot heisst das, dass
+        # Bestand abfliesst, den der Bot nicht mehr als Position fuehrt.
+        cancel_stop = getattr(self.order_engine, 'cancel_protective_stop', None)
+        if cancel_stop is not None:
+            try:
+                await cancel_stop(symbol)
+            except Exception as e:
+                self.logger.critical(
+                    f"Schutz-Stop fuer {symbol} nicht stornierbar: {e} - "
+                    f"moegliche Geisterorder, manuell pruefen!"
+                )
+
         try:
             result = await self.order_engine.execute_market_order(
                 symbol=symbol,
@@ -1375,6 +1398,63 @@ class TradingBot:
                 breakdown = self._last_confluence_breakdowns.pop(trade.symbol, None)
                 if breakdown:
                     self._update_factor_attribution(trade, breakdown)
+
+    async def _place_protective_stop(self, position, entry_price: float):
+        """
+        Legt einen venue-seitigen Stop für eine frisch geöffnete Position an.
+
+        Nur Engines, die das können (aktuell Fusion), bieten die Methode an —
+        die Paper-Engine hat sie nicht, deshalb der getattr-Check.
+        """
+        place = getattr(self.order_engine, 'place_protective_stop', None)
+        if place is None or not position.stop_loss:
+            return
+
+        close_side = 'sell' if position.side == 'long' else 'buy'
+        quantity = position.size / entry_price if entry_price > 0 else 0
+
+        try:
+            await place(position.symbol, close_side, quantity, position.stop_loss)
+        except Exception as e:
+            self.logger.error(f"Schutz-Stop fuer {position.symbol} fehlgeschlagen: {e}")
+
+    async def _check_venue_stops(self):
+        """
+        Prüft, ob ein venue-seitiger Stop ausgelöst hat, und zieht den lokalen
+        Zustand nach. Ohne das hielte der Bot eine Position für offen, die beim
+        Venue längst geschlossen ist — und scheiterte später beim Exit.
+        """
+        check = getattr(self.order_engine, 'check_protective_stops', None)
+        if check is None:
+            return
+
+        try:
+            ausgeloest = await check()
+        except Exception as e:
+            self.logger.error(f"Schutz-Stops nicht pruefbar: {e}")
+            return
+
+        for symbol in ausgeloest:
+            position = self.portfolio.positions.get(symbol)
+            if not position:
+                continue
+
+            price = self.crypto_feed.get_price(symbol) or position.stop_loss
+            self.logger.critical(
+                f"[VENUE-STOP] {symbol}: Position wurde vom Venue geschlossen, "
+                f"buche lokal nach @ {price}"
+            )
+            # Der Verkauf ist bereits erfolgt — direkt ins Portfolio buchen,
+            # NICHT ueber _close_position, das eine zweite Order senden wuerde.
+            trade = self.portfolio.close_position(
+                symbol=symbol, exit_price=price,
+                fees=position.size * self.order_engine.fees.get('crypto_taker', 0.0025),
+                strategy=position.market_type,
+            )
+            self.confluence_exit.forget(symbol)
+            if trade:
+                self.reporter.print_trade_executed(trade)
+                await self.reporter.send_trade_alert(trade)
 
     def _register_exit_failure(self, symbol: str, reason: str):
         """

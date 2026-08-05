@@ -407,3 +407,115 @@ class TestClientKonfiguration:
     def test_pair_parsing_leitet_base_quote_ab(self):
         info = FusionClient._parse_pair({"pair": "BTC-EUR"})
         assert info.base == "BTC" and info.quote == "EUR"
+
+
+class TestSchutzStops:
+    """
+    Der Bot prueft SL/TP im 1-Sekunden-Loop. Stirbt der Prozess, ist eine
+    offene Position ohne venue-seitigen Stop voellig ungeschuetzt — nach dem
+    bereits behobenen Exit-Bug der gefaehrlichste Zustand beim Spot-Handel
+    mit echtem Kapital.
+    """
+
+    async def test_stop_wird_platziert(self):
+        client = FakeClient()
+        eng = engine(client)
+
+        order_id = await eng.place_protective_stop("BTC_EUR", "sell", 0.0004, 49000.0)
+
+        assert order_id is not None
+        call = client.created[0]
+        assert call["order_type"] == "stop_market"
+        assert call["stop_price"] == pytest.approx(49000.0)
+        assert call["side"] == "sell"
+        assert eng.protective_stops["BTC_EUR"] == order_id
+
+    async def test_stop_wird_gerundet(self):
+        client = FakeClient()
+        await engine(client).place_protective_stop("BTC_EUR", "sell", 0.123456789, 49000.987)
+
+        call = client.created[0]
+        assert call["quantity"] == pytest.approx(0.123457)      # amount_precision 6
+        assert call["stop_price"] == pytest.approx(49000.99)    # price_precision 2
+
+    async def test_shadow_platziert_nichts(self):
+        client = FakeClient()
+        eng = engine(client, shadow=True)
+
+        assert await eng.place_protective_stop("BTC_EUR", "sell", 0.0004, 49000.0) is None
+        assert client.created == []
+
+    async def test_fehlschlag_ist_nicht_fatal(self):
+        """Die Position bleibt offen und lokal abgesichert — aber es muss auffallen."""
+        client = FakeClient(raise_on_create=FusionAPIError(400, "nope", "/v1/orders"))
+        eng = engine(client)
+
+        assert await eng.place_protective_stop("BTC_EUR", "sell", 0.0004, 49000.0) is None
+        assert "BTC_EUR" not in eng.protective_stops
+
+    async def test_ungueltige_werte(self):
+        eng = engine()
+        assert await eng.place_protective_stop("BTC_EUR", "sell", 0.0, 49000.0) is None
+        assert await eng.place_protective_stop("BTC_EUR", "sell", 0.001, 0.0) is None
+
+    async def test_stornierung_entfernt_tracking(self):
+        client = FakeClient()
+        eng = engine(client)
+        await eng.place_protective_stop("BTC_EUR", "sell", 0.0004, 49000.0)
+
+        assert await eng.cancel_protective_stop("BTC_EUR") is True
+        assert "BTC_EUR" not in eng.protective_stops
+        assert len(client.cancelled) == 1
+
+    async def test_stornierung_ohne_stop(self):
+        assert await engine().cancel_protective_stop("BTC_EUR") is True
+
+    async def test_ausgeloester_stop_wird_erkannt(self):
+        client = FakeClient(order_response={
+            "order_id": "stop", "status": "filled", "average_price": "49000",
+        })
+        eng = engine(client)
+        await eng.place_protective_stop("BTC_EUR", "sell", 0.0004, 49000.0)
+
+        ausgeloest = await eng.check_protective_stops()
+
+        assert ausgeloest == ["BTC_EUR"]
+        assert "BTC_EUR" not in eng.protective_stops
+
+    async def test_offener_stop_bleibt(self):
+        client = FakeClient(order_response={"order_id": "stop", "status": "open"})
+        eng = engine(client)
+        await eng.place_protective_stop("BTC_EUR", "sell", 0.0004, 49000.0)
+
+        assert await eng.check_protective_stops() == []
+        assert "BTC_EUR" in eng.protective_stops
+
+    async def test_stornierter_stop_verlaesst_tracking(self):
+        client = FakeClient(order_response={"order_id": "stop", "status": "canceled"})
+        eng = engine(client)
+        await eng.place_protective_stop("BTC_EUR", "sell", 0.0004, 49000.0)
+
+        assert await eng.check_protective_stops() == []
+        assert "BTC_EUR" not in eng.protective_stops
+
+
+class TestOrdertypen:
+    def test_stop_typen_brauchen_stop_price(self):
+        from core.fusion_client import STOP_ORDER_TYPES
+        assert "stop_market" in STOP_ORDER_TYPES
+        assert "stop_limit" in STOP_ORDER_TYPES
+        assert "take_profit_limit" in STOP_ORDER_TYPES
+
+    async def test_stop_ohne_preis_wirft(self):
+        from core.fusion_client import FusionClient
+        client = FusionClient("k")
+        with pytest.raises(ValueError, match="stop_price"):
+            await client.create_order(pair="BTC-EUR", side="sell",
+                                      order_type="stop_market", quantity=0.001)
+
+    async def test_quantity_und_amount_exklusiv(self):
+        from core.fusion_client import FusionClient
+        client = FusionClient("k")
+        with pytest.raises(ValueError):
+            await client.create_order(pair="BTC-EUR", side="buy",
+                                      order_type="market", quantity=1, amount=10)

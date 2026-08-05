@@ -104,11 +104,10 @@ Später wird es zusätzliche automatische Kill-Switches geben (max daily DD, API
 
 ## Was aktuell noch fehlt
 
-- **Bitpanda Fusion ist nicht angebunden.** Der einzige implementierte
-  Exchange-Zugang ist `ccxt.onetrading` (One Trading, ehemals Bitpanda Pro —
-  seit 2023 ein eigenständiges Unternehmen, *nicht* Bitpanda). CCXT
-  unterstützt Fusion nicht (Issue #25354, offen seit Feb 2025, kein PR), die
-  Anbindung braucht also einen eigenen REST-Client gegen die Fusion-API.
+- **Gebührenstufe muss verifiziert werden.** `settings.yaml` rechnet mit
+  Level 1 (0,25 % je Seite plus ~0,05 % Spread = 0,60 % Round-Trip). Der
+  Preflight gleicht das gegen das echte Konto ab und bricht ab, wenn die
+  Realität teurer ist. Prüfbar mit `bp-fusion account info`.
 - **Es gibt zwei verschiedene Bitpanda-MCPs — nicht verwechseln:**
   - `bitpanda-labs/bitpanda-mcp` (Public-/Broker-API) ist **read-only**:
     `get_portfolio`, `list_wallets`, `get_price`, `list_prices`, `get_asset`,
@@ -140,7 +139,7 @@ automatisierte Abrufe mit HTTP 403 — das CLI-README ist die belastbarste
 | Base-URL | `https://api.fusion.bitpanda.com` |
 | Auth | `FUSION_API_KEY` (eigener Key, **getrennt** vom read-only `BITPANDA_API_KEY`) |
 | **Paar-Format** | `BTC-EUR` (Bindestrich!) — nicht `BTC/EUR`, nicht `BTC_EUR` |
-| Ordertypen | `limit`, `market` |
+| Ordertypen | `market`, `limit`, `stop_market`, `stop_limit`, `take_profit_limit` (das CLI-README dokumentiert nur die ersten beiden) |
 | Ordergröße | `quantity` (Base) **oder** `amount` (Quote, z.B. 30 EUR) — exklusiv |
 | Order-Status | `open`, `closed`, `new`, `partially-filled`, `filled`, `canceled`, `filled-and-canceled`, `done-for-day`, `rejected` |
 | Candles | OHLCV vorhanden; Intervalle `1m, 5m, 10m, 15m, 30m, 1h, 4h, 1d`, `limit` max 1440, `from`/`to` als RFC3339 |

@@ -20,6 +20,7 @@ from core.execution_base import BaseOrderEngine
 from core.fusion_client import (
     DEAD_STATES,
     FILLED_STATES,
+    ORDER_TYPE_STOP_MARKET,
     FusionAPIError,
     FusionClient,
     PairInfo,
@@ -67,6 +68,11 @@ class BitpandaFusionOrderEngine(BaseOrderEngine):
         self.pending_orders: Dict[str, Order] = {}
         self._order_counter = 0
         self._preflight_ok = False
+
+        # symbol -> Venue-Order-ID des Schutz-Stops. Ohne dieses Tracking
+        # bliebe der Stop nach einem lokalen Exit beim Venue liegen und
+        # würde später erneut verkaufen — eine Geisterorder.
+        self.protective_stops: Dict[str, str] = {}
 
     # ----- Vorbereitung ---------------------------------------------
 
@@ -274,6 +280,124 @@ class BitpandaFusionOrderEngine(BaseOrderEngine):
         self.pending_orders[order.external_id] = order
         self.logger.info(f"[FUSION] Limit-Order {order.external_id} @ {price}")
         return order
+
+    async def place_protective_stop(self, symbol: str, side: str, quantity: float,
+                                    stop_price: float) -> Optional[str]:
+        """
+        Platziert einen Stop-Market beim Venue als Sicherheitsnetz.
+
+        Der Bot prüft Stop-Loss und Take-Profit im 1-Sekunden-Loop. Stirbt der
+        Prozess — Crash, VPS-Neustart, Netzausfall —, ist eine offene Position
+        ohne diesen Stop **völlig ungeschützt**. Der lokale Trailing-Stop
+        bleibt die erste Ebene; dieser hier fängt den Ausfall ab.
+
+        `side` ist die Richtung der SCHUTZ-Order, nicht der Position: eine
+        Long-Position wird mit einem Sell-Stop abgesichert.
+
+        Returns die Venue-Order-ID oder None.
+        """
+        if stop_price <= 0 or quantity <= 0:
+            return None
+
+        info = await self._pair_info(symbol)
+        if info is not None:
+            quantity = info.round_amount(quantity)
+            stop_price = info.round_price(stop_price)
+
+        venue_symbol = to_venue(symbol, VENUE)
+        client_order_id = self._next_client_order_id("BP-STP")
+
+        if self.shadow_mode:
+            self.logger.warning(
+                f"[SHADOW] Wuerde Schutz-Stop setzen: {side} {quantity} "
+                f"{venue_symbol} @ Stop {stop_price}"
+            )
+            return None
+
+        try:
+            response = await self.client.create_order(
+                pair=venue_symbol, side=side, order_type=ORDER_TYPE_STOP_MARKET,
+                quantity=quantity, stop_price=stop_price,
+                client_order_id=client_order_id,
+            )
+        except FusionAPIError as e:
+            # Kein harter Fehler: die Position ist offen und der lokale Stop
+            # greift weiterhin. Aber es muss auffallen.
+            self.logger.critical(
+                f"SCHUTZ-STOP FEHLGESCHLAGEN fuer {symbol}: {e}. Position ist "
+                f"nur noch durch den laufenden Bot-Prozess abgesichert."
+            )
+            return None
+
+        order_id = self._extract_id(response) or client_order_id
+        self.protective_stops[symbol] = order_id
+        self.logger.info(
+            f"[FUSION] Schutz-Stop {order_id} fuer {symbol} @ {stop_price}"
+        )
+        return order_id
+
+    async def cancel_protective_stop(self, symbol: str) -> bool:
+        """
+        Storniert den Schutz-Stop eines Symbols.
+
+        Muss bei JEDEM lokalen Exit laufen. Bleibt der Stop stehen, verkauft
+        das Venue später ein zweites Mal — bei Spot heisst das, dass Bestand
+        verkauft wird, den der Bot gar nicht mehr als Position führt.
+        """
+        order_id = self.protective_stops.pop(symbol, None)
+        if not order_id or self.shadow_mode:
+            return True
+
+        try:
+            await self.client.cancel_order(order_id)
+            self.logger.info(f"[FUSION] Schutz-Stop {order_id} fuer {symbol} storniert")
+            return True
+        except FusionAPIError as e:
+            self.logger.critical(
+                f"SCHUTZ-STOP {order_id} ({symbol}) konnte nicht storniert werden: {e}. "
+                f"GEISTERORDER - bitte manuell im Fusion-Konto pruefen!"
+            )
+            return False
+
+    async def check_protective_stops(self) -> List[str]:
+        """
+        Prüft, ob ein Schutz-Stop beim Venue ausgelöst hat.
+
+        Wenn ja, ist die Position dort bereits geschlossen — der Bot muss das
+        lokal nachvollziehen, sonst hält er eine Position für offen, die es
+        nicht mehr gibt, und scheitert später beim Exit.
+
+        Returns die Symbole, deren Stop ausgelöst hat.
+        """
+        if not self.protective_stops or self.shadow_mode:
+            return []
+
+        ausgeloest: List[str] = []
+
+        for symbol, order_id in list(self.protective_stops.items()):
+            try:
+                response = await self.client.get_order(order_id)
+            except FusionAPIError as e:
+                self.logger.error(f"[FUSION] Schutz-Stop {order_id} nicht abrufbar: {e}")
+                continue
+
+            status = str(self._get(response, "status", "")).lower()
+
+            if status in FILLED_STATES:
+                self.protective_stops.pop(symbol, None)
+                ausgeloest.append(symbol)
+                self.logger.critical(
+                    f"[FUSION] Schutz-Stop fuer {symbol} hat AUSGELOEST @ "
+                    f"{self._filled_price(response)} - Position ist beim Venue geschlossen"
+                )
+            elif status in DEAD_STATES:
+                self.protective_stops.pop(symbol, None)
+                self.logger.warning(
+                    f"[FUSION] Schutz-Stop fuer {symbol} beendet ({status}) - "
+                    f"Position ist NICHT mehr venue-seitig abgesichert"
+                )
+
+        return ausgeloest
 
     async def check_pending_orders(self, current_prices: Dict[str, float]) -> List[Order]:
         """Fragt den Status der getrackten Orders ab und meldet neue Fills."""
