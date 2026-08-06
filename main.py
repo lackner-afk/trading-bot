@@ -250,7 +250,7 @@ class TradingBot:
 
                 self.order_engine = BitpandaFusionOrderEngine(
                     api_key=api_key,
-                    config=live_config,
+                    config={**live_config, 'pairs': pairs},
                     constraints=self.constraints,
                 )
                 self.crypto_feed = BitpandaFusionFeed(
@@ -419,11 +419,20 @@ class TradingBot:
                             + "; ".join(preflight.get('errors', []))
                         )
 
-                    self.logger.critical("Spot-Reconciliation (Kontobestand = Position)...")
+                    # Quote-Asset des Handelstopfs: steht hier z.B. EURCV, ist
+                    # allein der EURCV-Bestand das Kapital des Bots. Ein
+                    # EUR-Guthaben auf demselben Konto bleibt unangetastet und
+                    # taucht nur als gemeldeter Fremdbestand auf.
+                    quote_asset = ((self.config.get('live', {}) or {}).get('quote_asset')
+                                   or self.config.get('general', {}).get('base_currency', 'EUR'))
+                    self.logger.critical(
+                        f"Spot-Reconciliation (Kontobestand = Position), "
+                        f"Kapitaltopf in {quote_asset}..."
+                    )
                     report = await run_spot_reconciliation(
                         self.portfolio, self.order_engine,
                         prices=self.crypto_feed.get_prices(),
-                        quote_currency=self.config.get('general', {}).get('base_currency', 'EUR'),
+                        quote_currency=quote_asset,
                     )
                 else:
                     self.logger.critical("Starte Reconciliation mit One Trading (Exchange als Source of Truth)...")

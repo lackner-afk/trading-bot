@@ -164,10 +164,31 @@ Ziel: echte Fusion-Kurse gegen Kraken-Kurse halten, Slippage aus den
 die echten `min_amount`/`min_notional`, und Reconciliation nach bewusstem
 Neustart mehrfach testen.
 
+Zusätzlich zu messen, wenn `live.quote_asset` auf EURCV steht: die
+`[EXEC-QUALITY]`-Zeilen der EURCV-Paare gegen die Backtest-Annahme. Der
+Backtest läuft auf Kraken-EUR-Daten; Stablecoin-Bücher sind dünner. Ist die
+Slippage deutlich höher, kippt die Rechnung — die Strategie braucht 51,4 %
+Trefferquote zum Break-even.
+
 ## Stufe 3 — Kleines Kapital (2–4 Wochen)
 
 `shadow_mode: false`, 100–200 € echtes Kapital. Tägliche Fill-Kontrolle über
 den read-only Bitpanda-MCP (`get_portfolio`, `list_trades`).
+
+**Kapital trennen, bevor echtes Geld fließt.** Der Bot nimmt sonst den
+gesamten EUR-Bestand des Kontos als Handelskapital — bei 5.000 € auf dem Konto
+wären das 750 € pro Position statt der gedachten 15 €. Mit
+`live.quote_asset: EURCV` handelt er `*-EURCV`-Paare und sieht ausschließlich
+den EURCV-Bestand:
+
+```yaml
+live:
+  quote_asset: EURCV
+```
+
+100 € in der Bitpanda-App in EURCV tauschen, fertig. Gewinne fließen wieder in
+EURCV zurück, der Topf wächst also mit. Details und die Slippage-Frage in
+`LIVE_TRADING.md`.
 
 ---
 

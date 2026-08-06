@@ -67,6 +67,50 @@ class TestQuoteBalance:
         assert report.success is False
 
 
+class TestKapitaltopf:
+    """
+    Der Bot laeuft auf einem Konto, auf dem auch privates Geld liegt.
+    Mit quote_currency=EURCV darf ausschliesslich der EURCV-Bestand sein
+    Kapital sein — das EUR-Guthaben muss unsichtbar bleiben.
+    """
+
+    async def test_nimmt_nur_das_topf_asset(self, portfolio):
+        engine = FakeEngine({"EUR": 5000.0, "EURCV": 100.0})
+        report = await run_spot_reconciliation(
+            portfolio, engine, quote_currency="EURCV"
+        )
+
+        # Entscheidend: NICHT die 5000 EUR
+        assert portfolio.balance == pytest.approx(100.0)
+        assert report.exchange_quote_balance == pytest.approx(100.0)
+
+    async def test_eur_taucht_als_fremdbestand_auf(self, portfolio):
+        """Unsichtbar als Kapital, aber sichtbar im Report — nicht stillschweigend."""
+        engine = FakeEngine({"EUR": 5000.0, "EURCV": 100.0})
+        report = await run_spot_reconciliation(
+            portfolio, engine, quote_currency="EURCV"
+        )
+
+        fremd = [d for d in report.drifts if d.kind == "unknown_holding"]
+        assert any(d.symbol.startswith("EUR_") for d in fremd)
+        assert report.success is True     # blockiert den Start nicht
+
+    async def test_gewinne_wachsen_den_topf(self, portfolio):
+        """
+        Aus 100 werden 400: der Bot handelt danach mit 400. Es gibt keine
+        Obergrenze — die Trennung ist der Schutz, nicht ein Deckel.
+        """
+        engine = FakeEngine({"EUR": 5000.0, "EURCV": 400.0})
+        await run_spot_reconciliation(portfolio, engine, quote_currency="EURCV")
+        assert portfolio.balance == pytest.approx(400.0)
+
+    async def test_leerer_topf_gibt_null(self, portfolio):
+        """Wer kein EURCV eingezahlt hat, handelt mit 0 — nicht mit dem EUR-Bestand."""
+        engine = FakeEngine({"EUR": 5000.0})
+        await run_spot_reconciliation(portfolio, engine, quote_currency="EURCV")
+        assert portfolio.balance == pytest.approx(0.0)
+
+
 class TestPositionsabgleich:
     async def test_saubere_uebereinstimmung(self, portfolio):
         open_long(portfolio, size=20.0, price=50000.0)     # 0.0004 BTC

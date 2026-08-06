@@ -82,6 +82,29 @@ live:
   timeout_seconds: 20
   max_retries: 3
 
+  # ---- Kapitaltopf -------------------------------------------------
+  # Welches Asset der Bot als sein Geld ansieht. Fusion bietet neben EUR
+  # auch Stablecoins als Quote-Waehrung an (EURCV, EURC, USDC).
+  #
+  # Steht hier EURCV, handelt der Bot BTC-EURCV statt BTC-EUR. Damit ist
+  # sein Kapital PHYSISCH getrennt: er sieht nur den EURCV-Bestand, ein
+  # EUR-Guthaben auf demselben Konto existiert fuer ihn nicht und wird
+  # beim Start lediglich als Fremdbestand gemeldet.
+  #
+  # Der Topf waechst von selbst: Verkaeufe fliessen wieder in EURCV
+  # zurueck. Wer mit 100 startet und auf 400 kommt, handelt danach mit
+  # 400 — es gibt keine Obergrenze, nur die Trennung.
+  #
+  # So richtest du ihn ein:
+  #   1. In der Bitpanda-App 100 EUR in EURCV tauschen
+  #   2. Hier quote_asset: EURCV setzen
+  #   3. Der Preflight prueft, ob es alle Paare in EURCV wirklich gibt
+  #
+  # EUR = Verhalten wie bisher: der Bot nimmt den GESAMTEN EUR-Bestand
+  # des Kontos als Handelskapital. Nur sinnvoll auf einem Konto, auf dem
+  # sonst nichts liegt.
+  quote_asset: EUR
+
   # Auth-Header laut docs.bitpanda.com:
   #   curl -H "Authorization: Bearer $BITPANDA_API_KEY" ...
   # Konfigurierbar, weil der gehostete Public-MCP

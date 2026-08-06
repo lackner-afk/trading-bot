@@ -124,6 +124,93 @@ class TestSymbolMapping:
         assert reg.to_venue("XRP_EUR") == "XRP-EUR"
 
 
+class TestQuoteAlias:
+    """
+    Kapitaltrennung: der Bot handelt *-EURCV, sieht also nur den
+    EURCV-Bestand als Geld. Intern bleibt alles BTC_EUR, weil das Symbol
+    in asset_selector/universe_manager/Strategien fest verdrahtet ist.
+    """
+
+    def test_alias_tauscht_nur_die_quote(self):
+        assert to_venue("BTC_EUR", "fusion", quote_alias="EURCV") == "BTC-EURCV"
+        assert to_venue("SOL_EUR", "fusion", quote_alias="EURCV") == "SOL-EURCV"
+
+    def test_rueckmapping_auf_kanonische_quote(self):
+        """Ohne das liessen sich Venue-Antworten nicht auf Positionen mappen."""
+        assert from_venue("BTC-EURCV", "fusion", quote_alias="EURCV") == "BTC_EUR"
+
+    def test_roundtrip_mit_alias(self):
+        for symbol in ("BTC_EUR", "ETH_EUR", "XRP_EUR"):
+            venue = to_venue(symbol, "fusion", quote_alias="EURCV")
+            assert from_venue(venue, "fusion", quote_alias="EURCV") == symbol
+
+    def test_eur_alias_ist_ein_no_op(self):
+        """Default darf das bisherige Verhalten nicht veraendern."""
+        assert to_venue("BTC_EUR", "fusion", quote_alias="EUR") == "BTC-EUR"
+        assert to_venue("BTC_EUR", "fusion", quote_alias=None) == "BTC-EUR"
+
+    def test_registry_mit_alias(self):
+        reg = SymbolRegistry(["BTC_EUR", "ETH_EUR"], "fusion", quote_alias="EURCV")
+        assert reg.to_venue("BTC_EUR") == "BTC-EURCV"
+        assert reg.from_venue("ETH-EURCV") == "ETH_EUR"
+
+    def test_engine_ordert_auf_dem_alias_paar(self):
+        """Der eigentliche Zweck: die echte Order geht auf BTC-EURCV raus."""
+        client = FakeClient(pairs={
+            "BTC-EURCV": PairInfo(
+                symbol="BTC-EURCV", base="BTC", quote="EURCV",
+                min_amount=0.0001, min_notional=10.0,
+                amount_precision=6, price_precision=2,
+            )
+        })
+        eng = engine(client, quote_asset="EURCV")
+        assert eng.quote_asset == "EURCV"
+
+        import asyncio
+        asyncio.run(eng.execute_market_order("BTC_EUR", "buy", 50.0, 50000.0))
+        assert client.created[0]["pair"] == "BTC-EURCV"
+
+    def test_preflight_meldet_fehlende_alias_paare(self):
+        """
+        BTC-EUR zu haben heisst nicht, BTC-EURCV zu haben. Ohne diese
+        Pruefung wuerde der Bot auf ein nicht existierendes Paar ordern.
+        """
+        import asyncio
+
+        client = FakeClient(pairs={"BTC-EURCV": PairInfo(
+            symbol="BTC-EURCV", base="BTC", quote="EURCV",
+            min_amount=0.0001, min_notional=10.0,
+            amount_precision=6, price_precision=2,
+        )})
+        eng = engine(client, quote_asset="EURCV",
+                     pairs=["BTC_EUR", "SOL_EUR"])
+
+        report = {"ok": True, "checks": {}, "errors": []}
+        asyncio.run(eng._check_configured_pairs(report))
+
+        assert report["ok"] is False
+        assert "SOL-EURCV" in report["errors"][0]
+        assert "BTC-EURCV" not in report["errors"][0]
+
+    def test_preflight_gruen_wenn_alle_paare_da(self):
+        import asyncio
+
+        client = FakeClient(pairs={
+            f"{b}-EURCV": PairInfo(
+                symbol=f"{b}-EURCV", base=b, quote="EURCV",
+                min_amount=0.0001, min_notional=10.0,
+                amount_precision=6, price_precision=2,
+            ) for b in ("BTC", "SOL")
+        })
+        eng = engine(client, quote_asset="EURCV", pairs=["BTC_EUR", "SOL_EUR"])
+
+        report = {"ok": True, "checks": {}, "errors": []}
+        asyncio.run(eng._check_configured_pairs(report))
+
+        assert report["ok"] is True
+        assert report["checks"]["pairs_configured"]["ok"] is True
+
+
 class TestPraezision:
     def test_menge_wird_gerundet(self):
         info = PairInfo(symbol="BTC-EUR", base="BTC", quote="EUR", amount_precision=6)

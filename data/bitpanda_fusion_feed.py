@@ -44,7 +44,10 @@ class BitpandaFusionFeed:
         self.logger = logging.getLogger('BitpandaFusionFeed')
 
         self.pairs = self.config.get('pairs') or list(self.DEFAULT_PAIRS)
-        self.symbols = SymbolRegistry(self.pairs, VENUE)
+        # Quote-Alias: handelt der Bot auf einem getrennten Kapitaltopf
+        # (z.B. EURCV), holt der Feed die Kurse derselben Paare.
+        self.quote_asset = (self.config.get('quote_asset') or 'EUR').upper()
+        self.symbols = SymbolRegistry(self.pairs, VENUE, quote_alias=self.quote_asset)
 
         self.client = client or FusionClient(
             api_key=api_key,

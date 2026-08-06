@@ -227,6 +227,53 @@ dokumentiert, damit der abweichende Header des Public-MCP nicht als Fehler
 missverstanden wird — `auth_header`/`auth_scheme` in `settings.yaml` bleiben
 genau dafür konfigurierbar.
 
+### Kapitaltrennung: der Handelstopf
+
+**Das Problem.** Beim Start übernimmt die Reconciliation den Kontostand als
+Wahrheit (`core/spot_reconciliation.py`) — sonst würde der Bot mit Geld
+rechnen, das er nicht hat. Die Kehrseite: er nimmt den **gesamten**
+EUR-Bestand als Handelskapital. Liegen 5.000 € auf dem Konto, bedeutet
+`max_position_size: 0.15` nicht 15 €, sondern **750 €** pro Position.
+`start_capital` aus `settings.yaml` wird dabei überschrieben.
+
+**Die Lösung.** Fusion bietet neben EUR auch Stablecoins als Quote-Währung an
+(EURCV, EURC, USDC). Handelt der Bot `BTC-EURCV` statt `BTC-EUR`, ist sein
+Kapital **physisch** getrennt — kein Deckel in Software, sondern ein anderer
+Vermögenswert:
+
+```yaml
+live:
+  quote_asset: EURCV
+```
+
+| Was | Verhalten |
+|---|---|
+| EURCV-Bestand | **ist** das Handelskapital des Bots |
+| EUR-Guthaben | für den Bot nicht existent; erscheint nur als gemeldeter Fremdbestand |
+| Gewinne | fließen beim Verkauf wieder in EURCV → der Topf wächst von selbst |
+| Obergrenze | keine. Aus 100 werden 400 → der Bot handelt danach mit 400 |
+| Leerer Topf | Balance 0 → der Bot handelt nicht, statt auf EUR auszuweichen |
+
+Einrichtung: in der Bitpanda-App den gewünschten Betrag in EURCV tauschen,
+`quote_asset: EURCV` setzen, starten. Der Preflight prüft, ob **alle**
+konfigurierten Paare in EURCV existieren, und bricht sonst mit Namensnennung
+ab (`BTC-EUR` zu haben heißt nicht, `BTC-EURCV` zu haben).
+
+Intern bleibt alles `BTC_EUR` — getauscht wird nur an der Venue-Grenze
+(`data/symbols.py`, Parameter `quote_alias`). Sonst müssten `asset_selector.py`,
+`universe_manager.py` und alle Strategien angefasst werden, in denen `BTC_EUR`
+fest verdrahtet ist.
+
+**Was das kostet, und wo es gemessen wird.** Stablecoin-Bücher sind dünner als
+die EUR-Bücher. Mehr Slippage und breitere Spreads treffen eine Strategie hart,
+die ohnehin 51,4 % Trefferquote zum Break-even braucht. Der Backtest läuft auf
+Kraken-EUR-Daten und kann das nicht abbilden — **Stufe 2 (Shadow Mode) muss es
+messen**: die `[EXEC-QUALITY]`-Zeilen gegen die Backtest-Annahme halten. Fällt
+das Ergebnis schlecht aus, ist `quote_asset: EUR` eine Zeile Konfiguration
+zurück — dann aber wieder mit dem vollen Kontostand als Kapital, also nur auf
+einem Konto sinnvoll, auf dem sonst nichts liegt. Dazu kommt das
+Depeg-Risiko: EURCV ist ein Stablecoin der Société Générale, kein Zentralbankgeld.
+
 ### Preflight — bevor scharf geschaltet wird
 
 Die URL-Pfade in `live.endpoints` sind aus dem CLI abgeleitet, **nicht** gegen

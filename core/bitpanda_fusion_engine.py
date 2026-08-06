@@ -55,9 +55,21 @@ class BitpandaFusionOrderEngine(BaseOrderEngine):
             config=self.config,
         )
 
+        # Quote-Asset des Handelstopfs. Steht hier z.B. EURCV, handelt der Bot
+        # BTC-EURCV statt BTC-EUR und sieht als Kapital ausschliesslich den
+        # EURCV-Bestand — das EUR-Guthaben des Kontos ist fuer ihn unsichtbar.
+        self.quote_asset = (self.config.get("quote_asset") or "EUR").upper()
+
         self.shadow_mode = self.config.get("shadow_mode", True)
         if self.shadow_mode:
             self.logger.warning("!!! SHADOW MODE AKTIV - es werden KEINE echten Orders platziert !!!")
+
+        if self.quote_asset != "EUR":
+            self.logger.critical(
+                f"KAPITALTOPF: Quote-Asset {self.quote_asset}. Der Bot handelt "
+                f"*-{self.quote_asset}-Paare und sieht ausschliesslich den "
+                f"{self.quote_asset}-Bestand als Handelskapital."
+            )
 
         self.fees = {
             "crypto_maker": self.config.get("crypto_maker", 0.0004),
@@ -86,6 +98,8 @@ class BitpandaFusionOrderEngine(BaseOrderEngine):
         self._preflight_ok = bool(report.get("ok"))
 
         await self._check_fee_tier(report)
+        await self._check_configured_pairs(report)
+        self._preflight_ok = bool(report.get("ok"))
 
         if self._preflight_ok:
             self.logger.info("Fusion-Preflight OK")
@@ -93,6 +107,51 @@ class BitpandaFusionOrderEngine(BaseOrderEngine):
             for err in report.get("errors", []):
                 self.logger.critical(f"Fusion-Preflight: {err}")
         return report
+
+    async def _check_configured_pairs(self, report: Dict):
+        """
+        Prüft, ob jedes konfigurierte Symbol beim Venue wirklich existiert.
+
+        Kritisch beim Quote-Alias: `BTC-EUR` heisst nicht, dass es auch
+        `BTC-EURCV` gibt. Stablecoin-Quotes decken meist nur einen Teil des
+        Angebots ab. Ohne diese Prüfung würde der Bot starten und bei jedem
+        Signal auf ein nicht existierendes Paar ordern — sichtbar erst als
+        Dauerstrom von Rejects.
+        """
+        symbols = self.config.get("pairs") or []
+        if not symbols:
+            return
+
+        try:
+            pairs = await self.client.get_pairs()
+        except FusionAPIError as e:
+            report.setdefault("errors", []).append(f"Paar-Pruefung fehlgeschlagen: {e}")
+            report["ok"] = False
+            return
+
+        if not pairs:
+            return      # Endpunkt lieferte nichts — der Preflight meldet das bereits
+
+        known = {p.upper() for p in pairs}
+        missing = [
+            s for s in symbols
+            if to_venue(s, VENUE, self.quote_asset).upper() not in known
+        ]
+
+        report.setdefault("checks", {})["pairs_configured"] = {
+            "ok": not missing,
+            "detail": (f"{len(symbols) - len(missing)}/{len(symbols)} Paare vorhanden "
+                       f"(Quote {self.quote_asset})"),
+        }
+
+        if missing:
+            venue_names = ", ".join(to_venue(s, VENUE, self.quote_asset) for s in missing)
+            report.setdefault("errors", []).append(
+                f"Diese Paare gibt es bei Fusion nicht: {venue_names}. "
+                f"Entweder aus confluence.pairs entfernen oder ein anderes "
+                f"quote_asset waehlen (aktuell {self.quote_asset})."
+            )
+            report["ok"] = False
 
     async def _check_fee_tier(self, report: Dict):
         """
@@ -142,7 +201,7 @@ class BitpandaFusionOrderEngine(BaseOrderEngine):
 
     async def _pair_info(self, symbol: str) -> Optional[PairInfo]:
         """Handelsregeln für ein Bot-Symbol (BTC_EUR -> BTC-EUR)."""
-        venue_symbol = to_venue(symbol, VENUE)
+        venue_symbol = to_venue(symbol, VENUE, self.quote_asset)
         try:
             pairs = await self.client.get_pairs()
         except FusionAPIError as e:
@@ -206,7 +265,7 @@ class BitpandaFusionOrderEngine(BaseOrderEngine):
                 f"Keine Handelsregeln fuer {symbol} - Order ohne Praezisionspruefung"
             )
 
-        venue_symbol = to_venue(symbol, VENUE)
+        venue_symbol = to_venue(symbol, VENUE, self.quote_asset)
 
         if self.shadow_mode:
             return self._shadow_fill(order, venue_symbol, amount, current_price, started)
@@ -257,7 +316,7 @@ class BitpandaFusionOrderEngine(BaseOrderEngine):
                 order.status = OrderStatus.REJECTED
                 return order
 
-        venue_symbol = to_venue(symbol, VENUE)
+        venue_symbol = to_venue(symbol, VENUE, self.quote_asset)
 
         if self.shadow_mode:
             self.logger.warning(
@@ -304,7 +363,7 @@ class BitpandaFusionOrderEngine(BaseOrderEngine):
             quantity = info.round_amount(quantity)
             stop_price = info.round_price(stop_price)
 
-        venue_symbol = to_venue(symbol, VENUE)
+        venue_symbol = to_venue(symbol, VENUE, self.quote_asset)
         client_order_id = self._next_client_order_id("BP-STP")
 
         if self.shadow_mode:
@@ -478,7 +537,7 @@ class BitpandaFusionOrderEngine(BaseOrderEngine):
         return await self.client.get_balances()
 
     async def fetch_open_orders(self, symbol: str = None) -> List[Dict]:
-        pair = to_venue(symbol, VENUE) if symbol else None
+        pair = to_venue(symbol, VENUE, self.quote_asset) if symbol else None
         return await self.client.list_orders(pair=pair, status="open")
 
     def set_fees(self, crypto_maker: float = None, crypto_taker: float = None):
