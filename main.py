@@ -235,13 +235,15 @@ class TradingBot:
                 self.logger.critical("SHADOW MODE aktiv - es werden KEINE echten Orders platziert")
 
             if self.live_venue == 'fusion':
-                # Eigener Key, strikt getrennt vom read-only BITPANDA_API_KEY
-                # (Broker-/MCP-Zugang). Verwechslung waere ein Sicherheitsproblem.
-                api_key = os.getenv('FUSION_API_KEY')
+                # Bitpanda vergibt EINEN Key mit Scopes, nicht mehrere Keys.
+                # FUSION_API_KEY bleibt als Fallback fuer Altinstallationen.
+                api_key = os.getenv('BITPANDA_API_KEY') or os.getenv('FUSION_API_KEY')
                 if not api_key:
                     raise RuntimeError(
-                        "LIVE MODE auf Fusion, aber FUSION_API_KEY fehlt in secrets.env! "
-                        "Nicht mit BITPANDA_API_KEY (read-only) verwechseln."
+                        "LIVE MODE auf Fusion, aber BITPANDA_API_KEY fehlt in secrets.env! "
+                        "Der Key braucht den 'trade'-Scope und muss ein v2-Key sein "
+                        "(v1 kennt 'trade' nicht). Erzeugen unter "
+                        "app.bitpanda.com/my-account/apikey."
                     )
 
                 self.logger.critical("Verwende BitpandaFusionFeed + BitpandaFusionOrderEngine")

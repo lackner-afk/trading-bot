@@ -364,12 +364,18 @@ class TestClientKonfiguration:
         assert not hasattr(ep, "quatsch")
 
     def test_auth_header_konfigurierbar(self):
-        client = FusionClient("k", config={"auth_header": "Authorization",
-                                           "auth_scheme": "Bearer"})
-        assert client._headers()["Authorization"] == "Bearer k"
+        """
+        Der gehostete Public-MCP (mcp.public.bitpanda.com) erwartet
+        x-api-key ohne Schema — die Konfigurierbarkeit ist kein toter Code.
+        """
+        client = FusionClient("k", config={"auth_header": "x-api-key",
+                                           "auth_scheme": ""})
+        assert client._headers()["x-api-key"] == "k"
+        assert "Authorization" not in client._headers()
 
     def test_default_auth_header(self):
-        assert FusionClient("k")._headers()["X-Api-Key"] == "k"
+        """Laut docs.bitpanda.com: Authorization: Bearer <BITPANDA_API_KEY>."""
+        assert FusionClient("k")._headers()["Authorization"] == "Bearer k"
 
     def test_key_ist_pflicht(self):
         with pytest.raises(ValueError):

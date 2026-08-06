@@ -8,7 +8,6 @@ Kommandos und Flags belegen, welche Operationen und Parameter existieren.
 
 Gesichert aus dem CLI:
   Base-URL      https://api.fusion.bitpanda.com   (Flag --host / FUSION_HOST)
-  Auth          FUSION_API_KEY
   Paar-Format   BTC-EUR
   Ordertypen    limit, market
   Ordergröße    quantity (Base) ODER amount (Quote) — exklusiv
@@ -17,10 +16,20 @@ Gesichert aus dem CLI:
   Candles       Intervalle 1m,5m,10m,15m,30m,1h,4h,1d; limit max 1440
   Pairs         liefert min/max Ordergröße, Tick-Size, Increments
 
-NICHT gesichert: die exakten URL-Pfade und der Auth-Header-Name. Beides ist
-deshalb über `FusionEndpoints` bzw. `auth_header` konfigurierbar und wird von
-`preflight()` gegen die echte API geprüft. Solange dieser Preflight nicht
-sauber durchläuft, darf die Engine nicht scharf geschaltet werden.
+Aus der offiziellen Doku (docs.bitpanda.com) belegt:
+  Auth          Authorization: Bearer <BITPANDA_API_KEY>
+  Key           EIN Key mit Scopes; für Fusion ist der `trade`-Scope nötig.
+                Der Key muss ein v2-Key sein — v1 kennt `trade` nicht.
+  Beispiel      curl -H "Authorization: Bearer $BITPANDA_API_KEY" \
+                  https://api.fusion.bitpanda.com/v1/account/balances
+
+NICHT gesichert bleiben die exakten URL-Pfade jenseits von
+`/v1/account/balances`. Sie sind über `FusionEndpoints` konfigurierbar und
+werden von `preflight()` gegen die echte API geprüft. Solange dieser Preflight
+nicht sauber durchläuft, darf die Engine nicht scharf geschaltet werden.
+
+`auth_header`/`auth_scheme` bleiben konfigurierbar: der gehostete Public-MCP
+unter https://mcp.public.bitpanda.com erwartet `x-api-key` statt Bearer.
 """
 
 import asyncio
@@ -180,16 +189,19 @@ class FusionClient:
     def __init__(self, api_key: str, host: str = DEFAULT_HOST,
                  config: Dict = None, session: aiohttp.ClientSession = None):
         if not api_key:
-            raise ValueError("FusionClient benoetigt einen API-Key (FUSION_API_KEY)")
+            raise ValueError(
+                "FusionClient benoetigt einen API-Key "
+                "(BITPANDA_API_KEY mit trade-Scope, v2)"
+            )
 
         self.config = config or {}
         self.api_key = api_key
         self.host = (host or DEFAULT_HOST).rstrip("/")
         self.endpoints = FusionEndpoints.from_config(self.config)
-        # Bitpanda nutzt bei seinen anderen APIs X-Api-Key; falls Fusion
-        # Bearer erwartet, hier umstellen statt Code anzufassen.
-        self.auth_header = self.config.get("auth_header", "X-Api-Key")
-        self.auth_scheme = self.config.get("auth_scheme", "")
+        # Laut Doku: Authorization: Bearer <key>. Konfigurierbar, weil der
+        # gehostete Public-MCP stattdessen x-api-key erwartet.
+        self.auth_header = self.config.get("auth_header", "Authorization")
+        self.auth_scheme = self.config.get("auth_scheme", "Bearer")
 
         self.timeout = aiohttp.ClientTimeout(total=self.config.get("timeout_seconds", 20))
         self.max_retries = self.config.get("max_retries", 3)
@@ -541,8 +553,17 @@ class FusionClient:
                 report["errors"].append(f"{name}: {e}")
                 if e.is_auth_error:
                     report["errors"].append(
-                        f"{name}: Auth fehlgeschlagen - FUSION_API_KEY und "
-                        f"auth_header (aktuell '{self.auth_header}') pruefen"
+                        f"{name}: Auth fehlgeschlagen. Die drei realen Ursachen, "
+                        f"in dieser Reihenfolge pruefen: "
+                        f"(1) dem Key fehlt der 'trade'-Scope - Fusion braucht ihn "
+                        f"auch fuer Lese-Endpunkte; "
+                        f"(2) es ist ein v1-Key - v1 kennt 'trade' nicht, es muss "
+                        f"ein v2-Key sein (neu erzeugen unter "
+                        f"app.bitpanda.com/my-account/apikey); "
+                        f"(3) falscher Header - erwartet wird "
+                        f"'Authorization: Bearer <key>', aktuell gesendet wird "
+                        f"'{self.auth_header}"
+                        f"{': ' + self.auth_scheme + ' ...' if self.auth_scheme else ': ...'}'"
                     )
                 return None
 

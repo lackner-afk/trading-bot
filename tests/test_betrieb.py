@@ -222,11 +222,29 @@ class TestChecklisteVenue:
 
         (tmp_path / 'config' / 'secrets.env').write_text("ONETRADING_API_KEY=x\nONETRADING_API_SECRET=y\n")
         ok, msg = checklist.check_secrets()
-        assert ok is False and 'FUSION_API_KEY' in msg
+        assert ok is False and 'BITPANDA_API_KEY' in msg
 
-        (tmp_path / 'config' / 'secrets.env').write_text("FUSION_API_KEY=echter-key\n")
+        (tmp_path / 'config' / 'secrets.env').write_text("BITPANDA_API_KEY=echter-key\n")
         ok, msg = checklist.check_secrets()
         assert ok is True
+
+    def test_alter_fusion_key_bleibt_fallback(self, tmp_path, monkeypatch):
+        """
+        Bitpanda vergibt nur einen Key mit Scopes. Bestehende Installationen
+        mit FUSION_API_KEY duerfen davon nicht brechen — main.py liest
+        beide Namen in derselben Reihenfolge.
+        """
+        import tools.paper_to_live_checklist as checklist
+
+        monkeypatch.setattr(checklist, 'PROJECT_ROOT', tmp_path)
+        (tmp_path / 'config').mkdir()
+        (tmp_path / 'config' / 'settings.yaml').write_text("live:\n  venue: fusion\n")
+        (tmp_path / 'config' / 'secrets.env').write_text(
+            "BITPANDA_API_KEY=\nFUSION_API_KEY=alter-key\n"
+        )
+
+        ok, msg = checklist.check_secrets()
+        assert ok is True and 'FUSION_API_KEY' in msg
 
     def test_leerer_key_zaehlt_nicht(self, tmp_path, monkeypatch):
         import tools.paper_to_live_checklist as checklist
@@ -234,7 +252,7 @@ class TestChecklisteVenue:
         monkeypatch.setattr(checklist, 'PROJECT_ROOT', tmp_path)
         (tmp_path / 'config').mkdir()
         (tmp_path / 'config' / 'settings.yaml').write_text("live:\n  venue: fusion\n")
-        (tmp_path / 'config' / 'secrets.env').write_text("FUSION_API_KEY=\n")
+        (tmp_path / 'config' / 'secrets.env').write_text("BITPANDA_API_KEY=\n")
 
         ok, msg = checklist.check_secrets()
         assert ok is False and 'leer' in msg

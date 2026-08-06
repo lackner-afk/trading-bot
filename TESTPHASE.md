@@ -153,10 +153,11 @@ live:
 export LIVE_TRADING_ENABLED=1
 ```
 
-Beim Start läuft der **Preflight** gegen Pairs, Tickers und Balances. Schlägt
-er fehl, stimmen die aus dem CLI abgeleiteten URL-Pfade oder der `auth_header`
-nicht — beides in `settings.yaml` korrigierbar, ohne Code anzufassen. Danach
-die **Spot-Reconciliation**: Base-Asset-Bestand gegen lokale Positionen.
+Beim Start läuft der **Preflight** gegen Pairs, Tickers und Balances. Bei
+**401/403** liegt es am Key: `BITPANDA_API_KEY` braucht den `trade`-Scope und
+muss ein v2-Key sein. Bei **404** stimmen die aus dem CLI abgeleiteten
+URL-Pfade nicht — in `settings.yaml` korrigierbar, ohne Code anzufassen.
+Danach die **Spot-Reconciliation**: Base-Asset-Bestand gegen lokale Positionen.
 
 Ziel: echte Fusion-Kurse gegen Kraken-Kurse halten, Slippage aus den
 `[EXEC-QUALITY]`-Zeilen gegen die Backtest-Annahme prüfen, Ordergrößen gegen

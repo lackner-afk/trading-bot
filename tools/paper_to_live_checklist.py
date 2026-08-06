@@ -61,13 +61,24 @@ def check_secrets() -> tuple[bool, str]:
 
     if venue == "fusion":
         # Der Key muss gesetzt sein, nicht nur genannt — ein leeres
-        # FUSION_API_KEY= reicht nicht.
-        for line in content.splitlines():
-            if line.strip().startswith("FUSION_API_KEY="):
-                if line.split("=", 1)[1].strip():
-                    return True, "FUSION_API_KEY gesetzt (Validierung beim Preflight)"
-                return False, "FUSION_API_KEY ist leer"
-        return False, "FUSION_API_KEY nicht in secrets.env gefunden (Ziel-Venue: fusion)"
+        # BITPANDA_API_KEY= reicht nicht. FUSION_API_KEY ist der Fallback
+        # fuer Altinstallationen, main.py liest ihn in derselben Reihenfolge.
+        found_empty = False
+        for name in ("BITPANDA_API_KEY", "FUSION_API_KEY"):
+            for line in content.splitlines():
+                if line.strip().startswith(f"{name}="):
+                    if line.split("=", 1)[1].strip():
+                        return True, (
+                            f"{name} gesetzt — 'trade'-Scope und v2-Key "
+                            f"werden erst beim Preflight validiert"
+                        )
+                    found_empty = True
+        if found_empty:
+            return False, (
+                "BITPANDA_API_KEY ist leer (v2-Key mit 'trade'-Scope noetig, "
+                "zu erzeugen unter app.bitpanda.com/my-account/apikey)"
+            )
+        return False, "BITPANDA_API_KEY nicht in secrets.env gefunden (Ziel-Venue: fusion)"
 
     if "ONETRADING_API_KEY=" in content and "ONETRADING_API_SECRET=" in content:
         return True, "secrets.env vorhanden (Keys werden beim Start validiert)"

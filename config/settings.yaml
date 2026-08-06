@@ -75,18 +75,20 @@ live:
   venue: fusion
   shadow_mode: true    # true = loggt Orders, platziert aber keine echten
 
-  # Bitpanda Fusion. API-Key kommt aus FUSION_API_KEY in secrets.env —
-  # NICHT mit BITPANDA_API_KEY verwechseln, das ist der read-only
-  # Broker-/MCP-Zugang ohne Handelsrechte.
+  # Bitpanda Fusion. API-Key kommt aus BITPANDA_API_KEY in secrets.env.
+  # Es gibt nur EINEN Bitpanda-Key mit Scopes — für Fusion muss der
+  # 'trade'-Scope gesetzt und der Key ein v2-Key sein.
   host: https://api.fusion.bitpanda.com
   timeout_seconds: 20
   max_retries: 3
 
-  # Auth-Header. Bitpanda nutzt bei seinen anderen APIs X-Api-Key; falls
-  # Fusion Bearer erwartet, hier umstellen statt Code anzufassen:
-  #   auth_header: Authorization
-  #   auth_scheme: Bearer
-  auth_header: X-Api-Key
+  # Auth-Header laut docs.bitpanda.com:
+  #   curl -H "Authorization: Bearer $BITPANDA_API_KEY" ...
+  # Konfigurierbar, weil der gehostete Public-MCP
+  # (https://mcp.public.bitpanda.com) stattdessen x-api-key ohne Schema
+  # erwartet. Für Fusion selbst bleiben diese Werte so.
+  auth_header: Authorization
+  auth_scheme: Bearer
 
   # URL-Pfade. Aus dem offiziellen CLI bitpanda-labs/bitpanda-fusion-cli
   # abgeleitet, aber NICHT gegen docs.fusion.bitpanda.com verifiziert (die

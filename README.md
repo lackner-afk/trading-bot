@@ -172,10 +172,13 @@ Siehe auch `LIVE_TRADING.md` für die vollständige Cutover-Checklist.
 Es gibt **zwei verschiedene Bitpanda-MCPs**:
 
 - **Public-/Broker-MCP** (`bitpanda-labs/bitpanda-mcp`) — strikt read-only,
-  kann keine Orders platzieren. Auth über `BITPANDA_API_KEY`. Gut für die
-  tägliche Kontrolle deines echten Bestands.
+  kann keine Orders platzieren. Gut für die tägliche Kontrolle deines echten
+  Bestands.
 - **Fusion MCP** — kann traden. Bitpanda hat am 16.07.2026 API *und* MCP für
-  automatisiertes Trading auf Fusion gelauncht. Auth über `FUSION_API_KEY`.
+  automatisiertes Trading auf Fusion gelauncht.
+
+Beide nutzen denselben `BITPANDA_API_KEY`; den Unterschied machen die Scopes.
+Für Fusion braucht der Key den **`trade`-Scope** und muss ein **v2-Key** sein.
 
 Für die Ausführung ist also entweder der Fusion-MCP oder die Fusion-REST-API
 nutzbar (CCXT unterstützt Fusion nicht — Issue #25354). Details zur

@@ -111,12 +111,13 @@ Später wird es zusätzliche automatische Kill-Switches geben (max daily DD, API
 - **Es gibt zwei verschiedene Bitpanda-MCPs — nicht verwechseln:**
   - `bitpanda-labs/bitpanda-mcp` (Public-/Broker-API) ist **read-only**:
     `get_portfolio`, `list_wallets`, `get_price`, `list_prices`, `get_asset`,
-    `list_transactions`, `list_trades`. Auth über `BITPANDA_API_KEY`.
-    Gut für Oversight, kann keine Orders platzieren.
+    `list_transactions`, `list_trades`. Gut für Oversight, kann keine Orders
+    platzieren.
   - **Fusion MCP** kann traden. Bitpanda hat am 16.07.2026 API *und* MCP für
     automatisiertes Trading auf Fusion gelauncht; laut Ankündigung lassen sich
     darüber Orders platzieren, Positionen abrufen und das Buch verwalten.
-    Auth über einen eigenen Fusion-API-Key (`FUSION_API_KEY`).
+  - Beide nutzen **denselben** `BITPANDA_API_KEY` — unterschieden wird über
+    die Scopes, nicht über getrennte Keys.
 - **Order-Reconciliation ist ein Platzhalter.** `_reconcile_open_orders` zählt
   offene Orders und loggt sie; der Abgleich offline gefüllter Orders fehlt.
   `_reconcile_positions` warnt nur, statt wirklich zu vergleichen. Im
@@ -131,13 +132,15 @@ Später wird es zusätzliche automatische Kill-Switches geben (max daily DD, API
 
 Abgeleitet aus dem offiziellen CLI [`bitpanda-labs/bitpanda-fusion-cli`](https://github.com/bitpanda-labs/bitpanda-fusion-cli)
 (Go, Apache 2.0). Die Doku unter `docs.fusion.bitpanda.com` antwortet auf
-automatisierte Abrufe mit HTTP 403 — das CLI-README ist die belastbarste
-öffentlich zugängliche Quelle.
+automatisierte Abrufe mit HTTP 403 — das CLI-README war lange die belastbarste
+öffentlich zugängliche Quelle. **Auth und Key-Handling stammen inzwischen aus
+der offiziellen Doku unter `docs.bitpanda.com`** und sind damit belegt; die
+URL-Pfade bleiben abgeleitet.
 
 | Punkt | Wert |
 |-------|------|
 | Base-URL | `https://api.fusion.bitpanda.com` |
-| Auth | `FUSION_API_KEY` (eigener Key, **getrennt** vom read-only `BITPANDA_API_KEY`) |
+| Auth | `Authorization: Bearer $BITPANDA_API_KEY` |
 | **Paar-Format** | `BTC-EUR` (Bindestrich!) — nicht `BTC/EUR`, nicht `BTC_EUR` |
 | Ordertypen | `market`, `limit`, `stop_market`, `stop_limit`, `take_profit_limit` (das CLI-README dokumentiert nur die ersten beiden) |
 | Ordergröße | `quantity` (Base) **oder** `amount` (Quote, z.B. 30 EUR) — exklusiv |
@@ -189,16 +192,56 @@ Execution-Engine von Fusion.
 | Zentrales Symbol-Mapping | `data/symbols.py` |
 
 Aktiviert über `live.venue: fusion` in `settings.yaml`. Key kommt aus
-`FUSION_API_KEY`.
+`BITPANDA_API_KEY` (`FUSION_API_KEY` wird als Fallback für Altinstallationen
+noch gelesen).
+
+### Der API-Key: einer, mit Scopes
+
+Bitpanda vergibt **einen** Key pro Konto, erzeugt unter
+`https://app.bitpanda.com/my-account/apikey`. Was er darf, steuern die Scopes:
+
+| Scope | Wofür |
+|---|---|
+| Read-Scopes | CLI, MCP-Server, Skills — Oversight und Reconciliation |
+| `trade` | **Pflicht für Fusion.** Ohne ihn antwortet Fusion mit 401/403 — auch auf Lese-Endpunkte |
+
+Zwei Fallen, die beide als „Auth fehlgeschlagen" erscheinen:
+
+1. **`trade`-Scope fehlt.** Der Key funktioniert dann in CLI und MCP, aber
+   nicht gegen Fusion — was den Fehler schwer zuzuordnen macht.
+2. **v1-Key statt v2.** v1-Keys kennen den `trade`-Scope nicht und lassen sich
+   nicht nachrüsten. Es muss ein neuer v2-Key erzeugt werden.
+
+`preflight()` nennt beide Ursachen im Klartext, wenn es 401/403 sieht.
+
+### Zwei Schreibwege bei Bitpanda
+
+| Weg | Host | Auth | Kann |
+|---|---|---|---|
+| **Fusion REST** (hier angebunden) | `api.fusion.bitpanda.com` | `Authorization: Bearer` | Orders, Balances, Candles, Orderbook |
+| Public API | `api.bitpanda.com` | `Authorization: Bearer` | Trading-Quotes, Earn-Ausführung |
+| Gehosteter Public-MCP | `mcp.public.bitpanda.com` | **`x-api-key`**, nicht Bearer | dasselbe wie Public API, über MCP |
+
+Der Bot nutzt ausschließlich den ersten Weg. Die anderen sind hier nur
+dokumentiert, damit der abweichende Header des Public-MCP nicht als Fehler
+missverstanden wird — `auth_header`/`auth_scheme` in `settings.yaml` bleiben
+genau dafür konfigurierbar.
 
 ### Preflight — bevor scharf geschaltet wird
 
 Die URL-Pfade in `live.endpoints` sind aus dem CLI abgeleitet, **nicht** gegen
-die Doku verifiziert (die blockt automatisierte Abrufe). Beim Live-Start läuft
-deshalb zuerst ein Preflight gegen Pairs, Tickers und Balances. Schlägt er
-fehl, startet der Bot nicht — dann sind entweder die Pfade oder der
-`auth_header` in `settings.yaml` zu korrigieren. Beides ist reine Konfiguration,
-ohne Codeänderung.
+die Doku verifiziert (die blockt automatisierte Abrufe). Ausnahme:
+`/v1/account/balances` ist durch das Doku-Beispiel belegt. Beim Live-Start
+läuft deshalb zuerst ein Preflight gegen Pairs, Tickers und Balances. Schlägt
+er fehl, startet der Bot nicht.
+
+- **401/403** → am Key, nicht an den Pfaden: `trade`-Scope oder v2 fehlt
+  (siehe oben). Der Preflight schreibt beide Ursachen ins Log.
+- **404** → an den Pfaden: `live.endpoints` in `settings.yaml` korrigieren.
+  Reine Konfiguration, ohne Codeänderung.
+
+Der `auth_header` ist dagegen kein Verdächtiger mehr — `Authorization: Bearer`
+ist durch die Doku belegt.
 
 `live.shadow_mode` steht per Default auf `true`: die Engine loggt exakt, was
 sie tun würde, schickt aber nichts los. Erst nach grünem Preflight und einer
