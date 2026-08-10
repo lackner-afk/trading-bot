@@ -11,6 +11,7 @@ Unterstützt zwei Modi:
 import asyncio
 import signal
 import logging
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -25,12 +26,17 @@ from core.risk_manager import RiskManager, RiskAction
 from core.order_engine import OrderEngine
 from core.live_order_engine import LiveOrderEngine
 from core.reconciliation import run_startup_reconciliation
+from core.market_constraints import MarketConstraints
 from data.kraken_feed import KrakenFeed
 from data.onetrading_ccxt_feed import OneTradingCCXTFeed
 from strategies.crypto_scalper import CryptoScalper, SignalType
 from strategies.momentum import MomentumStrategy
 from strategies.ml_predictor import MLPredictor
 from strategies.confluence_strategy import ConfluenceStrategy  # New 2026 multi-factor system
+from strategies.confluence_exit import ConfluenceExitManager
+from core.bitpanda_fusion_engine import BitpandaFusionOrderEngine
+from core.spot_reconciliation import run_spot_reconciliation
+from data.bitpanda_fusion_feed import BitpandaFusionFeed
 from notifications.reporter import Reporter
 
 
@@ -45,13 +51,26 @@ class TradingBot:
     beim Start durchgeführt.
     """
 
+    # Nach so vielen fehlgeschlagenen Exit-Versuchen für dasselbe Symbol
+    # stoppt der Bot. Wer Positionen nicht mehr schließen kann, darf keine
+    # neuen aufmachen.
+    MAX_EXIT_FAILURES = 5
+
     def __init__(self, config_path: str = 'config/settings.yaml'):
-        # Logging einrichten
+        # Vorläufiges Logging, damit das Laden der Config schon protokolliert wird
         self._setup_logging()
 
         # Konfiguration laden
         self.config = self._load_config(config_path)
         self.logger = logging.getLogger('TradingBot')
+
+        # general.log_level wurde bisher nirgends ausgewertet — INFO war hart
+        # verdrahtet. Jetzt wirkt der Config-Wert wirklich.
+        self._setup_logging(self.config.get('general', {}).get('log_level', 'INFO'))
+
+        # Stop-Signal für sauberes Herunterfahren. Alle Loops warten darauf
+        # statt auf ein blindes asyncio.sleep — siehe _sleep().
+        self._stop_event: Optional[asyncio.Event] = None
 
         # Komponenten initialisieren
         self._init_components()
@@ -60,16 +79,68 @@ class TradingBot:
         self.running = False
         self.start_time = None
 
-    def _setup_logging(self):
-        """Konfiguriert Logging — schreibt in bot.log"""
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s [%(name)s] %(levelname)s: %(message)s',
+    async def _sleep(self, seconds: float) -> bool:
+        """
+        Wartet, lässt sich aber vom Stop-Signal unterbrechen.
+
+        Vorher schliefen die Loops blind (`_reporting_loop` und
+        `_telegram_hourly_loop` bis zu 3600 s) und prüften `self.running` erst
+        danach. `systemctl stop` lief deshalb in den 90-s-Timeout und dann in
+        SIGKILL — `stop()` mit `cancel_all_orders()` kam nie durch.
+
+        Returns True, wenn regulär gewartet wurde; False, wenn gestoppt wird.
+        """
+        if self._stop_event is None:
+            await asyncio.sleep(seconds)
+            return self.running
+
+        try:
+            await asyncio.wait_for(self._stop_event.wait(), timeout=seconds)
+            return False        # Event gesetzt -> Stop
+        except asyncio.TimeoutError:
+            return self.running
+
+    def request_stop(self):
+        """Fordert ein geordnetes Herunterfahren an (aus dem Signal-Handler)."""
+        self.running = False
+        if self._stop_event is not None:
+            try:
+                self._stop_event.set()
+            except RuntimeError:
+                pass
+
+    def _setup_logging(self, level: str = 'INFO'):
+        """
+        Logging nach bot.log UND auf stdout.
+
+        Zwei Korrekturen gegenüber vorher:
+        - `RotatingFileHandler` statt `FileHandler`: bei 45-s-Zyklen mit
+          Faktor-Breakdowns wächst bot.log über Wochen unbegrenzt.
+        - Zusätzlich ein `StreamHandler`: bisher gab es nur den FileHandler,
+          weshalb `journalctl -u trading-bot` und `deploy/status.sh` praktisch
+          nichts zu sehen bekamen — das Monitoring lief ins Leere.
+        """
+        from logging.handlers import RotatingFileHandler
+
+        formatter = logging.Formatter(
+            '%(asctime)s [%(name)s] %(levelname)s: %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S',
-            handlers=[
-                logging.FileHandler('bot.log', encoding='utf-8'),
-            ]
         )
+
+        file_handler = RotatingFileHandler(
+            'bot.log', maxBytes=10 * 1024 * 1024, backupCount=5, encoding='utf-8'
+        )
+        file_handler.setFormatter(formatter)
+
+        stream_handler = logging.StreamHandler(sys.stdout)
+        stream_handler.setFormatter(formatter)
+
+        root = logging.getLogger()
+        root.setLevel(getattr(logging, str(level).upper(), logging.INFO))
+        for handler in list(root.handlers):
+            root.removeHandler(handler)
+        root.addHandler(file_handler)
+        root.addHandler(stream_handler)
 
     def _load_config(self, config_path: str) -> Dict:
         """Lädt Konfiguration aus YAML"""
@@ -117,45 +188,96 @@ class TradingBot:
         mode = general.get('mode', 'paper')
         self.is_live = mode == 'live'
 
+        # Marktbeschränkungen des Ziel-Venues (Bitpanda Fusion: Spot-only).
+        # Gelten auch im Paper-Modus, damit die Testphase genau das misst,
+        # was live überhaupt ausführbar wäre.
+        self.constraints = MarketConstraints.from_config(self.config)
+        self.logger.info(f"Marktbeschränkungen: {self.constraints.describe()}")
+
         # Core (Portfolio + Risk immer gleich)
         self.portfolio = Portfolio(
-            start_capital=general.get('start_capital', 10000)
+            start_capital=general.get('start_capital', 10000),
+            constraints=self.constraints
         )
-        self.risk_manager = RiskManager(config=risk_config)
+        self.risk_manager = RiskManager(config=risk_config, constraints=self.constraints)
 
-        # Trading-Pairs aus Momentum oder Scalper Config
+        # Trading-Pairs. Die aktive Strategie bestimmt das Universum — vorher
+        # kam die Liste aus momentum.pairs, also der Config einer DEAKTIVIERTEN
+        # Strategie. XRP und BNB stehen im base_universe des AssetSelectors,
+        # bekamen aber nie Kerzen und waren damit unerreichbar.
         momentum_config = strategy_config.get('momentum', {})
         scalper_config = strategy_config.get('scalper', {})
-        pairs = momentum_config.get('pairs', scalper_config.get('pairs', []))
+        confluence_config = strategy_config.get('confluence', {})
+
+        pairs = (confluence_config.get('pairs')
+                 or momentum_config.get('pairs')
+                 or scalper_config.get('pairs', []))
+        self.trading_pairs = list(pairs)
+
+        # Ziel-Venue für den Live-Modus: 'fusion' (Bitpanda Fusion, Default)
+        # oder 'onetrading' (Alt-Pfad via CCXT).
+        self.live_venue = (self.config.get('live', {}) or {}).get('venue', 'fusion')
 
         if self.is_live:
             # === LIVE MODE ===
-            import os
-            api_key = os.getenv('ONETRADING_API_KEY')
-            api_secret = os.getenv('ONETRADING_API_SECRET')
+            # shadow_mode lag bisher nicht in der übergebenen Config: main.py
+            # reichte nur den fees:-Block durch, sodass sich Shadow Mode
+            # ausschließlich durch ein shadow_mode: true INNERHALB von fees:
+            # aktivieren ließ. Die in LIVE_TRADING.md empfohlene Rollout-Stufe 1
+            # war damit praktisch nicht erreichbar.
+            live_config = dict(fees_config)
+            live_config.update(self.config.get('live', {}) or {})
 
-            if not api_key or not api_secret:
-                raise RuntimeError(
-                    "LIVE MODE AKTIVIERT, aber ONETRADING_API_KEY / ONETRADING_API_SECRET fehlen in secrets.env!"
-                )
-
-            self.logger = logging.getLogger('TradingBot')  # re-fetch after possible config load
             self.logger.critical("=== LIVE MODE INITIALISIERT ===")
-            self.logger.critical("Verwende OneTradingCCXTFeed + LiveOrderEngine")
+            self.logger.critical(f"Venue: {self.live_venue}")
 
-            # Echte Execution Engine
-            self.order_engine = LiveOrderEngine(
-                api_key=api_key,
-                api_secret=api_secret,
-                config=fees_config
-            )
+            if live_config.get('shadow_mode'):
+                self.logger.critical("SHADOW MODE aktiv - es werden KEINE echten Orders platziert")
 
-            # Echter One Trading Feed (mit Keys für Balance etc.)
-            self.crypto_feed = OneTradingCCXTFeed(
-                api_key=api_key,
-                api_secret=api_secret,
-                config={'pairs': pairs}
-            )
+            if self.live_venue == 'fusion':
+                # Bitpanda vergibt EINEN Key mit Scopes, nicht mehrere Keys.
+                # FUSION_API_KEY bleibt als Fallback fuer Altinstallationen.
+                api_key = os.getenv('BITPANDA_API_KEY') or os.getenv('FUSION_API_KEY')
+                if not api_key:
+                    raise RuntimeError(
+                        "LIVE MODE auf Fusion, aber BITPANDA_API_KEY fehlt in secrets.env! "
+                        "Der Key braucht den 'trade'-Scope und muss ein v2-Key sein "
+                        "(v1 kennt 'trade' nicht). Erzeugen unter "
+                        "app.bitpanda.com/my-account/apikey."
+                    )
+
+                self.logger.critical("Verwende BitpandaFusionFeed + BitpandaFusionOrderEngine")
+
+                self.order_engine = BitpandaFusionOrderEngine(
+                    api_key=api_key,
+                    config={**live_config, 'pairs': pairs},
+                    constraints=self.constraints,
+                )
+                self.crypto_feed = BitpandaFusionFeed(
+                    api_key=api_key,
+                    config={**live_config, 'pairs': pairs},
+                )
+            else:
+                api_key = os.getenv('ONETRADING_API_KEY')
+                api_secret = os.getenv('ONETRADING_API_SECRET')
+
+                if not api_key or not api_secret:
+                    raise RuntimeError(
+                        "LIVE MODE AKTIVIERT, aber ONETRADING_API_KEY / ONETRADING_API_SECRET fehlen in secrets.env!"
+                    )
+
+                self.logger.critical("Verwende OneTradingCCXTFeed + LiveOrderEngine")
+
+                self.order_engine = LiveOrderEngine(
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    config=live_config
+                )
+                self.crypto_feed = OneTradingCCXTFeed(
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    config={'pairs': pairs}
+                )
         else:
             # === PAPER MODE (Standard) ===
             self.order_engine = OrderEngine(config=fees_config)
@@ -171,11 +293,19 @@ class TradingBot:
         self.use_confluence_strategy = self.config.get('strategies', {}).get('confluence', {}).get('enabled', False)
         if self.use_confluence_strategy:
             self.confluence_strategy = ConfluenceStrategy.create_default(
-                self.config.get('strategies', {}).get('confluence', {})
+                self.config.get('strategies', {}).get('confluence', {}),
+                constraints=self.constraints
             )
             self.logger.info("ConfluenceStrategy (neues Multi-Factor System) aktiviert")
         else:
             self.confluence_strategy = None
+
+        # Exit-Logik für Confluence-Positionen (eigenes Trailing-Tracking)
+        self.confluence_exit = ConfluenceExitManager.from_config(
+            self.config.get('strategies', {}).get('confluence', {})
+        )
+        # Fehlgeschlagene Exit-Versuche je Symbol (Kill-Switch-Zähler)
+        self._exit_failures: Dict[str, int] = {}
 
         # Phase 6: Regime tracking for change alerting
         self._last_regime_name: Optional[str] = None
@@ -210,6 +340,10 @@ class TradingBot:
         self.running = True
         self.start_time = datetime.now()
 
+        # Das Event braucht einen laufenden Event-Loop, wird also hier erzeugt
+        # und nicht im Konstruktor.
+        self._stop_event = asyncio.Event()
+
         mode = self.config.get('general', {}).get('mode', 'paper')
         live_confirmed = self.config.get('general', {}).get('live_explicit_confirmation', False)
 
@@ -217,25 +351,44 @@ class TradingBot:
         # ⚠️  EXTREM LAUTE LIVE-MODE WARNUNG (Phase 0 Sicherheitsmaßnahme)
         # ============================================================
         if mode == 'live':
+            # Hürde 1: die Umgebungsvariable. War dokumentiert (LIVE_TRADING.md,
+            # secrets.env.example) und wurde nur vom Checklisten-Tool gelesen —
+            # main.py hat sie ignoriert, die "dritte unabhängige Hürde"
+            # existierte faktisch nicht.
+            if not os.getenv('LIVE_TRADING_ENABLED'):
+                self.logger.critical("ABBRUCH: Umgebungsvariable LIVE_TRADING_ENABLED ist nicht gesetzt!")
+                self.logger.critical("  export LIVE_TRADING_ENABLED=1")
+                raise RuntimeError("Live mode blocked: LIVE_TRADING_ENABLED not set")
+
+            # Hürde 2: das Confirmation-Flag. Bewusst VOR dem Countdown —
+            # 10 Sekunden warten, um dann an einer Config-Prüfung zu scheitern,
+            # ist sinnlos.
+            if not live_confirmed:
+                self.logger.critical("ABBRUCH: live_explicit_confirmation ist nicht true!")
+                self.logger.critical("Setze in settings.yaml general.live_explicit_confirmation: true")
+                raise RuntimeError("Live mode blocked: missing explicit confirmation flag")
+
+            # Hürde 3: nachgewiesene Profitabilität. Die bestehende
+            # Go-Live-Checkliste prüft nur Config-Dateien und würde einen
+            # dauerhaft verlierenden Bot durchwinken. Dieses Gate liest die
+            # tatsächliche Trade-Historie.
+            self._check_profitability_gate()
+
             self.logger.critical("=" * 70)
             self.logger.critical("!!! LIVE-MODUS AKTIVIERT !!!")
             self.logger.critical("!!! ECHTES GELD WIRD VERWENDET !!!")
             self.logger.critical("=" * 70)
             self.logger.critical(f"Mode: {mode}")
-            self.logger.critical(f"live_explicit_confirmation: {live_confirmed}")
+            self.logger.critical(f"Shadow-Mode: {self.config.get('live', {}).get('shadow_mode', False)}")
+            self.logger.critical(f"Beschraenkungen: {self.constraints.describe()}")
             self.logger.critical("Starte in 10 Sekunden... (Ctrl+C zum Abbrechen)")
             self.logger.critical("=" * 70)
 
-            # Harte Verzögerung + mehrfache Warnung
-            import time
+            # Harte Verzögerung + mehrfache Warnung (async, damit die anderen
+            # Loops nicht blockiert werden)
             for i in range(10, 0, -1):
                 self.logger.critical(f"  LIVE START IN {i} SEKUNDEN...")
-                time.sleep(1)
-
-            if not live_confirmed:
-                self.logger.critical("ABBRUCH: live_explicit_confirmation ist nicht true!")
-                self.logger.critical("Setze in settings.yaml general.live_explicit_confirmation: true")
-                raise RuntimeError("Live mode blocked: missing explicit confirmation flag")
+                await asyncio.sleep(1)
 
             self.logger.critical("!!! LETZTE WARNUNG: ECHTE ORDERS WERDEN JETZT PLATZIERT !!!")
         else:
@@ -250,15 +403,47 @@ class TradingBot:
         await self.crypto_feed.start()
         await self.reporter.start()
 
-        # === Reconciliation im Live-Modus (Phase 3/4) ===
+        # === Reconciliation im Live-Modus ===
         if self.is_live:
-            self.logger.critical("Starte Reconciliation mit One Trading (Exchange als Source of Truth)...")
             try:
-                report = await run_startup_reconciliation(self.portfolio, self.order_engine)
+                if self.live_venue == 'fusion':
+                    # Preflight zuerst: die URL-Pfade der Fusion-API sind aus dem
+                    # offiziellen CLI abgeleitet, nicht gegen die (nicht abrufbare)
+                    # Doku verifiziert. Lieber hier sauber scheitern als beim
+                    # ersten echten Order-Versuch.
+                    self.logger.critical("Fusion-Preflight (Auth + Endpunkte)...")
+                    preflight = await self.order_engine.preflight()
+                    if not preflight.get('ok'):
+                        raise RuntimeError(
+                            "Fusion-Preflight fehlgeschlagen: "
+                            + "; ".join(preflight.get('errors', []))
+                        )
+
+                    # Quote-Asset des Handelstopfs: steht hier z.B. EURCV, ist
+                    # allein der EURCV-Bestand das Kapital des Bots. Ein
+                    # EUR-Guthaben auf demselben Konto bleibt unangetastet und
+                    # taucht nur als gemeldeter Fremdbestand auf.
+                    quote_asset = ((self.config.get('live', {}) or {}).get('quote_asset')
+                                   or self.config.get('general', {}).get('base_currency', 'EUR'))
+                    self.logger.critical(
+                        f"Spot-Reconciliation (Kontobestand = Position), "
+                        f"Kapitaltopf in {quote_asset}..."
+                    )
+                    report = await run_spot_reconciliation(
+                        self.portfolio, self.order_engine,
+                        prices=self.crypto_feed.get_prices(),
+                        quote_currency=quote_asset,
+                    )
+                else:
+                    self.logger.critical("Starte Reconciliation mit One Trading (Exchange als Source of Truth)...")
+                    report = await run_startup_reconciliation(self.portfolio, self.order_engine)
+
                 if not report.success:
                     self.logger.critical("RECONCILIATION FEHLGESCHLAGEN — Live-Start wird aus Sicherheitsgründen abgebrochen!")
                     raise RuntimeError("Reconciliation failed. Bot refuses to start in live mode.")
                 self.logger.critical("Reconciliation erfolgreich abgeschlossen.")
+            except RuntimeError:
+                raise
             except Exception as recon_err:
                 self.logger.critical(f"Reconciliation Fehler: {recon_err}")
                 raise RuntimeError("Reconciliation error — aborting live start for safety") from recon_err
@@ -268,7 +453,6 @@ class TradingBot:
             await self._initial_ml_training()
 
         # Telegram starten (falls konfiguriert und Token gesetzt)
-        import os
         tg = self._telegram_config
         if tg.get('enabled'):
             token = os.environ.get('TELEGRAM_BOT_TOKEN', tg.get('token', ''))
@@ -306,8 +490,25 @@ class TradingBot:
         self.running = False
         self.logger.info("Stoppe Bot-Komponenten...")
 
+        # Offene Orders stornieren, bevor die Verbindung fällt — sonst bleiben
+        # sie beim Exchange stehen und werden ohne laufenden Bot gefüllt.
+        try:
+            cancelled = await self.order_engine.cancel_all_orders()
+            if cancelled:
+                self.logger.info(f"{cancelled} offene Order(s) storniert")
+        except Exception as e:
+            self.logger.error(f"Konnte offene Orders nicht stornieren: {e}")
+
         await self.crypto_feed.stop()
         await self.reporter.stop()
+
+        # Live-Engine hält eine eigene aiohttp-Session (via CCXT)
+        close = getattr(self.order_engine, 'close', None)
+        if close is not None:
+            try:
+                await close()
+            except Exception as e:
+                self.logger.error(f"Fehler beim Schliessen der OrderEngine: {e}")
 
         # Final Report
         self.reporter.print_daily_report(self.portfolio, self._get_strategy_stats())
@@ -324,19 +525,29 @@ class TradingBot:
                 prices = self.crypto_feed.get_prices()
                 self.portfolio.update_position_prices(prices)
 
+                # Hoch/Tief seit Entry fortschreiben — ohne diesen Schritt
+                # hat der Trailing-Stop keine Datengrundlage.
+                for sym, px in prices.items():
+                    self.confluence_exit.update_price(sym, px)
+
                 # Pending Orders prüfen
                 filled = await self.order_engine.check_pending_orders(prices)
                 for order in filled:
                     await self._process_filled_order(order)
 
+                # Hat ein venue-seitiger Stop ausgelöst? Muss VOR den
+                # Exit-Conditions laufen, sonst versucht der Bot eine bereits
+                # geschlossene Position noch einmal zu schließen.
+                await self._check_venue_stops()
+
                 # Exit-Conditions prüfen
                 await self._check_exit_conditions(prices)
 
-                await asyncio.sleep(1)
+                await self._sleep(1)
 
             except Exception as e:
                 self.logger.error(f"Fehler im Haupt-Loop: {e}")
-                await asyncio.sleep(5)
+                await self._sleep(5)
 
     def _get_trend(self, candles) -> bool:
         """Ermittelt Trendrichtung anhand 1h EMA9/EMA21. True = Aufwärtstrend, False = Abwärtstrend, None = unklar"""
@@ -382,11 +593,11 @@ class TradingBot:
 
                         await self._execute_signal(signal, strategy_name='momentum')
 
-                await asyncio.sleep(30)
+                await self._sleep(30)
 
             except Exception as e:
                 self.logger.error(f"Fehler im Momentum-Loop: {e}")
-                await asyncio.sleep(10)
+                await self._sleep(10)
 
     async def _scalper_loop(self):
         """Scalper-Strategie Loop (alle 15 Sekunden)"""
@@ -410,11 +621,11 @@ class TradingBot:
                         if signal.confidence >= 0.6:
                             await self._execute_signal(signal, strategy_name='scalper')
 
-                await asyncio.sleep(15)
+                await self._sleep(15)
 
             except Exception as e:
                 self.logger.error(f"Fehler im Scalper-Loop: {e}")
-                await asyncio.sleep(10)
+                await self._sleep(10)
 
     async def _ml_loop(self):
         """ML-Predictor Loop (alle 5 Minuten)"""
@@ -441,11 +652,11 @@ class TradingBot:
                             self.logger.info(f"ML-Signal: {symbol} {prediction.direction} "
                                            f"(Prob: {prediction.probability:.0%})")
 
-                await asyncio.sleep(300)  # 5 Minuten
+                await self._sleep(300)  # 5 Minuten
 
             except Exception as e:
                 self.logger.error(f"Fehler im ML-Loop: {e}")
-                await asyncio.sleep(60)
+                await self._sleep(60)
 
     async def _confluence_loop(self):
         """Neue Multi-Factor Confluence Strategie Loop (Phase 1+ der Überarbeitung)"""
@@ -463,7 +674,7 @@ class TradingBot:
 
                 # Hole aktuelle empfohlene Assets vom UniverseManager
                 all_candles = {}
-                for symbol in self.momentum.pairs:  # vorerst noch die alten Pairs als Basis
+                for symbol in self.trading_pairs:
                     candles = self.crypto_feed.get_candles(symbol, '5m', n=80)
                     if candles is not None:
                         all_candles[symbol] = candles
@@ -485,12 +696,11 @@ class TradingBot:
                         f"[CONFLUENCE HEALTH] Input candidates: {input_count} → selected: {selected_count}"
                     )
 
-                # Temporary starvation fallback (aggressive test mode)
-                if selected_count == 0 and input_count > 0:
-                    self.logger.warning("[CONFLUENCE HEALTH] Activating starvation fallback - analyzing raw input list")
-                    symbols_to_analyze = list(all_candles.keys())
-                else:
-                    symbols_to_analyze = selected_symbols
+                # Kein Starvation-Fallback mehr: der frühere Fallback hat bei
+                # leerer Auswahl einfach die komplette Rohliste analysiert und
+                # damit den AssetSelector wirkungslos gemacht. Wenn der Selector
+                # nichts durchlässt, ist das Marktumfeld das Signal.
+                symbols_to_analyze = selected_symbols
 
                 analyzed = 0
                 best_score = 0.0
@@ -520,14 +730,19 @@ class TradingBot:
                         best_score = score
                         best_symbol = symbol
 
+                    # Spot-Modus: ein SHORT-Signal ist kein Entry, sondern die
+                    # Aufforderung eine offene Long-Position zu schließen.
+                    if signal is not None and getattr(signal, 'is_exit_signal', False):
+                        await self._handle_exit_signal(signal, price)
+                        continue
+
+                    # Kein zweites Confidence-Gate mehr. Vorher stand hier eine
+                    # zusätzliche Schwelle von 0.55 gegen eine confidence, die
+                    # durch den /9.5-Divisor nie über 0.105 kam — zwei Schwellen
+                    # für dieselbe Größe haben den Bot doppelt blockiert.
+                    # Die einzige Schwelle ist jetzt min_confluence_score im
+                    # Aggregator; kommt ein Signal hier an, ist es akzeptiert.
                     if signal:
-                        if signal.confidence < 0.55:
-                            # Visible rejection reason during test phase
-                            self.logger.info(
-                                f"[CONFLUENCE REJECT] {symbol} @ {price:.2f} | "
-                                f"Conf {signal.confidence:.0%} | Score {score:.2f} | Regime {regime_name or 'unknown'}"
-                            )
-                    if signal and signal.confidence >= 0.55:
                         # Phase 6: Rich factor attribution logging + console
                         regime_name = None
                         cd = getattr(signal, '_confluence_data', None) or {}
@@ -591,11 +806,11 @@ class TradingBot:
                 else:
                     self.logger.warning("[CONFLUENCE CYCLE] No symbols analyzed this cycle")
 
-                await asyncio.sleep(interval)
+                await self._sleep(interval)
 
             except Exception as e:
                 self.logger.error(f"Fehler im Confluence-Loop: {e}")
-                await asyncio.sleep(30)
+                await self._sleep(30)
 
     async def _risk_check_loop(self):
         """Risk-Check Loop (alle 5 Minuten)"""
@@ -616,18 +831,18 @@ class TradingBot:
                 elif metrics['status'] == 'WARNING' and daily_dd > 0:
                     self.reporter.print_warning(f"Drawdown bei {daily_dd:.1%}")
 
-                await asyncio.sleep(300)
+                await self._sleep(300)
 
             except Exception as e:
                 self.logger.error(f"Fehler im Risk-Check: {e}")
-                await asyncio.sleep(60)
+                await self._sleep(60)
 
     async def _reporting_loop(self):
         """Reporting Loop"""
         self.logger.info("Reporting-Loop gestartet")
 
         # Erster Report nach 5 Minuten
-        await asyncio.sleep(300)
+        await self._sleep(300)
 
         while self.running:
             try:
@@ -661,11 +876,11 @@ class TradingBot:
                         self.reporter.console.print("\n[bold cyan]Phase 6 Attribution[/bold cyan]")
                         self.reporter.console.print(attr_text)
 
-                await asyncio.sleep(3600)  # 1 Stunde
+                await self._sleep(3600)  # 1 Stunde
 
             except Exception as e:
                 self.logger.error(f"Fehler im Reporting: {e}")
-                await asyncio.sleep(60)
+                await self._sleep(60)
 
     async def _execute_signal(self, signal, strategy_name: str = 'momentum',
                              regime: str = None, macro_risk_multiplier: float = 1.0):
@@ -676,11 +891,19 @@ class TradingBot:
 
         state = self.portfolio.get_state()
 
-        # Max 5 gleichzeitige Positionen
-        if len(state.positions) >= 5:
-            return
+        # Positionslimit kommt ausschließlich vom RiskManager. Das frühere
+        # hartcodierte >= 5 hier war die dritte von drei widersprüchlichen
+        # Obergrenzen (Klassenkonstante 5, Config 2, hier 5).
 
         if state.equity < 20:
+            return
+
+        # Spot-Venue: SHORT-Signale sind keine Entries. Sie werden im
+        # Confluence-Loop als Exit geroutet und dürfen hier nicht ankommen.
+        if self.constraints.spot_only and signal.signal_type != SignalType.LONG:
+            self.logger.warning(
+                f"SHORT-Entry auf Spot-Venue verworfen: {signal.symbol}"
+            )
             return
 
         # SL-Distanz aus Signal ableiten (ATR-basiert)
@@ -713,11 +936,47 @@ class TradingBot:
         if sl_distance_pct > 0 and hasattr(signal, 'atr_value') and signal.atr_value > 0:
             position_size = self.risk_manager.size_from_risk(state.equity, sl_distance_pct)
         else:
-            position_size = state.equity * 0.20
-        # Skaliert auf Kapital: Min 15% des Equity, Max 25% des Equity
-        min_size = max(10.0, state.equity * 0.15)
-        max_size = state.equity * 0.25
-        position_size = max(min_size, min(max_size, position_size))
+            position_size = state.equity * self.risk_manager.max_position_size
+
+        # REDUCE_SIZE wurde bisher ignoriert — damit waren die Macro-Reduktion,
+        # die Drawdown-Reduktion und das Beta-Limit wirkungslos.
+        if risk_check.action == RiskAction.REDUCE_SIZE and risk_check.suggested_size:
+            position_size = min(position_size, risk_check.suggested_size)
+            self.logger.info(f"Positionsgröße reduziert: {risk_check.reason}")
+
+        # Obergrenze ist das konfigurierte max_position_size. Der frühere
+        # Clamp auf 15–25% des Equity hat die 20%-Grenze nach oben überschritten
+        # und die Reduktionen wieder aufgehoben.
+        position_size = min(position_size, state.equity * self.risk_manager.max_position_size)
+
+        # Mindest-Ordervolumen des Venues.
+        #
+        # Achtung, das ist eine Falle mit Dauerwirkung: die Positionsgröße ist
+        # ein fester Anteil des Equity. Fällt das Equity unter
+        # min_order_notional / max_position_size (bei 10 € und 15 % also unter
+        # ~67 €), liegt JEDE künftige Order unter dem Minimum — der Bot handelt
+        # nie wieder, ohne dass etwas kaputt wäre. Das darf nicht still
+        # passieren, sonst steht der Trade-Zähler wochenlang und niemand weiß warum.
+        if position_size < self.constraints.min_order_notional_eur:
+            if not getattr(self, '_min_notional_warned', False):
+                self._min_notional_warned = True
+                schwelle = (self.constraints.min_order_notional_eur
+                            / max(self.risk_manager.max_position_size, 1e-9))
+                self.logger.critical(
+                    f"KAPITAL ZU KLEIN: Order waere {position_size:.2f}€, Minimum ist "
+                    f"{self.constraints.min_order_notional_eur:.2f}€. Bei einem Equity "
+                    f"unter {schwelle:.0f}€ kann der Bot dauerhaft nicht mehr handeln. "
+                    f"Kapital aufstocken oder max_position_size erhoehen."
+                )
+                if getattr(self, 'reporter', None):
+                    asyncio.create_task(self.reporter.send_message(
+                        f"⚠️ Bot kann nicht mehr handeln: Order waere {position_size:.2f}€, "
+                        f"Minimum {self.constraints.min_order_notional_eur:.2f}€. "
+                        f"Equity zu klein."
+                    ))
+            return
+
+        self._min_notional_warned = False
 
         if position_size > state.balance or state.balance < 20:
             return
@@ -734,7 +993,7 @@ class TradingBot:
         )
 
         if result.success:
-            self.portfolio.open_position(
+            position = self.portfolio.open_position(
                 symbol=signal.symbol,
                 side='long' if signal.signal_type == SignalType.LONG else 'short',
                 size=position_size,
@@ -745,6 +1004,26 @@ class TradingBot:
                 stop_loss=signal.stop_loss,
                 take_profit=signal.take_profit
             )
+
+            if position is None:
+                # Order ausgeführt, aber lokal nicht buchbar — das darf nicht
+                # unbemerkt bleiben, sonst existiert real eine Position, die
+                # der Bot nicht kennt und folglich nie schließt.
+                self.logger.critical(
+                    f"Order fuer {signal.symbol} ausgefuehrt, aber Position konnte "
+                    f"lokal nicht gebucht werden! Bestand manuell pruefen."
+                )
+                return
+
+            # Trailing-Tracking starten
+            self.confluence_exit.register(
+                signal.symbol, result.execution_price, position.timestamp
+            )
+
+            # Schutz-Stop beim Venue: der lokale Stop-Loss hilft nur, solange
+            # dieser Prozess lebt. Bei Crash oder VPS-Neustart waere die
+            # Position sonst voellig ungesichert.
+            await self._place_protective_stop(position, result.execution_price)
 
             self.reporter.print_info(
                 f"{strategy_name.upper()}: {signal.signal_type.value.upper()} {signal.symbol} "
@@ -777,6 +1056,69 @@ class TradingBot:
             regime=regime,
             macro_risk_multiplier=macro_multiplier
         )
+
+    def _check_profitability_gate(self):
+        """
+        Blockiert den Live-Start, solange die Testphase keine Profitabilität
+        belegt. Kann über general.skip_profitability_gate übergangen werden —
+        bewusst nur explizit und mit lautem Log.
+        """
+        from tools.profitability_gate import evaluate_gate, format_report
+
+        general = self.config.get('general', {})
+        db_path = general.get('db_path', 'trades.db')
+        criteria = self.config.get('go_live_gate', {}) or None
+
+        result = evaluate_gate(db_path, criteria=criteria)
+        self.logger.critical(format_report(result))
+
+        if result.passed:
+            self.logger.critical(f"Profitabilitaets-Gate GRUEN ({result.summary()})")
+            return
+
+        if general.get('skip_profitability_gate'):
+            self.logger.critical("=" * 70)
+            self.logger.critical("WARNUNG: Profitabilitaets-Gate wurde bewusst uebergangen!")
+            self.logger.critical(f"Offene Punkte: {', '.join(result.blockers)}")
+            self.logger.critical("=" * 70)
+            return
+
+        self.logger.critical("ABBRUCH: Profitabilitaets-Gate nicht bestanden.")
+        for blocker in result.blockers:
+            self.logger.critical(f"  - {blocker}")
+        raise RuntimeError(
+            f"Live mode blocked: Profitabilitaets-Gate nicht bestanden "
+            f"({result.summary()})"
+        )
+
+    async def _handle_exit_signal(self, signal, price: float):
+        """
+        Verarbeitet ein SHORT-Signal im Spot-Modus.
+
+        Auf einem Spot-Venue lässt sich nicht short gehen — die sinnvolle
+        Entsprechung ist "verkauf, was du hast": existiert eine offene
+        Long-Position auf dem Symbol, wird sie geschlossen. Sonst passiert
+        nichts. Bewusst getrennt vom Entry-Pfad (_execute_signal), damit
+        Ein- und Ausstieg nicht dieselbe Risikologik durchlaufen.
+        """
+        symbol = signal.symbol
+        position = self.portfolio.positions.get(symbol)
+
+        if position is None:
+            self.logger.info(
+                f"[CONFLUENCE EXIT] {symbol}: Short-Signal ohne offene Position - ignoriert "
+                f"(Conf {signal.confidence:.0%})"
+            )
+            return
+
+        if position.side != 'long':
+            return
+
+        self.logger.info(
+            f"[CONFLUENCE EXIT] {symbol} @ {price:.2f}: Short-Signal schließt Long-Position "
+            f"(Conf {signal.confidence:.0%})"
+        )
+        await self._close_position(symbol, price, "Confluence-Flip short")
 
     def _check_and_alert_regime_change(self, new_regime: str, confidence: float = 0.0):
         """
@@ -943,45 +1285,122 @@ class TradingBot:
 
             current_price = prices[symbol]
 
-            # Richtige Strategie für Exit-Check wählen (Phase 5)
-            if position.market_type == 'momentum':
-                strategy = self.momentum
-            elif position.market_type == 'confluence':
-                # Für Confluence-Positionen nutzen wir die Momentum-Exit-Logik als Fallback.
-                # Langfristig sollte hier eine dedizierte Exit-Logik der ConfluenceStrategy kommen.
-                strategy = self.momentum
+            if position.market_type == 'confluence':
+                # Eigene Exit-Logik mit funktionierendem Trailing-Stop.
+                # Vorher lief das über self.momentum, dessen highest_prices
+                # nirgends befüllt wird — der Trailing-Zweig war toter Code.
+                should_exit, reason = self.confluence_exit.check_exit(
+                    symbol=symbol,
+                    entry_price=position.entry_price,
+                    current_price=current_price,
+                    side=position.side,
+                    stop_loss=position.stop_loss,
+                    take_profit=position.take_profit,
+                    atr=self._get_atr(symbol),
+                    entry_time=position.timestamp
+                )
             else:
-                strategy = self.scalper
-
-            should_exit, reason = strategy.check_exit_conditions(
-                symbol=symbol,
-                entry_price=position.entry_price,
-                current_price=current_price,
-                side=position.side,
-                highest_since_entry=strategy.highest_prices.get(symbol),
-                stop_loss_price=position.stop_loss if hasattr(position, 'stop_loss') else None,
-                take_profit_price=position.take_profit if hasattr(position, 'take_profit') else None
-            )
+                strategy = self.momentum if position.market_type == 'momentum' else self.scalper
+                should_exit, reason = strategy.check_exit_conditions(
+                    symbol=symbol,
+                    entry_price=position.entry_price,
+                    current_price=current_price,
+                    side=position.side,
+                    highest_since_entry=strategy.highest_prices.get(symbol),
+                    stop_loss_price=position.stop_loss if hasattr(position, 'stop_loss') else None,
+                    take_profit_price=position.take_profit if hasattr(position, 'take_profit') else None
+                )
 
             if should_exit:
                 await self._close_position(symbol, current_price, reason)
 
+    def _get_atr(self, symbol: str, period: int = 14) -> Optional[float]:
+        """
+        ATR aus dem Feed statt aus dem Momentum-Cache, der bei
+        Confluence-Trades nie gefüllt wird (ScalperSignal.atr_value = 0.0).
+        """
+        try:
+            candles = self.crypto_feed.get_candles(symbol, '5m', n=period + 5)
+            if candles is None or len(candles) < period:
+                return None
+            tr = (candles['high'] - candles['low']).rolling(period).mean()
+            value = tr.iloc[-1]
+            return float(value) if value == value and value > 0 else None
+        except Exception:
+            return None
+
     async def _close_position(self, symbol: str, price: float, reason: str):
-        """Schließt eine Position"""
+        """
+        Schließt eine Position — über die OrderEngine, nicht nur im Portfolio.
+
+        Vorher buchte diese Methode ausschließlich portfolio.close_position()
+        und schickte nie eine Order los. Im Live-Modus hätte der Bot damit real
+        gekauft, aber Stop-Loss und Take-Profit nur lokal in die SQLite
+        geschrieben — die echte Position wäre unbegrenzt offen geblieben.
+        """
         position = self.portfolio.positions.get(symbol)
         if not position:
             return
 
-        fees = position.size * 0.0006  # Taker Fee (size ist bereits in USD)
+        close_side = 'sell' if position.side == 'long' else 'buy'
 
+        # Schutz-Stop ZUERST stornieren. Bleibt er stehen, verkauft das Venue
+        # nach unserem Exit ein zweites Mal — bei Spot heisst das, dass
+        # Bestand abfliesst, den der Bot nicht mehr als Position fuehrt.
+        cancel_stop = getattr(self.order_engine, 'cancel_protective_stop', None)
+        if cancel_stop is not None:
+            try:
+                await cancel_stop(symbol)
+            except Exception as e:
+                self.logger.critical(
+                    f"Schutz-Stop fuer {symbol} nicht stornierbar: {e} - "
+                    f"moegliche Geisterorder, manuell pruefen!"
+                )
+
+        try:
+            result = await self.order_engine.execute_market_order(
+                symbol=symbol,
+                side=close_side,
+                size=position.size,
+                current_price=price,
+                leverage=position.leverage,
+                strategy=position.market_type
+            )
+        except Exception as e:
+            self.logger.critical(
+                f"EXIT FEHLGESCHLAGEN (Exception) {symbol}: {e} - Position bleibt offen!"
+            )
+            self._register_exit_failure(symbol, reason)
+            return
+
+        if not result.success:
+            # Position NICHT aus dem Portfolio entfernen. Ein lokal geschlossener,
+            # real aber offener Trade ist der gefährlichste denkbare Zustand.
+            self.logger.critical(
+                f"EXIT FEHLGESCHLAGEN {symbol}: {getattr(result, 'message', 'unbekannt')} "
+                f"- Position bleibt offen, Retry im naechsten Tick"
+            )
+            self._register_exit_failure(symbol, reason)
+            return
+
+        self._exit_failures.pop(symbol, None)
+
+        # Exit-Preis und Gebühren kommen aus der tatsächlichen Ausführung,
+        # nicht aus dem Signalpreis und nicht aus einer hartcodierten Fee.
         trade = self.portfolio.close_position(
             symbol=symbol,
-            exit_price=price,
-            fees=fees,
+            exit_price=result.execution_price,
+            fees=result.total_fees,
             strategy=position.market_type
         )
 
+        self.confluence_exit.forget(symbol)
+
         if trade:
+            self.logger.info(
+                f"[EXIT] {symbol} @ {result.execution_price:.4f} | {reason} | "
+                f"PNL {trade.pnl:+.2f}€ | Fees {trade.fees:.4f}€"
+            )
             self.reporter.print_trade_executed(trade)
             await self.reporter.send_trade_alert(trade)
 
@@ -991,9 +1410,86 @@ class TradingBot:
                 if breakdown:
                     self._update_factor_attribution(trade, breakdown)
 
+    async def _place_protective_stop(self, position, entry_price: float):
+        """
+        Legt einen venue-seitigen Stop für eine frisch geöffnete Position an.
+
+        Nur Engines, die das können (aktuell Fusion), bieten die Methode an —
+        die Paper-Engine hat sie nicht, deshalb der getattr-Check.
+        """
+        place = getattr(self.order_engine, 'place_protective_stop', None)
+        if place is None or not position.stop_loss:
+            return
+
+        close_side = 'sell' if position.side == 'long' else 'buy'
+        quantity = position.size / entry_price if entry_price > 0 else 0
+
+        try:
+            await place(position.symbol, close_side, quantity, position.stop_loss)
+        except Exception as e:
+            self.logger.error(f"Schutz-Stop fuer {position.symbol} fehlgeschlagen: {e}")
+
+    async def _check_venue_stops(self):
+        """
+        Prüft, ob ein venue-seitiger Stop ausgelöst hat, und zieht den lokalen
+        Zustand nach. Ohne das hielte der Bot eine Position für offen, die beim
+        Venue längst geschlossen ist — und scheiterte später beim Exit.
+        """
+        check = getattr(self.order_engine, 'check_protective_stops', None)
+        if check is None:
+            return
+
+        try:
+            ausgeloest = await check()
+        except Exception as e:
+            self.logger.error(f"Schutz-Stops nicht pruefbar: {e}")
+            return
+
+        for symbol in ausgeloest:
+            position = self.portfolio.positions.get(symbol)
+            if not position:
+                continue
+
+            price = self.crypto_feed.get_price(symbol) or position.stop_loss
+            self.logger.critical(
+                f"[VENUE-STOP] {symbol}: Position wurde vom Venue geschlossen, "
+                f"buche lokal nach @ {price}"
+            )
+            # Der Verkauf ist bereits erfolgt — direkt ins Portfolio buchen,
+            # NICHT ueber _close_position, das eine zweite Order senden wuerde.
+            trade = self.portfolio.close_position(
+                symbol=symbol, exit_price=price,
+                fees=position.size * self.order_engine.fees.get('crypto_taker', 0.0025),
+                strategy=position.market_type,
+            )
+            self.confluence_exit.forget(symbol)
+            if trade:
+                self.reporter.print_trade_executed(trade)
+                await self.reporter.send_trade_alert(trade)
+
+    def _register_exit_failure(self, symbol: str, reason: str):
+        """
+        Zählt fehlgeschlagene Exit-Versuche. Nach MAX_EXIT_FAILURES wird der
+        Bot gestoppt — wenn Positionen nicht mehr geschlossen werden können,
+        ist Weiterhandeln die schlechteste aller Optionen.
+        """
+        count = self._exit_failures.get(symbol, 0) + 1
+        self._exit_failures[symbol] = count
+
+        if count >= self.MAX_EXIT_FAILURES:
+            self.logger.critical(
+                f"KILL-SWITCH: {count} fehlgeschlagene Exit-Versuche fuer {symbol} "
+                f"({reason}). Bot wird gestoppt - Position manuell pruefen!"
+            )
+            asyncio.create_task(self.reporter.send_message(
+                f"🚨 KILL-SWITCH: Exit fuer {symbol} scheitert seit {count} Versuchen. "
+                f"Bot gestoppt. Position bitte manuell pruefen!"
+            ))
+            self.running = False
+
     async def _telegram_hourly_loop(self):
         """Sendet stündlichen Telegram-Report"""
-        await asyncio.sleep(3600)   # erste Sendung nach 1h
+        await self._sleep(3600)   # erste Sendung nach 1h
         while self.running:
             try:
                 state = self.portfolio.get_state()
@@ -1008,7 +1504,7 @@ class TradingBot:
                 )
             except Exception as e:
                 self.logger.error(f"Telegram-Loop Fehler: {e}")
-            await asyncio.sleep(3600)
+            await self._sleep(3600)
 
     async def _close_all_positions(self, reason: str):
         """Schließt alle Positionen"""
@@ -1052,7 +1548,6 @@ class TradingBot:
 def main():
     """Haupteinstiegspunkt"""
     # PID-Lock: verhindert mehrfache Instanzen
-    import os
     pid_file = Path('/tmp/trading-bot.pid')
     if pid_file.exists():
         old_pid = int(pid_file.read_text().strip())
@@ -1064,8 +1559,13 @@ def main():
     bot = TradingBot()
 
     def signal_handler(sig, frame):
+        # request_stop() setzt zusätzlich das asyncio-Event, sodass die Loops
+        # sofort aus ihrem Warten kommen. Vorher wurde nur running=False
+        # gesetzt und die Reporting-Loops schliefen bis zu 3600 s weiter —
+        # systemctl stop lief in den Timeout und dann in SIGKILL, wodurch
+        # stop() mit cancel_all_orders() nie durchlief.
         print("\nBeende Bot...")
-        bot.running = False
+        bot.request_stop()
         pid_file.unlink(missing_ok=True)
 
     signal.signal(signal.SIGINT, signal_handler)

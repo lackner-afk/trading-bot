@@ -17,13 +17,14 @@ from typing import Dict, Optional, Callable, List
 
 import ccxt.async_support as ccxt
 
+from .execution_base import BaseOrderEngine
 # Gemeinsame Typen aus der Paper-Engine wiederverwenden
 from .order_engine import (
     Order, OrderType, OrderStatus, ExecutionResult
 )
 
 
-class LiveOrderEngine:
+class LiveOrderEngine(BaseOrderEngine):
     """
     Echte Order-Ausführung auf One Trading via CCXT.
 
@@ -57,6 +58,10 @@ class LiveOrderEngine:
 
         # Callbacks
         self.on_fill: Optional[Callable] = None
+
+        # Selbst platzierte Limit-Orders, deren Fill noch aussteht. Ohne dieses
+        # Tracking konnte check_pending_orders() gar nichts prüfen.
+        self.pending_orders: Dict[str, Order] = {}
 
         mode_str = "SHADOW" if self.shadow_mode else "LIVE"
         self.logger.info(f"LiveOrderEngine initialisiert (One Trading via CCXT) – Mode: {mode_str}")
@@ -240,6 +245,7 @@ class LiveOrderEngine:
                 timestamp=datetime.now()
             )
 
+            self.pending_orders[order.id] = order
             self.logger.info(f"[LIVE] Limit Order erstellt: {order.id} @ {limit_price}")
             return order
 
@@ -259,24 +265,70 @@ class LiveOrderEngine:
 
     async def check_pending_orders(self, current_prices: Dict[str, float]) -> List[Order]:
         """
-        Prüft offene Orders auf der Exchange und gibt gefüllte zurück.
+        Fragt den Status der selbst platzierten Orders bei der Exchange ab und
+        gibt die neu gefüllten zurück.
 
-        Für Live-Modus: Wir holen den aktuellen Status von der Exchange.
+        Vorher war das ein No-Op (`pass  # Erweiterung in Phase 3`) — Limit-Fills
+        wurden im Live-Modus nie verarbeitet, obwohl der Main-Loop diese Methode
+        jede Sekunde aufruft.
         """
         filled_orders: List[Order] = []
+        if not self.pending_orders:
+            return filled_orders
 
-        try:
-            open_orders = await self.exchange.fetch_open_orders()
+        for order_id, order in list(self.pending_orders.items()):
+            try:
+                ccxt_symbol = self._symbol_to_ccxt(order.symbol)
+                ccxt_order = await self.exchange.fetch_order(order_id, ccxt_symbol)
+            except Exception as e:
+                self.logger.error(f"[LIVE] Status von Order {order_id} nicht abrufbar: {e}")
+                continue
 
-            for ccxt_order in open_orders:
-                # Wir könnten hier prüfen ob sie gefüllt wurden, aber fetch_open_orders zeigt nur offene.
-                # Besser: separate Methode fetch_order oder trades nutzen.
-                pass  # Erweiterung in Phase 3 (Reconciliation)
+            status = (ccxt_order.get('status') or '').lower()
+            filled_amount = float(ccxt_order.get('filled') or 0.0)
 
-        except Exception as e:
-            self.logger.error(f"[LIVE] Fehler beim Prüfen offener Orders: {e}")
+            if status == 'closed' or (filled_amount > 0 and status not in ('open', 'canceled')):
+                avg_price = float(
+                    ccxt_order.get('average') or ccxt_order.get('price') or order.price or 0.0
+                )
+                order.status = OrderStatus.FILLED
+                order.filled_price = avg_price
+                order.filled_size = filled_amount * avg_price if avg_price else order.size
+
+                del self.pending_orders[order_id]
+                filled_orders.append(order)
+
+                self.logger.info(
+                    f"[LIVE] Order {order_id} gefuellt: {filled_amount} @ {avg_price}"
+                )
+
+                fees = self._extract_fees(ccxt_order, order.size)
+                await self._call_on_fill(ExecutionResult(
+                    success=True,
+                    order=order,
+                    execution_price=avg_price,
+                    total_fees=fees,
+                    slippage_cost=0.0,
+                    latency_ms=0.0
+                ))
+
+            elif status in ('canceled', 'cancelled', 'rejected', 'expired'):
+                order.status = OrderStatus.CANCELLED
+                del self.pending_orders[order_id]
+                self.logger.warning(f"[LIVE] Order {order_id} beendet mit Status '{status}'")
 
         return filled_orders
+
+    def _extract_fees(self, ccxt_order: Dict, notional: float) -> float:
+        """Liest die tatsächlichen Gebühren aus der CCXT-Antwort, sonst geschätzt."""
+        fee = ccxt_order.get('fee') or {}
+        cost = fee.get('cost')
+        if cost is not None:
+            try:
+                return float(cost)
+            except (TypeError, ValueError):
+                pass
+        return self._estimate_fees(notional)
 
     async def cancel_order(self, order_id: str) -> bool:
         """Storniert eine Order auf der Exchange."""
@@ -300,6 +352,7 @@ class LiveOrderEngine:
             count = 0
             for o in orders:
                 await self.exchange.cancel_order(o['id'])
+                self.pending_orders.pop(o['id'], None)
                 count += 1
             return count
         except Exception as e:
@@ -343,9 +396,13 @@ class LiveOrderEngine:
 
     # Kompatibilitäts-Helper (werden später erweitert)
     def get_pending_orders(self, symbol: str = None) -> list:
-        # Für Live besser async fetch_open_orders verwenden
-        self.logger.warning("get_pending_orders() ist in LiveEngine synchron nicht sinnvoll – async fetch_open_orders nutzen")
-        return []
+        """
+        Die lokal getrackten offenen Orders. Für den Abgleich mit dem
+        tatsächlichen Exchange-Zustand ist fetch_open_orders() zuständig.
+        """
+        if symbol:
+            return [o for o in self.pending_orders.values() if o.symbol == symbol]
+        return list(self.pending_orders.values())
 
     def set_fees(self, crypto_maker: float = None, crypto_taker: float = None):
         if crypto_maker is not None:

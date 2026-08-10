@@ -158,14 +158,33 @@ Dieses Script (Phase 6) zeigt explizit, ob der Bot im **LIVE MODE** läuft, letz
 
 **Vor dem ersten Live-Einsatz unbedingt ausführen:**
 ```bash
+# Prüft Konfiguration UND tatsächliche Profitabilität
 python tools/paper_to_live_checklist.py
+
+# Nur der Profitabilitäts-Nachweis
+python tools/profitability_gate.py
 ```
+
 Siehe auch `LIVE_TRADING.md` für die vollständige Cutover-Checklist.
-```
 
-## Bitpanda / Real Portfolio Oversight (Phase 6)
+## Bitpanda / Real Portfolio Oversight
 
-Wenn du echtes Geld auf Bitpanda hast, nutze in dieser Grok-Session die integrierten `bitpanda-broker` MCP Tools für tägliche Checks:
+Es gibt **zwei verschiedene Bitpanda-MCPs**:
+
+- **Public-/Broker-MCP** (`bitpanda-labs/bitpanda-mcp`) — strikt read-only,
+  kann keine Orders platzieren. Gut für die tägliche Kontrolle deines echten
+  Bestands.
+- **Fusion MCP** — kann traden. Bitpanda hat am 16.07.2026 API *und* MCP für
+  automatisiertes Trading auf Fusion gelauncht.
+
+Beide nutzen denselben `BITPANDA_API_KEY`; den Unterschied machen die Scopes.
+Für Fusion braucht der Key den **`trade`-Scope** und muss ein **v2-Key** sein.
+
+Für die Ausführung ist also entweder der Fusion-MCP oder die Fusion-REST-API
+nutzbar (CCXT unterstützt Fusion nicht — Issue #25354). Details zur
+API-Oberfläche in `LIVE_TRADING.md`.
+
+Nützliche read-only Tools für tägliche Checks:
 
 - `get_portfolio` → Dein reales Exposure in EUR
 - `list_trades` → Echte Trades abgleichen mit Bot-Logs

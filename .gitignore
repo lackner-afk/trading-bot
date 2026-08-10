@@ -55,3 +55,9 @@ models/
 dist/
 build/
 *.egg-info/
+
+# Test-Cache
+.pytest_cache/
+
+# Fear-&-Greed-Cache (wird via tools/fetch_fng_history.py geholt)
+data/fng_cache.json

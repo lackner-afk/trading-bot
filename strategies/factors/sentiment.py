@@ -3,9 +3,20 @@ Sentiment Factor (Phase 2)
 
 Provides sentiment-based conviction to the multi-factor system.
 
-Current implementation (starting point):
-- Integrates Alternative.me Fear & Greed Index (free, no API key needed)
-- Can be extended later with LunarCrush, Santiment, on-chain sentiment, etc.
+Datenquelle: Alternative.me Fear & Greed Index (kostenlos, kein API-Key).
+
+**Warum die Historie zählt.** Dieser Faktor ist im aktuellen Faktorenset der
+einzige, der zuverlässig eine Richtung *und* einen hohen Score liefert:
+`volatility_filter` und `volume_confirmation` sind richtungslos, `momentum`
+liefert nur bei RSI > 55 bzw. < 45 eine Richtung, `breakout` nur bei echtem
+Ausbruch, und `multi_timeframe_trend` liegt auf 5m fast immer am Score-Floor.
+Der Bot handelt damit faktisch "kaufe bei Fear".
+
+Wenn der Backtest den *heutigen* F&G-Wert auf 90 Tage Historie anwendet,
+misst er also genau den Faktor falsch, der die Strategie steuert — und zwar
+unauffällig falsch. Deshalb hält dieser Faktor die vollständige Tages-Historie
+und schlägt den Wert zum jeweiligen Kerzendatum nach. Live ist das dieselbe
+Codepfad-Logik: das Kerzendatum ist dann schlicht heute.
 
 The factor acts differently depending on the regime:
 - In "ranging" or "low_vol_chop": Extreme fear/greed are strong contrarian signals
@@ -13,12 +24,22 @@ The factor acts differently depending on the regime:
 - In "high_vol_event": Sentiment is de-weighted (too noisy)
 """
 
-import requests
-from typing import Optional, Dict
+import json
+import logging
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Dict, Optional
+
 import pandas as pd
-from datetime import datetime, timedelta
+import requests
 
 from .base import Factor, FactorResult
+
+logger = logging.getLogger(__name__)
+
+HISTORY_URL = "https://api.alternative.me/fng/?limit=0&format=json"
+CURRENT_URL = "https://api.alternative.me/fng/"
+DEFAULT_CACHE_PATH = Path(__file__).resolve().parents[2] / "data" / "fng_cache.json"
 
 
 class SentimentFactor(Factor):
@@ -34,10 +55,18 @@ class SentimentFactor(Factor):
     def __init__(self, config: Dict = None):
         super().__init__(config)
 
-        # How often we refresh the Fear & Greed data (in seconds)
-        self.cache_seconds = self.config.get("cache_seconds", 3600)  # 1 hour default
-        self._last_fetch = None
-        self._cached_value = None   # 0-100 (0 = Extreme Fear, 100 = Extreme Greed)
+        # Wie oft die Historie erneuert wird. Der Index aktualisiert nur einmal
+        # taeglich, haeufigere Abrufe bringen nichts.
+        self.refresh_seconds = self.config.get("refresh_seconds", 6 * 3600)
+        self.cache_path = Path(self.config.get("cache_path", DEFAULT_CACHE_PATH))
+        # Wie weit zurueck ein aelterer Wert genutzt wird, wenn ein Tag fehlt
+        self.max_staleness_days = self.config.get("max_staleness_days", 7)
+        # Netzwerk abschaltbar — im Backtest reicht der Plattencache
+        self.allow_network = self.config.get("allow_network", True)
+
+        # date -> 0..100
+        self._history: Dict[date, float] = {}
+        self._loaded_at: Optional[datetime] = None
 
         # Weights for different regimes (can be tuned)
         self.regime_weights = self.config.get("regime_weights", {
@@ -49,46 +78,167 @@ class SentimentFactor(Factor):
             "unknown": 0.7
         })
 
-    def _fetch_fear_and_greed(self) -> Optional[float]:
-        """Fetch current Fear & Greed Index from alternative.me (free API)."""
+    # ----- Historie laden -------------------------------------------
+
+    def _load_from_disk(self) -> bool:
+        """Laedt die gecachte Historie. Macht Backtests offline reproduzierbar."""
+        if not self.cache_path.exists():
+            return False
         try:
-            url = "https://api.alternative.me/fng/"
-            response = requests.get(url, timeout=10)
-            data = response.json()
-
-            if "data" in data and len(data["data"]) > 0:
-                value = float(data["data"][0]["value"])
-                self._cached_value = value
-                self._last_fetch = datetime.now()
-                return value
+            raw = json.loads(self.cache_path.read_text())
+            entries = raw.get("history", {})
+            self._history = {
+                date.fromisoformat(k): float(v) for k, v in entries.items()
+            }
+            fetched = raw.get("fetched_at")
+            self._loaded_at = datetime.fromisoformat(fetched) if fetched else None
+            return bool(self._history)
         except Exception as e:
-            print(f"[SentimentFactor] Failed to fetch Fear & Greed: {e}")
+            logger.warning(f"F&G-Cache nicht lesbar ({self.cache_path}): {e}")
+            return False
 
-        return None
+    def _save_to_disk(self):
+        try:
+            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+            self.cache_path.write_text(json.dumps({
+                "fetched_at": datetime.now().isoformat(),
+                "history": {d.isoformat(): v for d, v in sorted(self._history.items())},
+            }, indent=1))
+        except Exception as e:
+            logger.warning(f"F&G-Cache nicht schreibbar ({self.cache_path}): {e}")
 
-    def _get_fear_and_greed(self) -> Optional[float]:
-        """Get cached or fresh Fear & Greed value."""
-        now = datetime.now()
+    def _fetch_history(self) -> bool:
+        """Holt die vollstaendige Tages-Historie (limit=0)."""
+        if not self.allow_network:
+            return False
+        try:
+            response = requests.get(HISTORY_URL, timeout=20)
+            payload = response.json()
+        except Exception as e:
+            logger.warning(f"F&G-Historie nicht abrufbar: {e}")
+            return False
 
-        if (self._cached_value is None or
-            self._last_fetch is None or
-            (now - self._last_fetch).total_seconds() > self.cache_seconds):
+        entries = payload.get("data") or []
+        history: Dict[date, float] = {}
+        for entry in entries:
+            try:
+                day = datetime.utcfromtimestamp(int(entry["timestamp"])).date()
+                history[day] = float(entry["value"])
+            except (KeyError, TypeError, ValueError):
+                continue
 
-            return self._fetch_fear_and_greed()
+        if not history:
+            return False
 
-        return self._cached_value
+        self._history = history
+        self._loaded_at = datetime.now()
+        self._save_to_disk()
+        logger.info(
+            f"F&G-Historie geladen: {len(history)} Tage "
+            f"({min(history)} bis {max(history)})"
+        )
+        return True
+
+    def _fetch_current_only(self) -> bool:
+        """
+        Fallback: nur den aktuellen Wert holen.
+
+        Greift, wenn der Historie-Endpunkt nicht erreichbar ist. Der Live-Betrieb
+        laeuft damit weiter; ein Backtest wuerde dann aber wieder einen einzigen
+        Wert auf die ganze Historie anwenden — deshalb meldet is_historical()
+        in dem Fall False.
+        """
+        if not self.allow_network:
+            return False
+        try:
+            response = requests.get(CURRENT_URL, timeout=10)
+            payload = response.json()
+            entries = payload.get("data") or []
+            if not entries:
+                return False
+            value = float(entries[0]["value"])
+            day = datetime.utcfromtimestamp(int(entries[0]["timestamp"])).date() \
+                if entries[0].get("timestamp") else datetime.now().date()
+        except Exception as e:
+            logger.warning(f"F&G nicht abrufbar: {e}")
+            return False
+
+        self._history[day] = value
+        self._loaded_at = datetime.now()
+        return True
+
+    def _ensure_history(self):
+        """Sorgt dafuer, dass Daten vorliegen — Platte, dann Netz."""
+        if self._history and self._loaded_at is not None:
+            age = (datetime.now() - self._loaded_at).total_seconds()
+            if age < self.refresh_seconds:
+                return
+
+        if not self._history and self._load_from_disk():
+            age = ((datetime.now() - self._loaded_at).total_seconds()
+                   if self._loaded_at else float("inf"))
+            if age < self.refresh_seconds:
+                return
+
+        if not self._fetch_history():
+            self._fetch_current_only()
+
+    def set_history(self, history: Dict[date, float]):
+        """Historie direkt setzen — fuer Tests und reproduzierbare Backtests."""
+        self._history = dict(history)
+        self._loaded_at = datetime.now()
+
+    def is_historical(self) -> bool:
+        """True, wenn mehr als ein Tag vorliegt — Voraussetzung fuer Backtests."""
+        return len(self._history) > 1
+
+    # ----- Nachschlagen ---------------------------------------------
+
+    def _value_for(self, as_of: date) -> Optional[float]:
+        """
+        F&G-Wert fuer einen Tag. Fehlt der Tag, wird der naechstaeltere genommen
+        (der Index ist der zuletzt bekannte Stand, nicht interpoliert).
+        """
+        if not self._history:
+            return None
+
+        exact = self._history.get(as_of)
+        if exact is not None:
+            return exact
+
+        older = [d for d in self._history if d <= as_of]
+        if not older:
+            # Kerze liegt vor dem Beginn der Historie
+            return None
+
+        nearest = max(older)
+        if (as_of - nearest).days > self.max_staleness_days:
+            return None
+        return self._history[nearest]
+
+    @staticmethod
+    def _as_of_from_candles(candles: pd.DataFrame) -> date:
+        """Datum der letzten Kerze — im Live-Betrieb ist das heute."""
+        try:
+            if candles is not None and len(candles) and 'timestamp' in candles.columns:
+                return pd.Timestamp(candles['timestamp'].iloc[-1]).date()
+        except Exception:
+            pass
+        return datetime.now().date()
+
+    # ----- Faktor ---------------------------------------------------
 
     def calculate(self, symbol: str, candles: pd.DataFrame,
                   current_price: float, **kwargs) -> Optional[FactorResult]:
 
         regime = kwargs.get("regime", "unknown")
-        fng_value = self._get_fear_and_greed()
+
+        self._ensure_history()
+        as_of = kwargs.get("as_of") or self._as_of_from_candles(candles)
+        fng_value = self._value_for(as_of)
 
         if fng_value is None:
             return None
-
-        # Normalize Fear & Greed to 0-1 (0 = Extreme Fear, 1 = Extreme Greed)
-        normalized = fng_value / 100.0
 
         # Get regime-specific weight
         regime_weight = self.regime_weights.get(regime, 0.7)
@@ -137,6 +287,7 @@ class SentimentFactor(Factor):
             reason=reason,
             metadata={
                 "fear_and_greed": fng_value,
+                "as_of": as_of.isoformat(),
                 "regime": regime,
                 "regime_weight": regime_weight
             }

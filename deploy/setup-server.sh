@@ -36,8 +36,14 @@ mkdir -p /home/botuser/logs
 echo "[5/5] Systemd Service erstellen..."
 cat > /etc/systemd/system/trading-bot.service << 'EOF'
 [Unit]
-Description=Trading-Bot (One Trading / Bitpanda) - Paper + Live Mode supported
+Description=Trading-Bot (Bitpanda Fusion / One Trading) - Paper + Live Mode supported
 After=network.target
+
+# Automatischer Neustart bei Crash, aber max 5x in 5 Min.
+# Diese beiden Keys gehoeren in [Unit] — vorher standen sie in [Service],
+# wo systemd sie als unbekannt ignoriert hat. Das Rate-Limit griff also nicht.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -49,9 +55,9 @@ RestartSec=30
 StandardOutput=journal
 StandardError=journal
 
-# Automatischer Neustart bei Crash, aber max 5x in 5 Min
-StartLimitIntervalSec=300
-StartLimitBurst=5
+# Der Bot faehrt jetzt geordnet herunter (Stop-Event statt blindem sleep),
+# storniert offene Orders und schreibt den Abschlussreport. 30s reichen dafuer.
+TimeoutStopSec=30
 
 # Environment
 Environment=PYTHONUNBUFFERED=1

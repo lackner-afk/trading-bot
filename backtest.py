@@ -10,9 +10,15 @@ Für Data Parity mit dem Live-Bot empfohlen:
 import asyncio
 import logging
 from datetime import datetime
+from pathlib import Path
+
+import yaml
 
 from data.backtester import Backtester
+from data.confluence_backtest_adapter import build_strategy_funcs
+from core.market_constraints import MarketConstraints
 from strategies.crypto_scalper import CryptoScalper
+from strategies.confluence_strategy import ConfluenceStrategy
 from strategies.momentum import MomentumStrategy
 
 
@@ -88,7 +94,51 @@ def breakout_strategy(df, idx):
     return None
 
 
-async def run_backtests(data_exchange: str = 'binance'):
+def load_settings(path: str = 'config/settings.yaml') -> dict:
+    """Lädt settings.yaml, damit der Backtest dieselben Parameter nutzt wie der Bot."""
+    p = Path(path)
+    if not p.exists():
+        return {}
+    with open(p) as f:
+        return yaml.safe_load(f) or {}
+
+
+def check_sentiment_history(confluence_cfg: dict) -> bool:
+    """
+    Stellt sicher, dass der Sentiment-Faktor echte Tages-Historie hat.
+
+    Ohne sie wuerde der Backtest den heutigen Fear-&-Greed-Wert auf den
+    gesamten Zeitraum anwenden. Da Sentiment im aktuellen Faktorenset der
+    einzige verlaessliche Richtungsgeber ist, waere das Ergebnis nicht nur
+    ungenau, sondern systematisch falsch — und aeusserlich unauffaellig.
+    """
+    if not (confluence_cfg.get('factors', {}) or {}).get('sentiment', True):
+        return True     # Faktor ist aus, Historie irrelevant
+
+    from strategies.factors.sentiment import SentimentFactor
+
+    factor = SentimentFactor(confluence_cfg.get('sentiment', {}))
+    factor._ensure_history()
+
+    if not factor.is_historical():
+        print("\n" + "!" * 70)
+        print("FEHLER: Keine Fear-&-Greed-Historie verfuegbar.")
+        print("Der Backtest wuerde den heutigen Wert auf den ganzen Zeitraum")
+        print("anwenden — und Sentiment ist der einzige Faktor, der zuverlaessig")
+        print("eine Richtung liefert. Das Ergebnis waere wertlos.")
+        print("\n  python tools/fetch_fng_history.py")
+        print("!" * 70)
+        return False
+
+    days = sorted(factor._history)
+    fear = sum(1 for v in factor._history.values() if v < 45)
+    print(f"Fear & Greed: {len(days)} Tage ({days[0]} bis {days[-1]}), "
+          f"davon {fear / len(days):.0%} im Fear-Bereich (Entries moeglich)")
+    return True
+
+
+async def run_backtests(data_exchange: str = 'binance', timeframe: str = '1h',
+                        days: int = 90, allow_synthetic: bool = False):
     """
     Führt Backtests durch.
 
@@ -104,10 +154,34 @@ async def run_backtests(data_exchange: str = 'binance'):
     print(f"PAPER-TRADING-BOT BACKTEST  |  Data Source: {data_exchange.upper()}")
     print("=" * 70)
 
-    # Backtester mit gewünschter Datenquelle initialisieren (Phase 5)
+    # Parameter aus settings.yaml, damit Backtest und Live dieselben Werte nutzen
+    settings = load_settings()
+    constraints = MarketConstraints.from_config(settings)
+    start_capital = settings.get('general', {}).get('start_capital', 10000)
+    fees = settings.get('fees', {})
+    risk = settings.get('risk', {})
+
+    # Im Spot-Modus gibt es keinen Hebel — der Backtest muss dieselbe
+    # Beschränkung abbilden, sonst testet er eine nicht handelbare Strategie.
+    leverage = 1.0 if constraints.spot_only else settings.get(
+        'strategies', {}).get('confluence', {}).get('base_leverage', 8)
+
+    print(f"Kapital: {start_capital} | Leverage: {leverage}x | "
+          f"Timeframe: {timeframe} | {constraints.describe()}")
+
     backtester = Backtester(
-        initial_capital=10000,
-        config={'data_exchange': data_exchange}
+        initial_capital=start_capital,
+        config={
+            'data_exchange': data_exchange,
+            'timeframe': timeframe,
+            'allow_synthetic': allow_synthetic,
+            # Spread wird auf die Gebuehr aufgeschlagen — Fusion hat neben der
+            # Stufengebuehr einen variablen Spread von ~0,05 % je Seite.
+            'maker_fee': fees.get('crypto_maker', 0.0025) + fees.get('spread_estimate', 0.0005),
+            'taker_fee': fees.get('crypto_taker', 0.0025) + fees.get('spread_estimate', 0.0005),
+            'max_positions': risk.get('max_concurrent_positions', 3),
+            'max_position_pct': risk.get('max_position_size', 0.10),
+        }
     )
 
     # Symbole je nach Exchange anpassen (EUR für Kraken/One Trading)
@@ -118,13 +192,18 @@ async def run_backtests(data_exchange: str = 'binance'):
 
     print(f"\nLade historische Daten für: {', '.join(symbols)} via {data_exchange}...")
 
-    await backtester.load_data(symbols, days=90)
+    try:
+        await backtester.load_data(symbols, days=days)
+    except RuntimeError as e:
+        print(f"\nFEHLER: {e}")
+        return
 
     if not backtester.price_data:
         print("FEHLER: Keine Daten verfügbar!")
         return
 
-    print(f"Daten geladen: {sum(len(df) for df in backtester.price_data.values())} Datenpunkte")
+    print(f"Daten geladen: {sum(len(df) for df in backtester.price_data.values())} "
+          f"Datenpunkte (Quelle: {backtester.data_source})")
 
     # Strategien definieren
     strategies = [
@@ -136,14 +215,39 @@ async def run_backtests(data_exchange: str = 'binance'):
 
     results = []
 
-    # Jede Strategie testen
+    # Confluence zuerst — das ist die einzige produktiv aktive Strategie und
+    # war bis jetzt die einzige, die nie backgetestet wurde.
+    confluence_cfg = settings.get('strategies', {}).get('confluence', {})
+    if confluence_cfg.get('enabled', True):
+        print("\nTeste: Confluence (Multi-Factor, AKTIVE Strategie)...")
+
+        if not check_sentiment_history(confluence_cfg):
+            print("\nABBRUCH: Backtest ohne Sentiment-Historie waere irrefuehrend.")
+            return
+
+        available = [s for s in symbols if s in backtester.price_data]
+        strategy_funcs = build_strategy_funcs(
+            lambda: ConfluenceStrategy.create_default(confluence_cfg, constraints=constraints),
+            available,
+        )
+        result = backtester.run_backtest(
+            strategy_funcs=strategy_funcs,
+            symbols=available,
+            leverage=leverage,
+            strategy_name='Confluence (Multi-Factor)'
+        )
+        if result:
+            results.append(result)
+            backtester.print_results(result)
+
+    # Jede Legacy-Strategie testen
     for name, strategy_func in strategies:
         print(f"\nTeste: {name}...")
 
         result = backtester.run_backtest(
             strategy_func=strategy_func,
             symbols=symbols,
-            leverage=10,
+            leverage=leverage,
             strategy_name=name
         )
 
@@ -252,11 +356,23 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Trading Bot Backtester')
     parser.add_argument('--grid', action='store_true', help='Run parameter grid search')
-    parser.add_argument('--data-exchange', default='binance', choices=['binance', 'kraken', 'onetrading'],
+    parser.add_argument('--data-exchange', default='kraken', choices=['binance', 'kraken', 'onetrading'],
                         help='Data source for backtest (for Data Parity with live bot)')
+    parser.add_argument('--timeframe', default='5m',
+                        help='Kerzen-Timeframe. Confluence laeuft live auf 5m — '
+                             'ein Backtest auf 1h waere nicht vergleichbar.')
+    parser.add_argument('--days', type=int, default=90, help='Historie in Tagen')
+    parser.add_argument('--allow-synthetic', action='store_true',
+                        help='Erlaubt synthetische Daten wenn der Abruf scheitert. '
+                             'NIEMALS fuer Go-Live-Entscheidungen verwenden.')
     args = parser.parse_args()
 
     if args.grid:
         run_grid_search()
     else:
-        asyncio.run(run_backtests(data_exchange=args.data_exchange))
+        asyncio.run(run_backtests(
+            data_exchange=args.data_exchange,
+            timeframe=args.timeframe,
+            days=args.days,
+            allow_synthetic=args.allow_synthetic,
+        ))

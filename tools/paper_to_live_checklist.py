@@ -36,13 +36,51 @@ def check_settings_yaml() -> tuple[bool, str]:
     return True, "settings.yaml sieht für Live gut aus"
 
 def check_secrets() -> tuple[bool, str]:
+    """
+    Prüft die Keys des tatsächlich konfigurierten Ziel-Venues.
+
+    Vorher wurde ausschliesslich auf ONETRADING_API_KEY/SECRET getestet —
+    auch dann, wenn live.venue auf fusion steht. Die Checkliste wäre also
+    für das eigentliche Ziel-Venue grün geworden, ohne dessen Key zu prüfen.
+    """
     secrets_path = PROJECT_ROOT / "config" / "secrets.env"
     if not secrets_path.exists():
         return False, "secrets.env fehlt"
 
     content = secrets_path.read_text()
+
+    venue = "fusion"
+    settings = PROJECT_ROOT / "config" / "settings.yaml"
+    if settings.exists():
+        try:
+            import yaml
+            cfg = yaml.safe_load(settings.read_text()) or {}
+            venue = (cfg.get("live", {}) or {}).get("venue", "fusion")
+        except Exception:
+            pass
+
+    if venue == "fusion":
+        # Der Key muss gesetzt sein, nicht nur genannt — ein leeres
+        # BITPANDA_API_KEY= reicht nicht. FUSION_API_KEY ist der Fallback
+        # fuer Altinstallationen, main.py liest ihn in derselben Reihenfolge.
+        found_empty = False
+        for name in ("BITPANDA_API_KEY", "FUSION_API_KEY"):
+            for line in content.splitlines():
+                if line.strip().startswith(f"{name}="):
+                    if line.split("=", 1)[1].strip():
+                        return True, (
+                            f"{name} gesetzt — 'trade'-Scope und v2-Key "
+                            f"werden erst beim Preflight validiert"
+                        )
+                    found_empty = True
+        if found_empty:
+            return False, (
+                "BITPANDA_API_KEY ist leer (v2-Key mit 'trade'-Scope noetig, "
+                "zu erzeugen unter app.bitpanda.com/my-account/apikey)"
+            )
+        return False, "BITPANDA_API_KEY nicht in secrets.env gefunden (Ziel-Venue: fusion)"
+
     if "ONETRADING_API_KEY=" in content and "ONETRADING_API_SECRET=" in content:
-        # Very basic check – real validation happens at runtime
         return True, "secrets.env vorhanden (Keys werden beim Start validiert)"
     return False, "ONETRADING_API_KEY / SECRET nicht in secrets.env gefunden"
 
@@ -66,6 +104,31 @@ def check_shadow_mode_usage() -> tuple[bool, str]:
     except Exception:
         return True, "Log konnte nicht gelesen werden"
 
+def check_profitability() -> tuple[bool, str]:
+    """
+    Der einzige Check hier, der die tatsächliche Performance ansieht.
+
+    Alle anderen Checks prüfen Dateiinhalte per Substring und würden einen
+    dauerhaft verlierenden Bot ohne Einwand durchwinken.
+    """
+    sys.path.insert(0, str(PROJECT_ROOT))
+    try:
+        from tools.profitability_gate import evaluate_gate
+    except ImportError as e:
+        return False, f"Gate nicht ladbar: {e}"
+
+    result = evaluate_gate(str(PROJECT_ROOT / "trades.db"))
+    if result.passed:
+        return True, f"Profitabilitaets-Gate GRUEN ({result.summary()})"
+
+    if not result.criteria:
+        return False, "; ".join(result.blockers) or "Keine Trade-Daten"
+
+    offen = ", ".join(result.blockers[:3])
+    if len(result.blockers) > 3:
+        offen += f" (+{len(result.blockers) - 3} weitere)"
+    return False, f"{result.summary()} – offen: {offen}"
+
 def main():
     print("\n" + "=" * 70)
     print("PAPER → LIVE CUTOVER CHECKLIST  |  " + datetime.now().strftime("%Y-%m-%d %H:%M"))
@@ -77,6 +140,7 @@ def main():
         ("secrets.env", check_secrets),
         ("LIVE_TRADING.md", check_live_trading_md),
         ("Shadow Mode History", check_shadow_mode_usage),
+        ("Profitabilitaet", check_profitability),
     ]
 
     all_ok = True

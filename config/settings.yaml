@@ -24,6 +24,111 @@ general:
   # max_real_capital_exposure_eur: 500
   # require_live_env_var: true
 
+# ============================================================
+# MARKTBESCHRÄNKUNGEN DES ZIEL-VENUES
+# ============================================================
+# Bitpanda Fusion ist derzeit Spot-only: kein Leverage, keine Shorts
+# (Margin ist als "coming soon" angekündigt). Diese Beschränkungen gelten
+# auch im Paper-Modus — sonst misst die Testphase eine Strategie, die live
+# gar nicht ausführbar wäre, und die Zahlen taugen nicht für eine
+# Go-Live-Entscheidung.
+trading:
+  spot_only: true
+  allow_short: false
+  max_leverage: 1.0
+  # exit_only = SHORT-Signal schließt eine offene Long-Position
+  # ignore    = SHORT-Signal wird verworfen
+  short_signal_policy: exit_only
+  min_order_notional_eur: 10.0
+
+# ============================================================
+# GO-LIVE-GATE (Profitabilitäts-Nachweis)
+# ============================================================
+# Wird beim Live-Start hart geprüft (main.py) und beratend im Tagesreport
+# angezeigt. Die bestehende paper_to_live_checklist.py prüft nur
+# Config-Dateien und würde einen dauerhaft verlierenden Bot durchwinken.
+#
+# Konservatives Profil: mehrere Kennzahlen müssen gemeinsam stimmen, weil
+# jede einzelne für sich manipulierbar oder zufällig ist. Die letzten vier
+# sind Robustheitschecks gegen Glückstreffer und Gebührenrauschen.
+go_live_gate:
+  min_trades: 100
+  min_days: 30
+  min_net_pnl: 0.0
+  min_profit_factor: 1.30
+  max_drawdown: 0.10
+  min_sharpe: 1.0
+  min_win_rate: 0.45
+  min_expectancy_fee_multiple: 2.0   # Erwartungswert > 2x Round-Trip-Fee
+  max_largest_win_share: 0.25        # kein Glückstrade trägt das Ergebnis
+  min_positive_week_share: 0.55      # Konsistenz statt Einmaleffekt
+
+# ============================================================
+# LIVE-MODUS (nur relevant wenn general.mode: live)
+# ============================================================
+# Wird an die LiveOrderEngine durchgereicht. Vorher bekam die Engine nur
+# den fees:-Block, weshalb sich shadow_mode ausschließlich durch einen
+# Eintrag INNERHALB von fees: aktivieren ließ — die in LIVE_TRADING.md
+# empfohlene Rollout-Stufe 1 war praktisch nicht erreichbar.
+live:
+  # Ziel-Venue: fusion (Bitpanda Fusion, Default) | onetrading (Alt-Pfad via CCXT)
+  venue: fusion
+  shadow_mode: true    # true = loggt Orders, platziert aber keine echten
+
+  # Bitpanda Fusion. API-Key kommt aus BITPANDA_API_KEY in secrets.env.
+  # Es gibt nur EINEN Bitpanda-Key mit Scopes — für Fusion muss der
+  # 'trade'-Scope gesetzt und der Key ein v2-Key sein.
+  host: https://api.fusion.bitpanda.com
+  timeout_seconds: 20
+  max_retries: 3
+
+  # ---- Kapitaltopf -------------------------------------------------
+  # Welches Asset der Bot als sein Geld ansieht. Fusion bietet neben EUR
+  # auch Stablecoins als Quote-Waehrung an (EURCV, EURC, USDC).
+  #
+  # Steht hier EURCV, handelt der Bot BTC-EURCV statt BTC-EUR. Damit ist
+  # sein Kapital PHYSISCH getrennt: er sieht nur den EURCV-Bestand, ein
+  # EUR-Guthaben auf demselben Konto existiert fuer ihn nicht und wird
+  # beim Start lediglich als Fremdbestand gemeldet.
+  #
+  # Der Topf waechst von selbst: Verkaeufe fliessen wieder in EURCV
+  # zurueck. Wer mit 100 startet und auf 400 kommt, handelt danach mit
+  # 400 — es gibt keine Obergrenze, nur die Trennung.
+  #
+  # So richtest du ihn ein:
+  #   1. In der Bitpanda-App 100 EUR in EURCV tauschen
+  #   2. Hier quote_asset: EURCV setzen
+  #   3. Der Preflight prueft, ob es alle Paare in EURCV wirklich gibt
+  #
+  # EUR = Verhalten wie bisher: der Bot nimmt den GESAMTEN EUR-Bestand
+  # des Kontos als Handelskapital. Nur sinnvoll auf einem Konto, auf dem
+  # sonst nichts liegt.
+  quote_asset: EUR
+
+  # Auth-Header laut docs.bitpanda.com:
+  #   curl -H "Authorization: Bearer $BITPANDA_API_KEY" ...
+  # Konfigurierbar, weil der gehostete Public-MCP
+  # (https://mcp.public.bitpanda.com) stattdessen x-api-key ohne Schema
+  # erwartet. Für Fusion selbst bleiben diese Werte so.
+  auth_header: Authorization
+  auth_scheme: Bearer
+
+  # URL-Pfade. Aus dem offiziellen CLI bitpanda-labs/bitpanda-fusion-cli
+  # abgeleitet, aber NICHT gegen docs.fusion.bitpanda.com verifiziert (die
+  # Doku blockt automatisierte Abrufe). Der Preflight beim Live-Start prüft
+  # sie gegen die echte API; bei Abweichung hier korrigieren.
+  endpoints:
+    tickers: /v1/tickers
+    pairs: /v1/pairs
+    candles: /v1/candles/{pair}
+    orderbook: /v1/orderbook/{pair}
+    assets: /v1/assets
+    account: /v1/account
+    balances: /v1/account/balances
+    orders: /v1/orders
+    order_by_id: /v1/orders/{order_id}
+    trades: /v1/trades
+
 exchanges:
   onetrading:
     # API Key aus secrets.env (ONETRADING_API_KEY)
@@ -81,24 +186,95 @@ strategies:
   confluence:
     enabled: true
     interval_seconds: 45
-    min_confluence_score: 3.5   # Aggressive Test-Mode (A) - stark gesenkt für mehr Trades in low_vol_chop
-    base_leverage: 8
+    # Handelsuniversum der aktiven Strategie. Vorher zog main.py die Liste aus
+    # momentum.pairs — der Config einer deaktivierten Strategie — weshalb XRP
+    # und BNB nie Kerzen bekamen, obwohl sie im base_universe des
+    # AssetSelectors stehen. Fünf statt drei Symbole erhöhen den Durchsatz
+    # linear, ohne an der Signalqualität zu drehen.
+    pairs:
+      - BTC_EUR
+      - ETH_EUR
+      - SOL_EUR
+      - XRP_EUR
+      - BNB_EUR
+    # Skala 0.0–1.0. Der Score ist ein gewichteter Mittelwert von Faktor-Scores
+    # aus [0,1] bei Gewichten mit Summe 1.0 und kann 1.0 nie überschreiten.
+    # Der frühere Wert 3.5 stammte aus einer 0–10-Skala und war damit
+    # unerreichbar — der Bot hat deshalb nie einen Trade ausgeführt.
+    # Anzeige erfolgt weiterhin als x/10 (0.55 → "5.5/10").
+    min_confluence_score: 0.55
+    # Mindestanzahl technischer Faktoren für hinreichende Konviktion
+    min_technical_factors: 2
+    # Mindestvorsprung der Gewinnerrichtung gegenüber der Gegenrichtung
+    direction_margin: 1.2
+    # Mindest-Konviktion der Faktoren, die eine Richtung nennen. Verhindert,
+    # dass richtungslose Filter (Volatilität, Volumen) allein die Schwelle
+    # reißen und im Seitwärtsmarkt Trades erzeugen. Startwert — wird im
+    # Backtest (P3) kalibriert.
+    min_directional_score: 0.35
+    base_leverage: 8            # im Spot-Modus wirkungslos (Leverage fix 1.0)
+    factors:
+      sentiment: true
+      # MacroNewsFilter ist aus: der EconomicCalendar wird nirgends befüllt,
+      # der Faktor liefert konstant score=1.0 und ist damit ein reiner
+      # Score-Bonus ohne Informationsgehalt, der den effektiven Schwellwert
+      # nach unten verschiebt. Erst einschalten, wenn der Kalender eine
+      # echte Datenquelle hat.
+      macro_news: false
     factor_weights:
       technical: 0.58
       sentiment: 0.25
       macro_news: 0.17
+    # Exit-Logik für Confluence-Positionen (ConfluenceExitManager).
+    # Vorher liefen diese Exits über die deaktivierte Momentum-Strategie,
+    # deren highest_prices nie befüllt wurde — der Trailing-Stop war toter Code.
+    exit:
+      trailing_atr_multiplier: 1.2
+      trailing_pct_fallback: 0.005
+      # Ab wann der Trailing-Stop scharf wird. MUSS deutlich über den
+      # Round-Trip-Gebühren liegen (aktuell 0,6 %): der Stop folgt mit
+      # ~0,2 % ATR-Abstand, ein Exit bei arm=0,5 % läge also bei ~+0,3 %
+      # brutto — netto ein Verlust. Bei 1,0 % bleibt nach Gebühren ~+0,2 %.
+      # Startwert, wird im Backtest kalibriert (Kandidaten 0.010/0.015/0.020).
+      trailing_arm_profit_pct: 0.010
+      max_hold_hours: 0        # 0 = kein Zeit-Stop
 
 risk:
   max_risk_per_trade: 0.02      # 2% des Portfolios
   max_daily_drawdown: 0.10       # 10% → Pause bis nächster Tag
-  max_position_size: 0.20        # 20% des Portfolios pro Position
+  # 15% statt 20%: die offenen Positionen sind faktisch perfekt korreliert,
+  # weil der Fear-&-Greed-Index als einziger verlässlicher Richtungsgeber für
+  # alle Symbole gleichzeitig kippt. Drei Slots sind damit wirtschaftlich ein
+  # einziger Trade — 3 × 15% = 45% Exposure statt 60%.
+  max_position_size: 0.15
   max_leverage: 50               # Absolutes Leverage-Limit
-  max_concurrent_positions: 2
-  cooldown_after_losses: 300     # 5 Min Pause nach 3 Verlusten
+  max_concurrent_positions: 3
+  cooldown_seconds: 300          # 5 Min Pause nach 3 Verlusten in Folge
 
+# ============================================================
+# GEBÜHREN — Bitpanda Fusion
+# ============================================================
+# Fusion hat 7 volumenabhängige Stufen (30-Tage-Volumen), und anders als bei
+# den meisten Börsen kostet MAKER dasselbe wie TAKER:
+#
+#   Level 1  bis 100.000 €        0,25 %   <- hier stehst du mit 100 € Kapital
+#   ...
+#   Level 7  > 250 Mio. $/Monat   0,02 %
+#
+# Dazu kommt ein variabler Spread von ~0,05 %.
+#
+# Die alten Werte (0,04 % / 0,06 %) stammten aus einer Futures-Börse und waren
+# um Faktor ~4,5 zu niedrig. Das ist keine Kosmetik: bei 0,55 % Round-Trip
+# steigt die für Break-even nötige Win-Rate von 37,7 % auf 50 %, und typische
+# Trailing-Exits (+0,2–0,4 % brutto) liegen UNTER den Gebühren — sie wären
+# real Verluste.
+#
+# Deine tatsächliche Stufe zeigt `bp-fusion account info`. Der Preflight
+# gleicht sie beim Live-Start gegen diesen Wert ab und warnt bei Abweichung.
 fees:
-  crypto_maker: 0.0004  # 0.04%
-  crypto_taker: 0.0006  # 0.06%
+  crypto_maker: 0.0025   # 0.25% — Level 1
+  crypto_taker: 0.0025   # 0.25% — identisch zu Maker
+  spread_estimate: 0.0005  # ~0.05% variabler Spread, je Seite
 
 slippage:
   min: 0.0001  # 0.01%

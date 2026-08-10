@@ -85,13 +85,11 @@ class TelegramNotifier:
         win_rate = portfolio.get_win_rate()
         max_dd = portfolio.get_max_drawdown()
         avg_win, avg_loss = portfolio.get_avg_win_loss()
-        profit_factor = abs(avg_win / avg_loss) if avg_loss != 0 else 0.0
+        # Echter Profit Factor (Bruttogewinn/Bruttoverlust), nicht die
+        # Payoff-Ratio avg_win/avg_loss — die meldet Verlustsysteme als profitabel.
+        profit_factor = portfolio.get_profit_factor()
 
         status = metrics.get('status', 'OK')
-
-        # Equity-Veränderung
-        start = 100.0  # Startkapital (wird approximiert)
-        equity_change = state.equity - state.balance + state.realized_pnl
 
         # Moneyboy-Kommentar je nach Performance
         if state.daily_pnl > 5:
@@ -349,27 +347,34 @@ class Reporter:
 
         self.console.print("\n")
         panel = Panel(
-            self._build_daily_report_text(state, sharpe, max_dd, avg_win, avg_loss, win_rate, strategies),
+            self._build_daily_report_text(portfolio, state, sharpe, max_dd,
+                                          avg_win, avg_loss, win_rate, strategies),
             title="[bold white]📊 Täglicher Report[/bold white]",
             border_style="cyan"
         )
         self.console.print(panel)
         self.last_daily_report = datetime.now().date()
 
-    def _build_daily_report_text(self, state, sharpe, max_dd, avg_win, avg_loss,
-                                  win_rate, strategies) -> Text:
+    def _build_daily_report_text(self, portfolio, state, sharpe, max_dd, avg_win,
+                                  avg_loss, win_rate, strategies) -> Text:
         """Baut Text für täglichen Report"""
         text = Text()
 
-        # Performance
-        pnl_pct = state.realized_pnl / 10000 * 100  # Annahme: 10k Start
+        # Performance — Prozente gegen das echte Startkapital, nicht gegen
+        # eine hartcodierte 10000 (bei 100 EUR war die Angabe um Faktor 100 falsch)
+        start_capital = getattr(portfolio, 'start_capital', 0) or 1.0
+        pnl_pct = state.realized_pnl / start_capital * 100
+        profit_factor = portfolio.get_profit_factor()
+        payoff = abs(avg_win / avg_loss) if avg_loss != 0 else 0.0
+
         text.append("PERFORMANCE\n", style="bold underline cyan")
-        text.append(f"Realized PNL: ${state.realized_pnl:,.2f} ({pnl_pct:+.2f}%)\n")
+        text.append(f"Realized PNL: {state.realized_pnl:,.2f}€ ({pnl_pct:+.2f}%)\n")
         text.append(f"Win Rate: {win_rate:.1%}\n")
         text.append(f"Sharpe Ratio: {sharpe:.2f}\n")
         text.append(f"Max Drawdown: {max_dd:.2%}\n")
-        text.append(f"Avg Win: ${avg_win:,.2f} | Avg Loss: ${avg_loss:,.2f}\n")
-        text.append(f"Profit Factor: {abs(avg_win/avg_loss):.2f}\n" if avg_loss != 0 else "")
+        text.append(f"Avg Win: {avg_win:,.2f}€ | Avg Loss: {avg_loss:,.2f}€\n")
+        text.append(f"Profit Factor: {profit_factor:.2f} | Payoff-Ratio: {payoff:.2f}\n")
+        text.append(f"Gebühren gesamt: {portfolio.get_total_fees():,.2f}€\n")
         text.append("\n")
 
         # Strategie-Breakdown
@@ -381,6 +386,28 @@ class Reporter:
                 text.append(f"  {name}: {trades} Trades, ${profit:,.2f} Profit\n")
 
         text.append("\n")
+
+        # Fortschritt Richtung Go-Live. Beratend, nicht blockierend — der
+        # harte Gate-Check sitzt im Live-Start von main.py. Hier soll der Weg
+        # zum Ziel sichtbar sein statt nur ein binäres Nein.
+        try:
+            from tools.profitability_gate import evaluate_gate
+
+            gate = evaluate_gate(str(portfolio.db_path))
+            text.append("GO-LIVE-GATE\n", style="bold underline cyan")
+            if gate.criteria:
+                text.append(f"  {gate.summary()}\n",
+                            style="green" if gate.passed else "yellow")
+                for c in gate.criteria:
+                    style = "green" if c.passed else "dim"
+                    mark = "✓" if c.passed else "·"
+                    text.append(f"  {mark} {c.label}: {c.actual} (Ziel {c.required})\n",
+                                style=style)
+            else:
+                text.append(f"  {'; '.join(gate.blockers) or 'keine Daten'}\n", style="dim")
+            text.append("\n")
+        except Exception:
+            pass
 
         # Empfehlungen
         text.append("EMPFEHLUNGEN\n", style="bold underline cyan")

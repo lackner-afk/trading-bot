@@ -44,6 +44,11 @@ class BacktestResult:
     alpha: float  # Outperformance vs Buy&Hold
     trades: List[Dict] = field(default_factory=list)
     equity_curve: List[tuple] = field(default_factory=list)
+    # Woher die Kursdaten kamen: 'binance' | 'kraken' | 'onetrading' |
+    # 'simulated'. Ohne dieses Feld liesse sich ein Ergebnis auf einem
+    # Random Walk nicht von einem echten unterscheiden.
+    data_source: str = "unknown"
+    timeframe: str = "1h"
 
 
 @dataclass
@@ -83,14 +88,30 @@ class Backtester:
         # Data source for parity with live trading (Phase 5)
         self.data_exchange = self.config.get('data_exchange', 'binance')  # binance | kraken | onetrading
 
+        # Timeframe. War vorher an zwei Stellen hart auf '1h' verdrahtet —
+        # die ConfluenceStrategy läuft live auf 5m, und ein 5m-Strategie-
+        # Backtest auf Stundenkerzen ist bedeutungslos.
+        self.timeframe = self.config.get('timeframe', '1h')
+
+        # Fällt der Datenabruf aus, wurde bisher still auf einen Random Walk
+        # zurückgefallen. Für ein Profitabilitäts-Gate ist das gefährlich:
+        # ein "erfolgreicher" Backtest könnte auf Fantasiedaten beruhen.
+        self.allow_synthetic = self.config.get('allow_synthetic', False)
+        self.data_source = "unknown"
+
         # Fee-Struktur
-        self.maker_fee = self.config.get('maker_fee', 0.0004)
-        self.taker_fee = self.config.get('taker_fee', 0.0006)
+        # Defaults = Bitpanda Fusion Level 1 (0,25 %) plus ~0,05 % Spread.
+        # Die alten 0,04/0,06 % stammten aus einer Futures-Struktur.
+        self.maker_fee = self.config.get('maker_fee', 0.003)
+        self.taker_fee = self.config.get('taker_fee', 0.003)
 
         # Risk-Limits
         self.max_positions = self.config.get('max_positions', 3)
         self.max_position_pct = self.config.get('max_position_pct', 0.10)
-        self.min_capital = self.config.get('min_capital', 1000)
+        # Kapital-Untergrenzen. Die alten Defaults (1000 / 100) führten bei
+        # 100 EUR Startkapital zu null Trades — ohne jede Fehlermeldung.
+        self.min_capital = self.config.get('min_capital', max(10.0, initial_capital * 0.1))
+        self.min_margin = self.config.get('min_margin', 10.0)
         self.stop_loss_pct = self.config.get('stop_loss_pct', 0.008)
         self.take_profit_pct = self.config.get('take_profit_pct', 0.015)
         self.cooldown_periods = self.config.get('cooldown_periods', 5)
@@ -113,9 +134,7 @@ class Backtester:
         self.logger.info(f"Lade historische Daten für {len(symbols)} über {days} Tage via {exchange_name.upper()}")
 
         if ccxt_async is None:
-            self.logger.error("ccxt nicht installiert - pip install ccxt")
-            self.price_data = self._generate_simulated_data(symbols, days)
-            return self.price_data
+            return self._fallback_to_synthetic(symbols, days, "ccxt nicht installiert")
 
         # Exchange-spezifische Initialisierung
         if exchange_name == 'kraken':
@@ -147,16 +166,40 @@ class Backtester:
             await exchange.close()
 
         if len(self.price_data) == 0:
-            self.logger.warning("Keine API-Daten verfügbar - generiere simulierte Daten")
-            self.price_data = self._generate_simulated_data(symbols, days)
+            return self._fallback_to_synthetic(
+                symbols, days, f"keine Daten von {exchange_name} erhalten"
+            )
 
+        self.data_source = exchange_name
+        return self.price_data
+
+    def _fallback_to_synthetic(self, symbols: List[str], days: int,
+                               grund: str) -> Dict[str, pd.DataFrame]:
+        """
+        Synthetische Daten nur, wenn ausdrücklich erlaubt.
+
+        Der frühere stille Fallback ist die gefährlichste Eigenschaft des
+        Backtesters gewesen: ein fehlgeschlagener Fetch produzierte lautlos
+        einen seeded Random Walk, dessen Ergebnis sich äußerlich nicht von
+        einem echten Backtest unterscheiden liess.
+        """
+        if not self.allow_synthetic:
+            raise RuntimeError(
+                f"Backtest-Daten nicht ladbar ({grund}). Synthetische Daten sind "
+                f"deaktiviert - ein Ergebnis auf einem Random Walk waere wertlos. "
+                f"Mit allow_synthetic=True bewusst zulassen (nie fuer das Gate)."
+            )
+
+        self.logger.warning(f"SYNTHETISCHE DATEN ({grund}) - Ergebnis ist NICHT aussagekraeftig!")
+        self.data_source = "simulated"
+        self.price_data = self._generate_simulated_data(symbols, days)
         return self.price_data
 
     async def _fetch_binance_ohlcv(self, exchange, symbol: str, days: int) -> Optional[pd.DataFrame]:
         """Holt OHLCV-Daten von Binance via CCXT (stündliche Kerzen)"""
         # Zeitraum berechnen
         since = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
-        timeframe = '1h'
+        timeframe = self.timeframe
         all_candles = []
 
         # Binance liefert max 1000 Kerzen pro Request - paginieren
@@ -203,7 +246,7 @@ class Backtester:
         Wird für EUR-Paare im Live-Bot verwendet (Data Parity).
         """
         since = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
-        timeframe = '1h'
+        timeframe = self.timeframe
         all_candles = []
 
         while True:
@@ -363,13 +406,41 @@ class Backtester:
 
         return df
 
-    def run_backtest(self, strategy_func: Callable, symbols: List[str] = None,
-                    leverage: float = 1.0, strategy_name: str = "Strategy") -> BacktestResult:
+    @staticmethod
+    def _normalize_signal(raw) -> Optional[Dict]:
+        """
+        Vereinheitlicht die zwei erlaubten Rückgabeformen einer Strategie:
+
+        - Legacy: 'long' | 'short' | 'close' | None
+        - Neu:    {'action': ..., 'stop_loss': float, 'take_profit': float}
+
+        Das neue Format erlaubt signal-eigene Stops. Vorher überschrieb der
+        Backtester die immer mit den globalen Prozentwerten, sodass jede
+        Strategie mit eigener SL/TP-Logik faktisch ohne sie getestet wurde.
+        """
+        if raw is None:
+            return None
+        if isinstance(raw, str):
+            return {"action": raw} if raw in ("long", "short", "close") else None
+        if isinstance(raw, dict):
+            action = raw.get("action")
+            if action not in ("long", "short", "close"):
+                return None
+            return raw
+        return None
+
+    def run_backtest(self, strategy_func: Callable = None, symbols: List[str] = None,
+                    leverage: float = 1.0, strategy_name: str = "Strategy",
+                    strategy_funcs: Dict[str, Callable] = None) -> BacktestResult:
         """
         Führt Backtest mit gegebener Strategie-Funktion durch
 
         Args:
-            strategy_func: Funktion die (df, index) -> signal ('long', 'short', 'close', None)
+            strategy_func: Funktion die (df, index) -> signal, für alle Symbole
+            strategy_funcs: Alternativ eine Funktion PRO Symbol. Nötig für
+                zustandsbehaftete, symbolabhängige Strategien wie die
+                ConfluenceStrategy — die alte Signatur (df, idx) kannte kein
+                Symbol, genau das war die Inkompatibilität.
             symbols: Zu testende Symbole
             leverage: Hebel für Positionen
             strategy_name: Name für Ergebnis
@@ -377,8 +448,16 @@ class Backtester:
         Returns:
             BacktestResult mit allen Metriken
         """
+        if strategy_func is None and not strategy_funcs:
+            raise ValueError("Entweder strategy_func oder strategy_funcs angeben")
+
+        def func_for(symbol: str) -> Optional[Callable]:
+            if strategy_funcs:
+                return strategy_funcs.get(symbol)
+            return strategy_func
+
         if symbols is None:
-            symbols = list(self.price_data.keys())
+            symbols = list(strategy_funcs.keys()) if strategy_funcs else list(self.price_data.keys())
 
         if not symbols:
             self.logger.error("Keine Daten für Backtest verfügbar")
@@ -434,8 +513,30 @@ class Backtester:
                     # PnL = Margin * Leverage * Price Change
                     pnl = pos['margin'] * leverage * price_change_pct
 
-                    # Stop-Loss / Take-Profit
-                    if price_change_pct <= -self.stop_loss_pct or price_change_pct >= self.take_profit_pct:
+                    # Stop-Loss / Take-Profit — bevorzugt die vom Signal
+                    # gelieferten Werte, sonst die globalen Prozentgrenzen.
+                    sl_pct = pos.get('sl_pct') or self.stop_loss_pct
+                    tp_pct = pos.get('tp_pct') or self.take_profit_pct
+                    hit_stop = price_change_pct <= -sl_pct or price_change_pct >= tp_pct
+
+                    # 'close'-Signal der Strategie. Der Docstring versprach das
+                    # seit jeher, verarbeitet wurde bisher nur long/short — für
+                    # die Spot-Semantik "short = verkauf was du hast" zwingend.
+                    strat = func_for(symbol)
+                    if not hit_stop and strat is not None:
+                        df_sym = self.price_data.get(symbol)
+                        if df_sym is not None:
+                            idx_close = df_sym[df_sym['timestamp'] == ts].index
+                            if len(idx_close) > 0:
+                                sig = self._normalize_signal(strat(df_sym, idx_close[0]))
+                                if sig and (
+                                    sig['action'] == 'close'
+                                    or (sig['action'] == 'short' and pos['side'] == 'long')
+                                    or (sig['action'] == 'long' and pos['side'] == 'short')
+                                ):
+                                    hit_stop = True
+
+                    if hit_stop:
                         # Position schließen
                         fees = pos['margin'] * leverage * current_price / pos['entry_price'] * self.taker_fee
                         net_pnl = pnl - fees
@@ -471,27 +572,43 @@ class Backtester:
                     if len(positions) >= self.max_positions:
                         continue  # Zu viele offene Positionen
 
+                    strat = func_for(symbol)
+                    if strat is None:
+                        continue
+
                     df = self.price_data[symbol]
                     idx = df[df['timestamp'] == ts].index
                     if len(idx) > 0:
-                        signal = strategy_func(df, idx[0])
+                        signal = self._normalize_signal(strat(df, idx[0]))
 
-                        if signal in ['long', 'short']:
-                            # Margin berechnen (max 10% des Kapitals)
+                        if signal and signal['action'] in ('long', 'short'):
+                            side = signal['action']
+
+                            # Margin berechnen (max max_position_pct des Kapitals)
                             margin = min(capital * self.max_position_pct, capital * 0.5)
 
-                            if margin < 100:  # Min $100 Margin
+                            if margin < self.min_margin:
                                 continue
+
+                            # Signal-eigene Stops als Prozentabstand vom Entry
+                            sl_pct = None
+                            tp_pct = None
+                            if signal.get('stop_loss'):
+                                sl_pct = abs(current_price - signal['stop_loss']) / current_price
+                            if signal.get('take_profit'):
+                                tp_pct = abs(signal['take_profit'] - current_price) / current_price
 
                             # Entry-Fees
                             fees = margin * leverage * self.taker_fee
                             capital -= (margin + fees)  # Margin + Fees abziehen
 
                             positions[symbol] = {
-                                'side': signal,
+                                'side': side,
                                 'entry_price': current_price,
                                 'margin': margin,
-                                'entry_time': ts
+                                'entry_time': ts,
+                                'sl_pct': sl_pct,
+                                'tp_pct': tp_pct,
                             }
 
             # Equity-Curve aktualisieren
@@ -523,7 +640,11 @@ class Backtester:
                 capital += pos['margin'] + pnl - fees
 
         # Metriken berechnen
-        return self._calculate_metrics(strategy_name, trades, equity_curve, capital, symbols)
+        result = self._calculate_metrics(strategy_name, trades, equity_curve, capital, symbols)
+        if result is not None:
+            result.data_source = self.data_source
+            result.timeframe = self.timeframe
+        return result
 
     def _calculate_metrics(self, strategy_name: str, trades: List[BacktestTrade],
                           equity_curve: List[tuple], final_capital: float,
@@ -669,6 +790,10 @@ class Backtester:
         print("\n" + "="*60)
         print(f"BACKTEST ERGEBNIS: {result.strategy_name}")
         print("="*60)
+        if result.data_source == "simulated":
+            print("!!! SYNTHETISCHE DATEN (Random Walk) - NICHT AUSSAGEKRAEFTIG !!!")
+            print("-"*60)
+        print(f"Datenquelle: {result.data_source} | Timeframe: {result.timeframe}")
         print(f"Zeitraum: {result.start_date.strftime('%Y-%m-%d')} bis {result.end_date.strftime('%Y-%m-%d')}")
         print(f"Startkapital: ${result.initial_capital:,.2f}")
         print(f"Endkapital: ${result.final_capital:,.2f}")

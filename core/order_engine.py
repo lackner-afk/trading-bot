@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Callable
 from enum import Enum
 
+from core.execution_base import BaseOrderEngine
+
 
 class OrderType(Enum):
     """Order-Typen"""
@@ -68,7 +70,7 @@ class ExecutionResult:
     latency_ms: int
 
 
-class OrderEngine:
+class OrderEngine(BaseOrderEngine):
     """
     Simulierte Order-Execution mit realistischen Marktbedingungen
     """
@@ -340,9 +342,13 @@ class OrderEngine:
             return True
         return False
 
-    def cancel_all_orders(self, symbol: str = None) -> int:
+    async def cancel_all_orders(self, symbol: str = None) -> int:
         """
         Storniert alle pending Orders
+
+        async, damit Paper- und Live-Engine dieselbe Signatur haben — vorher
+        war diese hier sync und die Live-Variante eine Coroutine, was jeden
+        gemeinsamen Aufrufer gebrochen hätte.
 
         Args:
             symbol: Optional - nur Orders für dieses Symbol
@@ -357,8 +363,13 @@ class OrderEngine:
                 del self.pending_orders[order_id]
                 cancelled += 1
 
-        self.logger.info(f"{cancelled} Orders storniert")
+        if cancelled:
+            self.logger.info(f"{cancelled} Orders storniert")
         return cancelled
+
+    async def close(self):
+        """Kein Verbindungsabbau nötig — Gegenstück zu LiveOrderEngine.close()."""
+        return None
 
     async def _call_on_fill(self, result: ExecutionResult):
         """Ruft Fill-Callback auf"""
