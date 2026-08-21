@@ -116,7 +116,9 @@ class KrakenFeed:
         self.candle_history.setdefault(symbol, {})
         ccxt_symbol = self._to_ccxt[symbol]
         try:
-            ohlcv = await self.exchange.fetch_ohlcv(ccxt_symbol, timeframe, limit=100)
+            # 300 Kerzen, damit der 200er-EMA-Trendfilter der ConfluenceStrategy
+            # echte 250 Kerzen bekommt (Kraken liefert max. 720)
+            ohlcv = await self.exchange.fetch_ohlcv(ccxt_symbol, timeframe, limit=300)
             df = self._ohlcv_to_df(ohlcv)
             df = self._calculate_indicators(df)
             self.candle_history[symbol][timeframe] = df

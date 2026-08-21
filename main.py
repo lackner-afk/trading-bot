@@ -450,6 +450,30 @@ class TradingBot:
                 self.logger.error(f"Fehler im ML-Loop: {e}")
                 await asyncio.sleep(60)
 
+
+    @staticmethod
+    def _completed_candles(candles, timeframe_minutes: int = 5):
+        """
+        Schneidet die letzte, noch laufende Kerze ab.
+
+        Die Faktoren (Volumen-Ratio, RSI(2), Breakout) sind auf abgeschlossene
+        Kerzen kalibriert — eine halb gefüllte Kerze liefert systematisch
+        verzerrte Werte (z.B. Volumen 0.0x) und drückt den Confluence-Score.
+        """
+        if candles is None or len(candles) == 0:
+            return candles
+        try:
+            last_ts = candles['timestamp'].iloc[-1]
+            if hasattr(last_ts, 'to_pydatetime'):
+                last_ts = last_ts.to_pydatetime()
+            if last_ts.tzinfo is not None:
+                last_ts = last_ts.replace(tzinfo=None)
+            if datetime.utcnow() < last_ts + timedelta(minutes=timeframe_minutes):
+                return candles.iloc[:-1]
+        except Exception:
+            pass
+        return candles
+
     async def _confluence_loop(self):
         """Neue Multi-Factor Confluence Strategie Loop (Phase 1+ der Überarbeitung)"""
         if not self.use_confluence_strategy or self.confluence_strategy is None:
@@ -471,7 +495,8 @@ class TradingBot:
                 # Hole aktuelle empfohlene Assets vom UniverseManager
                 all_candles = {}
                 for symbol in self.momentum.pairs:  # vorerst noch die alten Pairs als Basis
-                    candles = self.crypto_feed.get_candles(symbol, '5m', n=250)  # 250 Kerzen für 200er-EMA-Trendfilter
+                    candles = self._completed_candles(
+                        self.crypto_feed.get_candles(symbol, '5m', n=251))  # 250 fertige Kerzen (200er-EMA)
                     if candles is not None:
                         all_candles[symbol] = candles
 
@@ -510,7 +535,8 @@ class TradingBot:
                     if blocked and datetime.now() < blocked:
                         continue
 
-                    candles = self.crypto_feed.get_candles(symbol, '5m', n=250)  # 250 Kerzen für 200er-EMA-Trendfilter
+                    candles = self._completed_candles(
+                        self.crypto_feed.get_candles(symbol, '5m', n=251))  # 250 fertige Kerzen (200er-EMA)
                     price = self.crypto_feed.get_price(symbol)
 
                     if candles is None or price is None:
