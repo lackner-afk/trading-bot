@@ -46,7 +46,18 @@ class SignalAggregator:
         # blockierte jedes Signal (max. erreichbarer Score ist ~1.0).
         self.min_confluence = self.config.get("min_confluence_score", 0.65)
         self.base_leverage = self.config.get("base_leverage", 8)
-        self.min_technical_factors = self.config.get("min_technical_factors", 1)  # lowered for test (more trades)
+        self.min_technical_factors = self.config.get("min_technical_factors", 2)
+
+        # TP/SL-Profil (ATR-verankert): Mean-Reversion-Charakter — nahes Ziel,
+        # weiter Stop. Kalibriert im 30d-Backtest (5/7); zu kleine Multiplikatoren
+        # scheitern an den Fees, siehe Kommentar in settings.yaml.
+        self.tp_atr_multiplier = self.config.get("tp_atr_multiplier", 5.0)
+        self.sl_atr_multiplier = self.config.get("sl_atr_multiplier", 7.0)
+        self.min_tp_pct = self.config.get("min_tp_pct", 0.0035)
+        self.min_sl_pct = self.config.get("min_sl_pct", 0.0030)
+
+        # 200-EMA-Trendfilter: Signale gegen den uebergeordneten Trend verwerfen
+        self.align_with_trend = self.config.get("align_with_trend", True)
 
         # Base weights (will be adjusted by regime)
         self.base_weights = self.config.get("factor_weights", {
@@ -73,7 +84,7 @@ class SignalAggregator:
             self.weights = adjusted_weights
 
         # Categorize factors
-        tech_results = [f for f in factor_results if any(x in f.name for x in ["trend", "momentum", "breakout", "volume", "volatility", "technical"])]
+        tech_results = [f for f in factor_results if any(x in f.name for x in ["trend", "momentum", "breakout", "volume", "volatility", "reversion", "technical"])]
         sentiment_results = [f for f in factor_results if "sentiment" in f.name or f.name == "sentiment"]
         macro_results = [f for f in factor_results if any(x in f.name for x in ["macro", "news", "cpi", "event", "macro_news_filter"])]
 
@@ -104,15 +115,35 @@ class SignalAggregator:
             print(f"[AGGREGATOR REJECT] {symbol} | Not enough technical factors: {len(tech_results)} < {self.min_technical_factors}")
             return None
 
+        # Trend-Alignment-Veto: keine Counter-Trend-Trades gegen die lange EMA
+        # (klassischer 200-EMA-Filter — Shorts im Aufwärtstrend waren im Backtest
+        # der größte einzelne Verlustbringer). trend_bias kommt aus der Strategie.
+        trend_bias = (regime_characteristics or {}).get("trend_bias")
+        if self.align_with_trend and trend_bias and direction != trend_bias:
+            print(f"[AGGREGATOR REJECT] {symbol} | {direction} gegen Trend-Bias {trend_bias} (200-EMA-Filter)")
+            return None
+
         # total_score liegt bereits auf der 0-1-Skala (gewichtetes Mittel der Faktoren)
         confidence = min(total_score, 1.0)
 
         # Dynamic leverage based on confluence + regime + macro events
         leverage = self._calculate_leverage(confidence, regime) * macro_risk_multiplier
 
-        # Simple but reasonable TP/SL (will be improved with ATR later)
-        tp_pct = 0.016 + (confidence * 0.012)
-        sl_pct = 0.008 + (confidence * 0.005)
+        # TP/SL ATR-verankert im Mean-Reversion-Profil (nahes Ziel, weiter Stop).
+        # Hintergrund: das alte 2:1-Verhältnis (TP ~2.4%, SL ~1.15%) deckelt die
+        # Win Rate mathematisch bei ~33%; hohe Trefferquote braucht nahe Ziele.
+        atr_pct = None
+        vol_factor = next((f for f in factor_results if f.name == "volatility_filter"), None)
+        if vol_factor and vol_factor.metadata:
+            atr_pct = vol_factor.metadata.get("atr_pct")
+
+        if atr_pct:
+            tp_pct = max(self.tp_atr_multiplier * atr_pct, self.min_tp_pct)
+            sl_pct = max(self.sl_atr_multiplier * atr_pct, self.min_sl_pct)
+        else:
+            # Fallback ohne ATR: symmetrisches Profil statt 2:1
+            tp_pct = 0.006 + (confidence * 0.004)
+            sl_pct = 0.006 + (confidence * 0.004)
 
         if direction == "long":
             take_profit = current_price * (1 + tp_pct)
@@ -173,15 +204,11 @@ class SignalAggregator:
             weights["macro_news"] = 0.35
 
         elif regime_name == "low_vol_chop":
-            # Aggressive Test-Mode (A)
-            weights["technical"] = 0.35
-            weights["sentiment"] = 0.50
-            weights["macro_news"] = 0.15
-
-            # --- Realistic Production Alternative (empfohlen für normale Märkte) ---
-            # weights["technical"] = 0.48
-            # weights["sentiment"] = 0.35
-            # weights["macro_news"] = 0.17
+            # Production Mode: Technik führt (Mean-Reversion-Setups), Sentiment stützt.
+            # Der alte Test-Mode (0.35/0.50/0.15) ließ Fear&Greed die Richtung diktieren.
+            weights["technical"] = 0.48
+            weights["sentiment"] = 0.35
+            weights["macro_news"] = 0.17
 
         elif regime_name == "event_driven":
             weights["technical"] = 0.40

@@ -80,6 +80,7 @@ class ConfluenceStrategy:
             VolatilityFilter,
             BreakoutFactor,
             VolumeConfirmationFactor,
+            MeanReversionFactor,
         )
 
         self.add_factor(MultiTimeframeTrendFactor())
@@ -87,6 +88,7 @@ class ConfluenceStrategy:
         self.add_factor(VolatilityFilter())
         self.add_factor(BreakoutFactor())
         self.add_factor(VolumeConfirmationFactor())
+        self.add_factor(MeanReversionFactor())
 
         if include_macro:
             from .factors.macro_news import MacroNewsFilter
@@ -108,6 +110,12 @@ class ConfluenceStrategy:
         # 1. Detect current regime
         regime = self.regime_detector.detect(symbol, candles)
         self._last_regime = regime
+
+        # Übergeordneter Trend-Bias (Preis vs. lange EMA, Span an Datenlänge gedeckelt).
+        # Wird vom Aggregator als 200-EMA-Filter genutzt: keine Counter-Trend-Trades.
+        span = min(200, len(candles) - 1)
+        trend_ema = candles['close'].ewm(span=span, adjust=False).mean().iloc[-1]
+        regime.characteristics["trend_bias"] = "long" if current_price > trend_ema else "short"
 
         # 2. Get factor results
         factor_results = []

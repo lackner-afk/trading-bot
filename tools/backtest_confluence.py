@@ -18,6 +18,8 @@ import pandas as pd
 import requests
 import ccxt
 import yaml
+import os
+import pickle
 
 sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
 
@@ -28,19 +30,19 @@ from strategies.factors.sentiment import SentimentFactor
 from strategies.factors.macro_news import MacroNewsFilter
 from strategies.factors.technical import (
     MultiTimeframeTrendFactor, MomentumFactor, VolatilityFilter,
-    BreakoutFactor, VolumeConfirmationFactor,
+    BreakoutFactor, VolumeConfirmationFactor, MeanReversionFactor,
 )
 
 DAYS = 30
 SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
-WINDOW = 80
-CONFIDENCE_GATE = 0.55
+WINDOW = 250          # wie live: n=250 fuer 200er-EMA
 TAKER_FEE = 0.0006
 START_CAPITAL = 10_000.0
 MAX_CONCURRENT = 2
 MARGIN_PCT = 0.20
 MAX_DAILY_DD = 0.10
-THRESHOLDS = [0.55, 0.60, 0.63, 0.66, 0.68, 0.70, 0.72]
+TPSL_PROFILES = [(4, 4), (6, 6), (8, 8), (6, 5), (8, 6), (5, 7)]
+COOLDOWNS = [0, 6]  # Kerzen Sperre pro Symbol nach Verlust-Exit
 
 agg_mod.print = lambda *a, **k: None
 cs_mod.print = lambda *a, **k: None
@@ -96,6 +98,7 @@ def build_signal_grid(base_cfg, candles, fng_hist, n):
     strat.add_factor(VolatilityFilter())
     strat.add_factor(BreakoutFactor())
     strat.add_factor(VolumeConfirmationFactor())
+    strat.add_factor(MeanReversionFactor())
     strat.add_factor(MacroNewsFilter())
     sent = HistoricalSentimentFactor(fng_hist)
     strat.add_factor(sent)
@@ -113,10 +116,12 @@ def build_signal_grid(base_cfg, candles, fng_hist, n):
             if strat._last_regime:
                 regimes[strat._last_regime.name] += 1
             if signal is not None:
+                vf = signal.factor_breakdown.get('volatility_filter')
+                atr = vf.metadata.get('atr_pct') if vf and vf.metadata else None
                 grid[(i, sym)] = {
                     'score': signal.confluence_score, 'conf': signal.confidence,
-                    'dir': signal.direction, 'tp': signal.take_profit,
-                    'sl': signal.stop_loss, 'lev': signal.suggested_leverage,
+                    'dir': signal.direction, 'lev': signal.suggested_leverage,
+                    'atr': atr,
                 }
         if (i - WINDOW) % 2000 == 0:
             print(f"[Pass 1] {i}/{n} | Signale {len(grid)} | {_time.time()-t0:.0f}s",
@@ -124,7 +129,7 @@ def build_signal_grid(base_cfg, candles, fng_hist, n):
     return grid, regimes
 
 
-def simulate(threshold, candles, grid, n):
+def simulate(threshold, tp_mult, sl_mult, cooldown, candles, grid, n):
     """Pass 2: Portfolio-Simulation über das Signal-Raster."""
     balance = START_CAPITAL
     positions = {}
@@ -132,6 +137,7 @@ def simulate(threshold, candles, grid, n):
     equity_curve = []
     day_start_equity = {}
     trading_paused_day = None
+    blocked_until = {}   # symbol -> Kerzen-Index, bis zu dem nach Verlust pausiert wird
 
     for i in range(WINDOW, n):
         ts = candles[SYMBOLS[0]]['timestamp'].iloc[i]
@@ -170,6 +176,8 @@ def simulate(threshold, candles, grid, n):
                 balance += pos['margin'] + pnl
                 trades.append({'symbol': sym, 'side': pos['side'], 'pnl': pnl, 'exit': hit})
                 del positions[sym]
+                if pnl < 0 and cooldown > 0:
+                    blocked_until[sym] = i + cooldown
 
         # Entries
         if trading_paused_day == day:
@@ -177,17 +185,26 @@ def simulate(threshold, candles, grid, n):
         for sym in SYMBOLS:
             if sym in positions or len(positions) >= MAX_CONCURRENT:
                 continue
+            if blocked_until.get(sym, -1) > i:
+                continue
             sig = grid.get((i, sym))
-            if sig is None or sig['score'] < threshold or sig['conf'] < CONFIDENCE_GATE:
+            if sig is None or sig['score'] < threshold:
                 continue
             price = candles[sym]['close'].iloc[i]
+            # TP/SL wie im Aggregator: ATR-verankert mit Fee-Floors
+            atr = sig['atr'] or 0.0
+            tp_pct = max(tp_mult * atr, 0.0035)
+            sl_pct = max(sl_mult * atr, 0.0030)
+            d = 1 if sig['dir'] == 'long' else -1
+            tp = price * (1 + d * tp_pct)
+            sl = price * (1 - d * sl_pct)
             margin = equity * MARGIN_PCT
             margin = max(max(10.0, equity * 0.15), min(equity * 0.25, margin))
             if margin > balance or balance < 20:
                 continue
             balance -= margin
             positions[sym] = {'side': sig['dir'], 'entry': price, 'margin': margin,
-                              'lev': sig['lev'], 'tp': sig['tp'], 'sl': sig['sl']}
+                              'lev': sig['lev'], 'tp': tp, 'sl': sl}
 
     for sym, pos in positions.items():
         price = candles[sym]['close'].iloc[n - 1]
@@ -208,7 +225,7 @@ def simulate(threshold, candles, grid, n):
     gross_loss = abs(sum(t['pnl'] for t in losses))
 
     return {
-        'threshold': threshold,
+        'threshold': threshold, 'tp_mult': tp_mult, 'sl_mult': sl_mult, 'cooldown': cooldown,
         'final': balance,
         'return_pct': (balance - START_CAPITAL) / START_CAPITAL,
         'sharpe': float(sharpe),
@@ -241,24 +258,36 @@ def main():
           for s in SYMBOLS]
     buy_hold = sum(bh) / len(bh)
 
-    print("Pass 1: Signal-Raster aufbauen...", flush=True)
-    grid, regimes = build_signal_grid(base_cfg, candles, fng, n)
+    cache_path = '/tmp/confluence_grid.pkl'
+    if os.environ.get('GRID_CACHE') == '1' and os.path.exists(cache_path):
+        print("Pass 1: lade Grid aus Cache...", flush=True)
+        with open(cache_path, 'rb') as fh:
+            grid, regimes, candles, n = pickle.load(fh)
+    else:
+        print("Pass 1: Signal-Raster aufbauen...", flush=True)
+        grid, regimes = build_signal_grid(base_cfg, candles, fng, n)
+        with open(cache_path, 'wb') as fh:
+            pickle.dump((grid, regimes, candles, n), fh)
     scores = pd.Series([g['score'] for g in grid.values()])
     print(f"Signale mit Richtung: {len(grid)} von {(n - WINDOW) * len(SYMBOLS)} Bewertungen", flush=True)
     print(f"Score-Verteilung: mean={scores.mean():.3f} p50={scores.quantile(.5):.3f} "
           f"p75={scores.quantile(.75):.3f} p90={scores.quantile(.9):.3f} max={scores.max():.3f}", flush=True)
     print(f"Regime-Verteilung: {dict(regimes)}", flush=True)
 
-    results = [simulate(th, candles, grid, n) for th in THRESHOLDS]
+    # Schwellen aus der beobachteten Verteilung (Perzentile) statt fixer Liste
+    ths = sorted({round(float(scores.quantile(q)), 3) for q in (0.8, 0.9, 0.95, 0.97)})
+    print(f"Getestete Schwellen (Perzentile der Verteilung): {ths}", flush=True)
+    results = [simulate(th, tp, sl, cd, candles, grid, n)
+               for th in ths for (tp, sl) in TPSL_PROFILES for cd in COOLDOWNS]
 
     print("\n" + "=" * 80)
     print(f"SCHWELLWERT-SWEEP  |  {DAYS} Tage 5m  |  Buy&Hold (Ø 3 Coins): {buy_hold:+.1%}")
     print("=" * 80)
-    print(f"{'Schwelle':>8} {'Return':>9} {'Trades':>7} {'WinRate':>8} {'PF':>6} {'MaxDD':>7} {'Sharpe':>8} {'L/S':>9} {'Symbole'}")
-    for r in results:
-        print(f"{r['threshold']:>8} {r['return_pct']:>8.1%} {r['n_trades']:>7} {r['win_rate']:>7.1%} "
+    print(f"{'Schwelle':>8} {'TPxATR':>7} {'SLxATR':>7} {'CD':>3} {'Return':>8} {'Trades':>7} {'WinRate':>8} {'PF':>6} {'MaxDD':>7} {'Sharpe':>8} {'L/S':>9}")
+    for r in sorted(results, key=lambda x: (-x['win_rate'])):
+        print(f"{r['threshold']:>8} {r['tp_mult']:>7} {r['sl_mult']:>7} {r['cooldown']:>3} {r['return_pct']:>7.1%} {r['n_trades']:>7} {r['win_rate']:>7.1%} "
               f"{r['profit_factor']:>6.2f} {r['max_dd']:>6.1%} {r['sharpe']:>8.2f} "
-              f"{r['longs']:>4}/{r['shorts']:<4} {r['by_symbol']}")
+              f"{r['longs']:>4}/{r['shorts']}")
 
     with open('/tmp/confluence_sweep_result.json', 'w') as f:
         json.dump(results, f, indent=1, default=str)

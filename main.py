@@ -12,7 +12,7 @@ import asyncio
 import signal
 import logging
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -191,6 +191,9 @@ class TradingBot:
 
         # Phase 6: Cache last confluence factor breakdown per symbol (for later attribution on close)
         self._last_confluence_breakdowns: Dict[str, dict] = {}
+
+        # Verlust-Cooldown pro Symbol (Confluence): symbol -> gesperrt bis
+        self._confluence_loss_block: Dict[str, datetime] = {}
 
         # Reporter
         self.reporter = Reporter(config=self.config.get('notifications', {}))
@@ -454,7 +457,11 @@ class TradingBot:
 
         self.logger.info("ConfluenceStrategy-Loop gestartet (neues Multi-Factor System)")
 
-        interval = self.config.get('strategies', {}).get('confluence', {}).get('interval_seconds', 45)
+        confluence_cfg = self.config.get('strategies', {}).get('confluence', {})
+        interval = confluence_cfg.get('interval_seconds', 45)
+        # Confidence-Gate aus der Config (confidence == confluence_score auf 0-1-Skala);
+        # muss zur kalibrierten min_confluence_score passen, sonst filtert es verdeckt.
+        min_conf = confluence_cfg.get('min_signal_confidence', 0.55)
 
         while self.running:
             try:
@@ -464,7 +471,7 @@ class TradingBot:
                 # Hole aktuelle empfohlene Assets vom UniverseManager
                 all_candles = {}
                 for symbol in self.momentum.pairs:  # vorerst noch die alten Pairs als Basis
-                    candles = self.crypto_feed.get_candles(symbol, '5m', n=80)
+                    candles = self.crypto_feed.get_candles(symbol, '5m', n=250)  # 250 Kerzen für 200er-EMA-Trendfilter
                     if candles is not None:
                         all_candles[symbol] = candles
 
@@ -498,7 +505,12 @@ class TradingBot:
                 regime_name = None
 
                 for symbol in symbols_to_analyze:
-                    candles = self.crypto_feed.get_candles(symbol, '5m', n=80)
+                    # Verlust-Cooldown: Symbol nach Verlust-Trade vorübergehend auslassen
+                    blocked = self._confluence_loss_block.get(symbol)
+                    if blocked and datetime.now() < blocked:
+                        continue
+
+                    candles = self.crypto_feed.get_candles(symbol, '5m', n=250)  # 250 Kerzen für 200er-EMA-Trendfilter
                     price = self.crypto_feed.get_price(symbol)
 
                     if candles is None or price is None:
@@ -521,13 +533,13 @@ class TradingBot:
                         best_symbol = symbol
 
                     if signal:
-                        if signal.confidence < 0.55:
+                        if signal.confidence < min_conf:
                             # Visible rejection reason during test phase
                             self.logger.info(
                                 f"[CONFLUENCE REJECT] {symbol} @ {price:.2f} | "
                                 f"Conf {signal.confidence:.0%} | Score {score:.2f} | Regime {regime_name or 'unknown'}"
                             )
-                    if signal and signal.confidence >= 0.55:
+                    if signal and signal.confidence >= min_conf:
                         # Phase 6: Rich factor attribution logging + console
                         regime_name = None
                         cd = getattr(signal, '_confluence_data', None) or {}
@@ -990,6 +1002,15 @@ class TradingBot:
                 breakdown = self._last_confluence_breakdowns.pop(trade.symbol, None)
                 if breakdown:
                     self._update_factor_attribution(trade, breakdown)
+
+                # Verlust-Cooldown: Symbol nach Verlust-Exit pausieren, damit das
+                # (oft noch aktive) Signal nicht sofort die nächste Verlustkette startet.
+                if trade.pnl < 0:
+                    cooldown_s = self.config.get('strategies', {}).get('confluence', {}) \
+                                            .get('loss_cooldown_seconds', 1800)
+                    self._confluence_loss_block[symbol] = datetime.now() + timedelta(seconds=cooldown_s)
+                    self.logger.info(f"[CONFLUENCE COOLDOWN] {symbol} nach Verlust pausiert "
+                                     f"bis {self._confluence_loss_block[symbol]:%H:%M:%S}")
 
     async def _telegram_hourly_loop(self):
         """Sendet stündlichen Telegram-Report"""

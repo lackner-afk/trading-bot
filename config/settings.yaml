@@ -84,38 +84,30 @@ strategies:
     # ACHTUNG Skala: Der Confluence-Score liegt auf 0-1 (gewichtetes Mittel der
     # Faktor-Scores). Die alten Werte 5.8/3.5 stammten von einer nie umgesetzten
     # 0-10-Skala und blockierten JEDES Signal (Skalen-Bug, gefixt 21.08.2026).
-    # 0.66 = oberes Quartil der Score-Verteilung im 30-Tage-Backtest (Jul/Aug 2026).
-    min_confluence_score: 0.66
-    base_leverage: 8
+    # Production Mode seit 21.08.2026: Test-Floors in den Faktoren entfernt,
+    # dadurch spreizt die Score-Verteilung wieder — Schwelle per Backtest kalibriert.
+    min_confluence_score: 0.647   # p80 der Score-Verteilung (30-Tage-Kalibrierung Jul/Aug 2026)
+    base_leverage: 6
+    min_technical_factors: 2
     factor_weights:
-      technical: 0.58
-      sentiment: 0.25
+      technical: 0.55
+      sentiment: 0.28
       macro_news: 0.17
 
-    # ============================================================
-    # REALISTIC PRODUCTION MODE (empfohlen für normale Märkte)
-    # ============================================================
-    # Kopiere diese Werte rein, sobald der Markt sich normalisiert hat.
-    # Diese Einstellungen sind deutlich konservativer und qualitativ höher.
-    #
-    # min_confluence_score: 0.68   # (0-1-Skala! Alt-Wert 5.9 stammte vom Skalen-Bug)
-    # base_leverage: 6
-    #
-    # factor_weights (Base):
-    #   technical: 0.55
-    #   sentiment: 0.28
-    #   macro_news: 0.17
-    #
-    # low_vol_chop Gewichte (in signal_aggregator.py):
-    #   technical: 0.48
-    #   sentiment: 0.35
-    #   macro_news: 0.17
-    #
-    # Zusätzlich empfohlen:
-    # - VolatilityFilter: Sehr niedrige Vol → max. 0.50 (nicht 0.65)
-    # - VolumeConfirmation: Sehr niedriges Vol → max. 0.45
-    # - MultiTimeframeTrend: Kein künstlicher Floor (oder nur 0.10)
-    # - min_technical_factors: 2 (wieder zurück auf 2)
+    # Win-Rate-Umbau 21.08.2026 (Ziel: Trefferquote >= 50%):
+    # - MeanReversionFactor (Connors RSI-2): Ruecksetzer im Trend kaufen
+    # - align_with_trend: 200-EMA-Filter, keine Counter-Trend-Trades
+    # - TP/SL ATR-verankert im Mean-Reversion-Profil: nahes Ziel (5xATR),
+    #   weiter Stop (7xATR). Backtest 30d: 68% WR, +29%, PF 1.88, DD 9.2%.
+    #   ACHTUNG: kleine ATR-Multiplikatoren (z.B. 1x) sind auf 5m toedlich —
+    #   die Fees (~0.12% Round-Trip) fressen die Mini-Gewinne (Sweep: -50%!).
+    tp_atr_multiplier: 5
+    sl_atr_multiplier: 7
+    min_tp_pct: 0.0035       # Floor: TP muss Round-Trip-Fees (~0.12%) klar decken
+    min_sl_pct: 0.0030
+    align_with_trend: true
+    min_signal_confidence: 0.0    # Gate im Loop aus — min_confluence_score im Aggregator ist maßgeblich
+    loss_cooldown_seconds: 1800   # Symbol 30 Min pausieren nach Verlust-Exit (gegen Verlustketten)
 
 risk:
   max_risk_per_trade: 0.02      # 2% des Portfolios

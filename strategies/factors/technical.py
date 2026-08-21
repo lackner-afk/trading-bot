@@ -50,14 +50,10 @@ class MultiTimeframeTrendFactor(Factor):
         # Score based on trend strength (capped)
         score = min(strength * 8, 1.0)  # Strong trend → high score
 
-        # Aggressive test mode (A): give weak trends a small floor in low vol chop
-        if score < 0.15:
-            score = 0.15
-            reason = f"Trend {direction.upper()}: EMA{self.ema_fast}/{self.ema_slow} spread {strength:.2%} (floored for test)"
-        else:
-            reason = f"Trend {direction.upper()}: EMA{self.ema_fast}/{self.ema_slow} spread {strength:.2%}"
-
-        # Realistic Production: Remove or reduce the floor significantly (e.g. only 0.08–0.10)
+        # Production Mode: kein künstlicher Floor mehr — schwache Trends sollen
+        # schwache Scores liefern, damit die Score-Verteilung selektiv bleibt
+        # (der Test-Floor 0.15 hatte die Verteilung auf p50≈0.65 zusammengedrückt).
+        reason = f"Trend {direction.upper()}: EMA{self.ema_fast}/{self.ema_slow} spread {strength:.2%}"
 
         return FactorResult(
             name=self.name,
@@ -161,13 +157,9 @@ class VolatilityFilter(Factor):
         atr_pct = latest_atr / current_price
 
         if atr_pct < self.min_atr_pct:
-            # Test relaxation for low_vol_chop regimes (user wants more trades)
-            score = 0.65
-            reason = f"Very low volatility (ATR {atr_pct:.3%}) - relaxed for testing (more trades)"
-
-            # Realistic Production Alternative:
-            # score = 0.45
-            # reason = f"Very low volatility (ATR {atr_pct:.3%}) - reduced conviction (realistic)"
+            # Production Mode: sehr niedrige Volatilität drückt die Conviction deutlich
+            score = 0.45
+            reason = f"Very low volatility (ATR {atr_pct:.3%}) - reduced conviction"
         elif atr_pct > self.max_atr_pct:
             score = 0.4
             reason = f"Extremely high volatility (ATR {atr_pct:.2%}) - caution"
@@ -284,16 +276,16 @@ class VolumeConfirmationFactor(Factor):
         regime = kwargs.get("regime", "unknown")
 
         if regime in ["low_vol_chop", "ranging"]:
-            # In chop/range: low volume is normal (often compression before moves).
-            # We do not punish low volume. Very low volume can even be slightly positive.
+            # In chop/range: low volume is normal, wird aber nicht mehr belohnt
+            # (Production Mode — die Test-Werte 0.72/0.68 hatten jede Selektivität genommen).
             if volume_ratio < 0.4:
-                score = 0.72
-                reason = f"Very low volume in {regime} ({volume_ratio:.1f}x) – potential compression"
+                score = 0.45
+                reason = f"Very low volume in {regime} ({volume_ratio:.1f}x)"
             elif volume_ratio < 0.8:
-                score = 0.68
+                score = 0.55
                 reason = f"Below average volume in {regime} ({volume_ratio:.1f}x)"
             else:
-                score = min(0.65 + (volume_ratio - 0.8) * 0.35, 0.92)
+                score = min(0.60 + (volume_ratio - 0.8) * 0.35, 0.92)
                 reason = f"Volume in {regime} ({volume_ratio:.1f}x)"
 
         elif regime in ["trending", "high_vol_event"]:
@@ -333,4 +325,78 @@ class VolumeConfirmationFactor(Factor):
             direction=None,
             reason=reason,
             metadata={"volume_ratio": float(volume_ratio), "regime": regime}
+        )
+
+
+class MeanReversionFactor(Factor):
+    """
+    Kurzfrist-Mean-Reversion nach dem Connors-RSI(2)-Prinzip:
+    extrem überverkauft/überkauft auf sehr kurzem RSI, gehandelt NUR in
+    Richtung des übergeordneten Trends (Preis vs. lange EMA).
+
+    Referenz-Backtests (Aktien/BTC daily) zeigen 62-75% Win Rate, weil der
+    Einstieg antizyklisch im Rücksetzer erfolgt und das Ziel nah liegt.
+    Besonders wertvoll in ranging/low_vol_chop-Regimen, in denen reine
+    Momentum-Signale systematisch scheitern.
+    """
+
+    name = "mean_reversion"
+
+    def __init__(self, config: Dict = None):
+        super().__init__(config)
+        self.rsi_period = self.config.get("rsi_period", 2)
+        self.oversold = self.config.get("oversold", 10)
+        self.overbought = self.config.get("overbought", 90)
+        self.trend_ema_span = self.config.get("trend_ema_span", 200)
+
+    def calculate(self, symbol: str, candles: pd.DataFrame,
+                  current_price: float, **kwargs) -> Optional[FactorResult]:
+
+        if candles is None or len(candles) < 30:
+            return None
+
+        df = candles.copy()
+
+        delta = df['close'].diff()
+        gain = delta.where(delta > 0, 0.0).rolling(window=self.rsi_period).mean()
+        loss = (-delta.where(delta < 0, 0.0)).rolling(window=self.rsi_period).mean()
+        rs = gain / loss.replace(0, np.nan)
+        rsi_fast = (100 - (100 / (1 + rs))).fillna(100.0).iloc[-1]
+
+        # Übergeordneter Trend: Preis vs. lange EMA (Span an Datenlänge gedeckelt)
+        span = min(self.trend_ema_span, len(df) - 1)
+        trend_ema = df['close'].ewm(span=span, adjust=False).mean().iloc[-1]
+        uptrend = current_price > trend_ema
+
+        direction = None
+        score = 0.0
+
+        if rsi_fast <= self.oversold and uptrend:
+            direction = "long"
+            # Je extremer der Rücksetzer, desto höher der Score (0.75 - 1.0)
+            score = 0.75 + 0.25 * (self.oversold - rsi_fast) / self.oversold
+            reason = f"RSI({self.rsi_period})={rsi_fast:.0f} überverkauft im Aufwärtstrend → Rücksetzer-Long"
+        elif rsi_fast >= self.overbought and not uptrend:
+            direction = "short"
+            score = 0.75 + 0.25 * (rsi_fast - self.overbought) / (100 - self.overbought)
+            reason = f"RSI({self.rsi_period})={rsi_fast:.0f} überkauft im Abwärtstrend → Erholungs-Short"
+        else:
+            # Kein Extrem oder gegen den Trend → neutral, kein Richtungsvotum
+            return FactorResult(
+                name=self.name,
+                score=0.35,
+                confidence=0.5,
+                direction=None,
+                reason=f"RSI({self.rsi_period})={rsi_fast:.0f}, kein Setup ({'Auf' if uptrend else 'Ab'}wärtstrend)",
+                metadata={"rsi_fast": float(rsi_fast), "uptrend": bool(uptrend)}
+            )
+
+        return FactorResult(
+            name=self.name,
+            score=min(score, 1.0),
+            confidence=0.8,
+            direction=direction,
+            reason=reason,
+            metadata={"rsi_fast": float(rsi_fast), "uptrend": bool(uptrend),
+                      "trend_ema": float(trend_ema)}
         )
