@@ -81,12 +81,41 @@ strategies:
   confluence:
     enabled: true
     interval_seconds: 45
-    min_confluence_score: 3.5   # Aggressive Test-Mode (A) - stark gesenkt für mehr Trades in low_vol_chop
+    # ACHTUNG Skala: Der Confluence-Score liegt auf 0-1 (gewichtetes Mittel der
+    # Faktor-Scores). Die alten Werte 5.8/3.5 stammten von einer nie umgesetzten
+    # 0-10-Skala und blockierten JEDES Signal (Skalen-Bug, gefixt 21.08.2026).
+    # 0.66 = oberes Quartil der Score-Verteilung im 30-Tage-Backtest (Jul/Aug 2026).
+    min_confluence_score: 0.66
     base_leverage: 8
     factor_weights:
       technical: 0.58
       sentiment: 0.25
       macro_news: 0.17
+
+    # ============================================================
+    # REALISTIC PRODUCTION MODE (empfohlen für normale Märkte)
+    # ============================================================
+    # Kopiere diese Werte rein, sobald der Markt sich normalisiert hat.
+    # Diese Einstellungen sind deutlich konservativer und qualitativ höher.
+    #
+    # min_confluence_score: 0.68   # (0-1-Skala! Alt-Wert 5.9 stammte vom Skalen-Bug)
+    # base_leverage: 6
+    #
+    # factor_weights (Base):
+    #   technical: 0.55
+    #   sentiment: 0.28
+    #   macro_news: 0.17
+    #
+    # low_vol_chop Gewichte (in signal_aggregator.py):
+    #   technical: 0.48
+    #   sentiment: 0.35
+    #   macro_news: 0.17
+    #
+    # Zusätzlich empfohlen:
+    # - VolatilityFilter: Sehr niedrige Vol → max. 0.50 (nicht 0.65)
+    # - VolumeConfirmation: Sehr niedriges Vol → max. 0.45
+    # - MultiTimeframeTrend: Kein künstlicher Floor (oder nur 0.10)
+    # - min_technical_factors: 2 (wieder zurück auf 2)
 
 risk:
   max_risk_per_trade: 0.02      # 2% des Portfolios

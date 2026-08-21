@@ -18,7 +18,7 @@ class TradeSignal:
     symbol: str
     direction: str                    # "long" or "short"
     confidence: float                 # 0.0 - 1.0 overall conviction
-    confluence_score: float           # 0.0 - 10.0 (or higher) total score
+    confluence_score: float           # 0.0 - 1.0 gewichteter Gesamt-Score
     suggested_leverage: float
     take_profit: float
     stop_loss: float
@@ -41,7 +41,10 @@ class SignalAggregator:
 
     def __init__(self, config: Dict = None):
         self.config = config or {}
-        self.min_confluence = self.config.get("min_confluence_score", 5.8)
+        # Skala 0-1: Faktoren liefern Scores in [0, 1], die Gewichte summieren auf 1.
+        # Der alte Default 5.8 stammte von einer nie umgesetzten 0-10-Skala und
+        # blockierte jedes Signal (max. erreichbarer Score ist ~1.0).
+        self.min_confluence = self.config.get("min_confluence_score", 0.65)
         self.base_leverage = self.config.get("base_leverage", 8)
         self.min_technical_factors = self.config.get("min_technical_factors", 1)  # lowered for test (more trades)
 
@@ -101,7 +104,8 @@ class SignalAggregator:
             print(f"[AGGREGATOR REJECT] {symbol} | Not enough technical factors: {len(tech_results)} < {self.min_technical_factors}")
             return None
 
-        confidence = min(total_score / 9.5, 1.0)
+        # total_score liegt bereits auf der 0-1-Skala (gewichtetes Mittel der Faktoren)
+        confidence = min(total_score, 1.0)
 
         # Dynamic leverage based on confluence + regime + macro events
         leverage = self._calculate_leverage(confidence, regime) * macro_risk_multiplier
@@ -118,8 +122,8 @@ class SignalAggregator:
             stop_loss = current_price * (1 + sl_pct)
 
         reason = (
-            f"Confluence {total_score:.1f}/10 | "
-            f"Tech {tech_score:.1f} | Sent {sent_score:.1f} | Macro {macro_score:.1f}"
+            f"Confluence {total_score:.2f}/1.0 | "
+            f"Tech {tech_score:.2f} | Sent {sent_score:.2f} | Macro {macro_score:.2f}"
         )
 
         return TradeSignal(
@@ -169,10 +173,15 @@ class SignalAggregator:
             weights["macro_news"] = 0.35
 
         elif regime_name == "low_vol_chop":
-            # Aggressive Test-Mode (A): heavily favor sentiment + macro, reduce technical penalty
+            # Aggressive Test-Mode (A)
             weights["technical"] = 0.35
             weights["sentiment"] = 0.50
             weights["macro_news"] = 0.15
+
+            # --- Realistic Production Alternative (empfohlen für normale Märkte) ---
+            # weights["technical"] = 0.48
+            # weights["sentiment"] = 0.35
+            # weights["macro_news"] = 0.17
 
         elif regime_name == "event_driven":
             weights["technical"] = 0.40
