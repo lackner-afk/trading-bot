@@ -982,11 +982,30 @@ class TradingBot:
             current_price = prices[symbol]
 
             # Richtige Strategie für Exit-Check wählen (Phase 5)
+            if position.market_type == 'confluence':
+                # Dedizierte Confluence-Exits: NUR die ATR-kalibrierten TP/SL aus dem
+                # Signal (5x/7x ATR). Kein Trailing-Stop — der Momentum-Fallback mit
+                # 0.5%-Trailing hat Gewinner vor dem Ziel gekappt und damit das im
+                # Backtest kalibrierte Profil (68% WR) zerstört.
+                sl = position.stop_loss
+                tp = position.take_profit
+                should_exit, reason = False, ''
+                if position.side == 'long':
+                    if sl and current_price <= sl:
+                        should_exit, reason = True, f"Stop-Loss erreicht ({current_price:.2f} <= {sl:.2f})"
+                    elif tp and current_price >= tp:
+                        should_exit, reason = True, f"Take-Profit erreicht ({current_price:.2f} >= {tp:.2f})"
+                else:
+                    if sl and current_price >= sl:
+                        should_exit, reason = True, f"Stop-Loss erreicht ({current_price:.2f} >= {sl:.2f})"
+                    elif tp and current_price <= tp:
+                        should_exit, reason = True, f"Take-Profit erreicht ({current_price:.2f} <= {tp:.2f})"
+
+                if should_exit:
+                    await self._close_position(symbol, current_price, reason)
+                continue
+
             if position.market_type == 'momentum':
-                strategy = self.momentum
-            elif position.market_type == 'confluence':
-                # Für Confluence-Positionen nutzen wir die Momentum-Exit-Logik als Fallback.
-                # Langfristig sollte hier eine dedizierte Exit-Logik der ConfluenceStrategy kommen.
                 strategy = self.momentum
             else:
                 strategy = self.scalper
