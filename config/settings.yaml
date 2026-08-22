@@ -132,8 +132,11 @@ notifications:
     enabled: true
     token: ${TELEGRAM_BOT_TOKEN}
     chat_id: ${TELEGRAM_CHAT_ID}
-    send_trade_alerts: true
+    send_trade_alerts: true       # Trade eröffnet / geschlossen — bleibt an
     send_hourly_report: true
+    report_interval_hours: 5      # Portfolio-Bericht alle 5h (war stündlich)
+    signal_messages: false        # "Why did I take this trade?"-Nachrichten aus
+    event_alerts: false           # Regime-Wechsel- und Macro-Event-Meldungen aus
 
 # ============================================================
 # PHASE 6: MONITORING & ATTRIBUTION (wird in Code gelesen)

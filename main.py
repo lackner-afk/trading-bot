@@ -599,8 +599,9 @@ class TradingBot:
                             self._check_and_alert_regime_change(regime_name, getattr(regime_obj, 'confidence', 0.0) if regime_obj else 0.0)
 
                         # Phase 6: Optional Telegram "Why did I take this trade?" message
-                        # (only if confluence is the source and telegram is configured)
-                        if self.reporter.telegram:
+                        # Default AUS — Trade-Alerts (Open/Close) reichen; per
+                        # notifications.telegram.signal_messages: true reaktivierbar.
+                        if self.reporter.telegram and self._telegram_config.get('signal_messages', False):
                             breakdown = cd.get('factor_breakdown', {}) if cd else {}
                             top_factor_names = [
                                 name.replace("_", " ").title()
@@ -871,8 +872,9 @@ class TradingBot:
             # Console
             self.reporter.print_warning(f"REGIME CHANGE: {old_regime} → {new_regime}")
 
-            # Telegram (sofort, nicht rate-limited — das ist wichtig)
-            if self.reporter.telegram:
+            # Telegram nur wenn Event-Alerts aktiviert sind (Default aus —
+            # Nici will nur Trade-Open/-Close + periodischen Bericht)
+            if self.reporter.telegram and self._telegram_config.get('event_alerts', False):
                 asyncio.create_task(self.reporter.telegram.send_message(msg))
 
     def _check_macro_event_alert(self):
@@ -916,7 +918,7 @@ class TradingBot:
                 f"Erwarte deutlich weniger oder kleinere Positionen in den nächsten Stunden."
             )
             self.reporter.print_warning(f"MACRO EVENT: {event_name}")
-            if self.reporter.telegram:
+            if self.reporter.telegram and self._telegram_config.get('event_alerts', False):
                 asyncio.create_task(self.reporter.telegram.send_message(msg))
 
         elif not currently_in and self._was_in_macro_event:
@@ -932,7 +934,7 @@ class TradingBot:
                 f"Risk-Multiplier zurück auf normal. Volles Exposure wieder möglich."
             )
             self.reporter.print_info(f"Macro Event vorbei: {last}")
-            if self.reporter.telegram:
+            if self.reporter.telegram and self._telegram_config.get('event_alerts', False):
                 asyncio.create_task(self.reporter.telegram.send_message(msg))
 
     def _update_factor_attribution(self, trade, factor_breakdown: Dict):
@@ -1058,8 +1060,9 @@ class TradingBot:
                                      f"bis {self._confluence_loss_block[symbol]:%H:%M:%S}")
 
     async def _telegram_hourly_loop(self):
-        """Sendet stündlichen Telegram-Report"""
-        await asyncio.sleep(3600)   # erste Sendung nach 1h
+        """Sendet periodischen Telegram-Report (Intervall konfigurierbar, Default 5h)"""
+        interval_s = int(self._telegram_config.get('report_interval_hours', 5) * 3600)
+        await asyncio.sleep(interval_s)   # erste Sendung nach einem vollen Intervall
         while self.running:
             try:
                 state = self.portfolio.get_state()
@@ -1074,7 +1077,7 @@ class TradingBot:
                 )
             except Exception as e:
                 self.logger.error(f"Telegram-Loop Fehler: {e}")
-            await asyncio.sleep(3600)
+            await asyncio.sleep(interval_s)
 
     async def _close_all_positions(self, reason: str):
         """Schließt alle Positionen"""
