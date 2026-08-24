@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>at.silvertoast.tradingbot</string>
+
+    <!-- caffeinate -i haelt den Mac wach, solange der Bot laeuft. Ohne das friert
+         macOS den Prozess im Idle ein: im Log vom 22./23.08. waren 70 Luecken von
+         ueber 15 Minuten, die laengste 60 Minuten - in dieser Zeit werden Stop-Loss
+         und Take-Profit nicht geprueft. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-i</string>
+        <string>/usr/bin/python3</string>
+        <string>main.py</string>
+    </array>
+
+    <!-- Muss gesetzt sein: der Bot laedt config/secrets.env und trades.db relativ. -->
+    <key>WorkingDirectory</key>
+    <string>/Users/nici/Projects/trading-bot</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Neustart nach jedem Ende, auch nach Absturz oder Reboot. -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Mindestabstand zwischen zwei Starts, damit eine Absturzschleife
+         nicht zur Dauerlast wird. -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/nici/Projects/trading-bot/bot_console.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/nici/Projects/trading-bot/bot_console.log</string>
+</dict>
+</plist>
