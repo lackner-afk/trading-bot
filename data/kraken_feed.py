@@ -30,6 +30,11 @@ class KrakenFeed:
     DEFAULT_PAIRS = ['BTC_EUR', 'ETH_EUR', 'SOL_EUR', 'XRP_EUR']
     TIMEFRAMES = ['1m', '5m', '15m', '1h']
 
+    # So viele Kerzen je Timeframe vorhalten. Muss über 250 liegen, sonst fällt
+    # der 200-EMA-Trendfilter der ConfluenceStrategy still auf eine kürzere
+    # Spanne zurück (span = min(200, len-1)) und weicht vom Backtest ab.
+    CANDLE_HISTORY = 300
+
     def __init__(self, api_key: str = None, api_secret: str = None, config: Dict = None):
         self.config = config or {}
         self.logger = logging.getLogger('KrakenFeed')
@@ -191,7 +196,7 @@ class KrakenFeed:
                                 df_new = pd.concat([existing, df_new]) \
                                     .drop_duplicates(subset='timestamp') \
                                     .sort_values('timestamp') \
-                                    .tail(100)
+                                    .tail(self.CANDLE_HISTORY)
                             df_new = self._calculate_indicators(df_new)
                             self.candle_history.setdefault(symbol, {})[tf] = df_new
                         except Exception as e:
@@ -236,12 +241,34 @@ class KrakenFeed:
 
     # ===== Public Interface (kompatibel mit OneTradingFeed) =====
 
-    def get_price(self, symbol: str) -> Optional[float]:
+    def get_price(self, symbol: str, max_age_seconds: Optional[float] = None) -> Optional[float]:
+        """
+        Letzter bekannter Preis. Mit max_age_seconds wird None geliefert, wenn der
+        Wert älter ist — sonst handelt der Bot bei Feed-Ausfall oder nach einem
+        macOS-Sleep auf Geisterpreisen weiter.
+        """
         md = self.market_data.get(symbol)
-        return md.price if md else None
+        if md is None:
+            return None
+        if max_age_seconds is not None and self.get_price_age(symbol) > max_age_seconds:
+            return None
+        return md.price
 
-    def get_prices(self) -> Dict[str, float]:
-        return {s: m.price for s, m in self.market_data.items()}
+    def get_price_age(self, symbol: str) -> float:
+        """Alter des letzten Preis-Updates in Sekunden (inf, wenn nie geliefert)."""
+        last = self.last_update.get(symbol)
+        if last is None:
+            return float('inf')
+        return (datetime.now() - last).total_seconds()
+
+    def get_prices(self, max_age_seconds: Optional[float] = None) -> Dict[str, float]:
+        """Alle Preise; mit max_age_seconds werden veraltete Symbole weggelassen."""
+        if max_age_seconds is None:
+            return {s: m.price for s, m in self.market_data.items()}
+        return {
+            s: m.price for s, m in self.market_data.items()
+            if self.get_price_age(s) <= max_age_seconds
+        }
 
     def get_market_data(self, symbol: str) -> Optional[MarketData]:
         return self.market_data.get(symbol)
