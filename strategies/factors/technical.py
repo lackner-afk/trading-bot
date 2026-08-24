@@ -20,9 +20,30 @@ class MultiTimeframeTrendFactor(Factor):
 
     def __init__(self, config: Dict = None):
         super().__init__(config)
+        # ACHTUNG: wird derzeit nicht ausgewertet — calculate() bekommt genau
+        # ein candles-DataFrame und beurteilt nur dessen Timeframe. Der Name
+        # der Klasse verspricht mehr, als der Code einlöst.
         self.timeframes = self.config.get("timeframes", ["5m", "15m", "1h"])
         self.ema_fast = self.config.get("ema_fast", 9)
         self.ema_slow = self.config.get("ema_slow", 21)
+
+    @staticmethod
+    def _atr_pct(df: pd.DataFrame, period: int = 14) -> Optional[float]:
+        """ATR der letzten `period` Kerzen, relativ zum Schlusskurs."""
+        if len(df) < period + 1:
+            return None
+        high, low, close = df['high'], df['low'], df['close']
+        prev_close = close.shift()
+        true_range = pd.concat([
+            high - low,
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ], axis=1).max(axis=1)
+        atr = true_range.rolling(period).mean().iloc[-1]
+        last_close = close.iloc[-1]
+        if pd.isna(atr) or last_close <= 0:
+            return None
+        return float(atr / last_close)
 
     def calculate(self, symbol: str, candles: pd.DataFrame,
                   current_price: float, **kwargs) -> Optional[FactorResult]:
@@ -47,24 +68,37 @@ class MultiTimeframeTrendFactor(Factor):
         direction = "long" if ema_fast > ema_slow else "short"
         strength = abs(ema_fast - ema_slow) / ema_slow if ema_slow > 0 else 0
 
-        # Score based on trend strength (capped)
-        score = min(strength * 8, 1.0)  # Strong trend → high score
+        # Der EMA-Abstand wird an der Volatilität gemessen: "wie viele ATR liegen
+        # zwischen den beiden EMAs?". Ein Abstand von 0.4% ist bei ruhigem Markt
+        # ein klarer Trend, bei wildem Markt bloß Rauschen — der feste Faktor 8
+        # konnte das nicht unterscheiden und war zudem um Größenordnungen zu klein:
+        # für score=1.0 hätte er 12.5% Spread gebraucht, real kommen auf 5m-Kerzen
+        # höchstens ~0.8% vor. Gemessen über 1971 Kerzen (BTC/ETH/SOL-EUR) erreichte
+        # der Faktor damit nie mehr als 0.066 und senkte als toter Ballast den
+        # Mittelwert aller Technik-Faktoren im Aggregator.
+        atr_pct = self._atr_pct(df)
+        if not atr_pct or atr_pct <= 0:
+            return None
+        normalized = strength / atr_pct
+        score = min(normalized, 1.0)
 
         # Production Mode: kein künstlicher Floor mehr — schwache Trends sollen
         # schwache Scores liefern, damit die Score-Verteilung selektiv bleibt
         # (der Test-Floor 0.15 hatte die Verteilung auf p50≈0.65 zusammengedrückt).
-        reason = f"Trend {direction.upper()}: EMA{self.ema_fast}/{self.ema_slow} spread {strength:.2%}"
+        reason = (f"Trend {direction.upper()}: EMA{self.ema_fast}/{self.ema_slow} spread {strength:.2%} = {normalized:.2f} ATR")
 
         return FactorResult(
             name=self.name,
             score=score,
-            confidence=min(strength * 5, 1.0),
+            confidence=min(normalized * 0.625, 1.0),
             direction=direction,
             reason=reason,
             metadata={
                 "ema_fast": float(ema_fast),
                 "ema_slow": float(ema_slow),
-                "spread_pct": float(strength)
+                "spread_pct": float(strength),
+                "atr_pct": float(atr_pct),
+                "spread_in_atr": float(normalized)
             }
         )
 
