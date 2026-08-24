@@ -33,15 +33,35 @@ from strategies.factors.technical import (
     BreakoutFactor, VolumeConfirmationFactor, MeanReversionFactor,
 )
 
-DAYS = 30
+# Ueber die Umgebung steuerbar, um mehrere Marktphasen zu pruefen:
+#   DAYS=90  BACKTEST_END=2026-05-01  -> 90 Tage, endend am 01.05.2026
+DAYS = int(os.environ.get('DAYS', 30))
+BACKTEST_END = os.environ.get('BACKTEST_END')  # ISO-Datum oder leer = bis jetzt
 SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
 WINDOW = 250          # wie live: n=250 fuer 200er-EMA
-TAKER_FEE = 0.0006
-START_CAPITAL = 10_000.0
+# Ueber die Umgebung setzbar, um echte Boersen-Gebuehren durchzurechnen:
+#   Bitpanda Fusion Stufe 1 = 0.0025, One Trading = 0.0015, Annahme bisher = 0.0006
+TAKER_FEE = float(os.environ.get('TAKER_FEE', 0.0006))
+START_CAPITAL = float(os.environ.get('START_CAPITAL', 10_000.0))
+# Spot-Boersen koennen nicht shorten (Bitpanda Fusion: nur Buy/Sell, kein Hebel).
+LONG_ONLY = os.environ.get('LONG_ONLY') == '1'
+# Mindestordergroesse der Boerse in Quote-Waehrung (Fusion: 25 EUR bei BTC-EUR).
+MIN_ORDER_AMOUNT = float(os.environ.get('MIN_ORDER_AMOUNT', 0.0))
+# TP/SL-Floors wie min_tp_pct/min_sl_pct in der settings.yaml
+MIN_TP_PCT = float(os.environ.get('MIN_TP_PCT', 0.0035))
+MIN_SL_PCT = float(os.environ.get('MIN_SL_PCT', 0.0030))
 MAX_CONCURRENT = 2
 MARGIN_PCT = 0.20
 MAX_DAILY_DD = 0.10
-TPSL_PROFILES = [(4, 4), (6, 6), (8, 8), (6, 5), (8, 6), (5, 7)]
+# TP/SL-Profile als ATR-Vielfache, ueber die Umgebung setzbar:
+#   TPSL="8:4,10:4"  -> TP 8xATR / SL 4xATR und TP 10xATR / SL 4xATR
+# Wichtig ist das Verhaeltnis: liegt der Stop weiter weg als das Ziel (5:7),
+# muss die Trefferquote ueber 72% liegen, um die Round-Trip-Gebuehren zu decken.
+_tpsl_env = os.environ.get('TPSL')
+if _tpsl_env:
+    TPSL_PROFILES = [tuple(int(x) for x in pair.split(':')) for pair in _tpsl_env.split(',')]
+else:
+    TPSL_PROFILES = [(4, 4), (6, 6), (8, 8), (6, 5), (8, 6), (5, 7)]
 COOLDOWNS = [0, 6]  # Kerzen Sperre pro Symbol nach Verlust-Exit
 
 agg_mod.print = lambda *a, **k: None
@@ -69,8 +89,17 @@ def fetch_fng_history():
     return out
 
 
+def _end_ms(exchange):
+    """Endzeitpunkt des Backtest-Fensters in ms (Default: jetzt)."""
+    if not BACKTEST_END:
+        return exchange.milliseconds()
+    dt = datetime.strptime(BACKTEST_END, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1000)
+
+
 def fetch_candles(exchange, symbol, days):
-    since = exchange.milliseconds() - days * 24 * 3600 * 1000
+    end = _end_ms(exchange)
+    since = end - days * 24 * 3600 * 1000
     all_c = []
     while True:
         batch = exchange.fetch_ohlcv(symbol, '5m', since=since, limit=1000)
@@ -80,10 +109,11 @@ def fetch_candles(exchange, symbol, days):
         if batch[-1][0] == since:
             break
         since = batch[-1][0] + 1
-        if len(batch) < 1000:
+        if len(batch) < 1000 or since >= end:
             break
     df = pd.DataFrame(all_c, columns=['ts', 'open', 'high', 'low', 'close', 'volume'])
     df = df.drop_duplicates(subset='ts')
+    df = df[df['ts'] <= end]          # nichts nach dem Fensterende verwenden
     df['timestamp'] = pd.to_datetime(df['ts'], unit='ms', utc=True)
     return df.reset_index(drop=True)
 
@@ -190,17 +220,22 @@ def simulate(threshold, tp_mult, sl_mult, cooldown, candles, grid, n):
             sig = grid.get((i, sym))
             if sig is None or sig['score'] < threshold:
                 continue
+            if LONG_ONLY and sig['dir'] != 'long':
+                continue          # Spot-Boerse: Shorts nicht ausfuehrbar
             price = candles[sym]['close'].iloc[i]
             # TP/SL wie im Aggregator: ATR-verankert mit Fee-Floors
             atr = sig['atr'] or 0.0
-            tp_pct = max(tp_mult * atr, 0.0035)
-            sl_pct = max(sl_mult * atr, 0.0030)
+            tp_pct = max(tp_mult * atr, MIN_TP_PCT)
+            sl_pct = max(sl_mult * atr, MIN_SL_PCT)
             d = 1 if sig['dir'] == 'long' else -1
             tp = price * (1 + d * tp_pct)
             sl = price * (1 - d * sl_pct)
             margin = equity * MARGIN_PCT
             margin = max(max(10.0, equity * 0.15), min(equity * 0.25, margin))
             if margin > balance or balance < 20:
+                continue
+            # Notional muss die Mindestordergroesse der Boerse erreichen
+            if MIN_ORDER_AMOUNT and margin * sig['lev'] < MIN_ORDER_AMOUNT:
                 continue
             balance -= margin
             positions[sym] = {'side': sig['dir'], 'entry': price, 'margin': margin,
@@ -258,7 +293,7 @@ def main():
           for s in SYMBOLS]
     buy_hold = sum(bh) / len(bh)
 
-    cache_path = '/tmp/confluence_grid.pkl'
+    cache_path = os.environ.get('GRID_CACHE_PATH', '/tmp/confluence_grid.pkl')
     if os.environ.get('GRID_CACHE') == '1' and os.path.exists(cache_path):
         print("Pass 1: lade Grid aus Cache...", flush=True)
         with open(cache_path, 'rb') as fh:
