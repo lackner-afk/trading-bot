@@ -172,7 +172,7 @@ class OrderEngine:
         Args:
             symbol: Trading-Pair
             side: 'buy' oder 'sell'
-            size: Ordergröße in Base-Currency
+            size: Ordergröße als Notional in Quote-Currency (EUR)
             current_price: Aktueller Marktpreis
             leverage: Hebel (nur für Futures)
             strategy: Name der Strategie

@@ -17,7 +17,7 @@ class Position:
     """Eine offene Position"""
     symbol: str
     side: str  # 'long' oder 'short'
-    size: float  # Positionsgröße in Base-Currency
+    size: float  # Notional in Quote-Currency (EUR) — Margin = size / leverage
     entry_price: float
     leverage: float
     timestamp: datetime
@@ -26,6 +26,7 @@ class Position:
     trailing_stop: Optional[float] = None
     unrealized_pnl: float = 0.0
     market_type: str = 'crypto'  # 'crypto' oder 'polymarket'
+    entry_fees: float = 0.0  # beim Öffnen angefallene Gebühr, wird beim Schließen verrechnet
 
     def calculate_pnl(self, current_price: float) -> float:
         """Berechnet unrealized PNL"""
@@ -34,10 +35,13 @@ class Position:
 
         price_change_pct = (current_price - self.entry_price) / self.entry_price
 
+        # size IST bereits das Notional (Margin = size / leverage) — der Hebel
+        # steckt also schon in size. Das alte "* leverage" hier hat den PnL
+        # doppelt gehebelt.
         if self.side == 'long':
-            pnl = price_change_pct * self.size * self.leverage
+            pnl = price_change_pct * self.size
         else:
-            pnl = -price_change_pct * self.size * self.leverage
+            pnl = -price_change_pct * self.size
 
         self.unrealized_pnl = pnl
         return pnl
@@ -196,7 +200,12 @@ class Portfolio:
     def _update_equity(self):
         """Aktualisiert Equity basierend auf offenen Positionen"""
         unrealized = sum(pos.unrealized_pnl for pos in self.positions.values())
-        self.equity = self.balance + unrealized
+        # Gebundene Margin gehört zur Equity! Ohne sie fällt die Equity beim
+        # Öffnen jeder Position um die volle Margin — der Risk-Check sah dadurch
+        # einen Phantom-Drawdown (z.B. 3 Positionen à 10% Margin = "30% Verlust")
+        # und schloss alle 300s sämtliche Positionen ("Risk-Limit erreicht").
+        locked_margin = sum(pos.size / pos.leverage for pos in self.positions.values())
+        self.equity = self.balance + locked_margin + unrealized
 
         # Prüfe ob neuer Tag
         if datetime.now().date() != self.day_start:
@@ -206,7 +215,8 @@ class Portfolio:
 
     def open_position(self, symbol: str, side: str, size: float, price: float,
                      leverage: float, strategy: str, stop_loss: float = None,
-                     take_profit: float = None, market_type: str = 'crypto') -> Optional[Position]:
+                     take_profit: float = None, market_type: str = 'crypto',
+                     fees: float = 0.0) -> Optional[Position]:
         """Öffnet eine neue Position"""
         if symbol in self.positions:
             return None  # Position existiert bereits
@@ -225,7 +235,8 @@ class Portfolio:
             timestamp=datetime.now(),
             stop_loss=stop_loss,
             take_profit=take_profit,
-            market_type=market_type
+            market_type=market_type,
+            entry_fees=fees
         )
 
         self.positions[symbol] = position
@@ -241,7 +252,10 @@ class Portfolio:
             return None
 
         pos = self.positions[symbol]
-        pnl = pos.calculate_pnl(exit_price) - fees
+        # Einstiegsgebühr mitverrechnen — sie fiel beim Öffnen an, wurde aber
+        # bisher verworfen, wodurch jeder Trade um die Entry-Fee zu gut aussah.
+        total_fees = fees + pos.entry_fees
+        pnl = pos.calculate_pnl(exit_price) - total_fees
 
         # Margin zurückgeben + PNL
         margin = pos.size / pos.leverage
@@ -267,7 +281,7 @@ class Portfolio:
             exit_price=exit_price,
             leverage=pos.leverage,
             pnl=pnl,
-            fees=fees,
+            fees=total_fees,
             entry_time=pos.timestamp,
             exit_time=datetime.now(),
             strategy=strategy,
@@ -316,7 +330,10 @@ class Portfolio:
         return PortfolioState(
             balance=self.balance,
             equity=self.equity,
-            unrealized_pnl=self.equity - self.balance,
+            # Direkt aus den Positionen summieren: equity enthält seit dem
+            # Margin-Fix auch die gebundene Margin, 'equity - balance' wäre
+            # also um genau diese Margin zu hoch.
+            unrealized_pnl=sum(p.unrealized_pnl for p in self.positions.values()),
             realized_pnl=self.realized_pnl,
             daily_pnl=self.daily_pnl,
             positions=self.positions.copy(),
