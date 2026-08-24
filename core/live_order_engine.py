@@ -45,7 +45,9 @@ class LiveOrderEngine:
 
         # Shadow Mode (Phase 5): Loggt exakt, was es tun würde, platziert aber keine echten Orders.
         # Sehr wertvoll für sichere Validierung vor echtem Kapitaleinsatz.
-        self.shadow_mode = self.config.get('shadow_mode', False)
+        # Fail-safe: fehlt die Angabe, wird NICHT echt gehandelt. Ein
+        # Sicherheitsschalter darf im Zweifel nie auf 'scharf' stehen.
+        self.shadow_mode = self.config.get('shadow_mode', True)
         if self.shadow_mode:
             self.logger.warning("!!! SHADOW MODE AKTIV – Keine echten Orders werden platziert !!!")
 

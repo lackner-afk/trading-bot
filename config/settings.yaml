@@ -16,7 +16,14 @@
 general:
   mode: paper                    # paper | live  ← NIEMALS live ohne explizite Absicht!
   live_explicit_confirmation: false   # Muss explizit auf true gesetzt werden für Live
+  # Solange true, werden im Live-Modus KEINE echten Orders platziert —
+  # der Bot rechnet mit echten Marktdaten, protokolliert aber nur, was er
+  # tun würde. Erst nach einer erfolgreichen Testphase auf false setzen.
+  shadow_mode: true
   start_capital: 100
+  # Preise, die älter sind, gelten als unbrauchbar: kein Entry, keine SL/TP-Prüfung.
+  # Schützt bei Feed-Ausfall und nach macOS-Sleep vor Handel auf Geisterpreisen.
+  max_price_age_seconds: 60
   base_currency: EUR
   log_level: INFO
 

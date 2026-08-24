@@ -60,6 +60,13 @@ class TradingBot:
         self.running = False
         self.start_time = None
 
+        # Preise älter als das gelten als unbrauchbar — dann wird nicht gehandelt.
+        self._max_price_age = float(
+            self.config.get('general', {}).get('max_price_age_seconds', 60)
+        )
+        self._prices_stale = False          # für Zustandswechsel-Logging
+        self._bg_tasks: set = set()         # harte Referenzen auf Hintergrund-Tasks
+
     def _setup_logging(self):
         """Konfiguriert Logging — schreibt in bot.log"""
         logging.basicConfig(
@@ -143,11 +150,25 @@ class TradingBot:
             self.logger.critical("=== LIVE MODE INITIALISIERT ===")
             self.logger.critical("Verwende OneTradingCCXTFeed + LiveOrderEngine")
 
+            # Shadow Mode gehört zu general:, nicht zu fees: — dort hätte ihn
+            # niemand vermutet, und der alte Default False bedeutete: wer live
+            # schaltet, handelt sofort mit echtem Geld. Jetzt umgekehrt: ohne
+            # ausdrückliches shadow_mode: false wird nichts echt platziert.
+            shadow = general.get('shadow_mode', True)
+            if shadow:
+                self.logger.critical(
+                    "SHADOW MODE: Orders werden simuliert, NICHT an die Börse geschickt."
+                )
+            else:
+                self.logger.critical(
+                    "!!! SHADOW MODE AUS — es werden ECHTE Orders mit ECHTEM GELD platziert !!!"
+                )
+
             # Echte Execution Engine
             self.order_engine = LiveOrderEngine(
                 api_key=api_key,
                 api_secret=api_secret,
-                config=fees_config
+                config={**fees_config, 'shadow_mode': shadow}
             )
 
             # Echter One Trading Feed (mit Keys für Balance etc.)
@@ -281,27 +302,38 @@ class TradingBot:
 
         # Haupt-Loops starten
         tasks = [
-            asyncio.create_task(self._main_loop()),
-            asyncio.create_task(self._risk_check_loop()),
-            asyncio.create_task(self._reporting_loop()),
-            asyncio.create_task(self._telegram_hourly_loop()),
+            asyncio.create_task(self._supervise(self._main_loop, 'main')),
+            asyncio.create_task(self._supervise(self._risk_check_loop, 'risk')),
+            asyncio.create_task(self._supervise(self._reporting_loop, 'reporting')),
+            asyncio.create_task(self._supervise(self._telegram_hourly_loop, 'telegram')),
         ]
 
         if self.use_confluence_strategy:
             # Nur das neue Multi-Factor Confluence System (Phase 1-6)
-            tasks.append(asyncio.create_task(self._confluence_loop()))
+            tasks.append(asyncio.create_task(self._supervise(self._confluence_loop, 'confluence')))
         else:
             # Alte Strategien (wenn Confluence nicht als Haupt-System aktiviert ist)
-            tasks.append(asyncio.create_task(self._momentum_loop()))
-            tasks.append(asyncio.create_task(self._scalper_loop()))
-            tasks.append(asyncio.create_task(self._ml_loop()))
+            tasks.append(asyncio.create_task(self._supervise(self._momentum_loop, 'momentum')))
+            tasks.append(asyncio.create_task(self._supervise(self._scalper_loop, 'scalper')))
+            tasks.append(asyncio.create_task(self._supervise(self._ml_loop, 'ml')))
 
         # Warte auf Beendigung
         try:
-            await asyncio.gather(*tasks)
+            # return_exceptions=True: ein gestorbener Loop darf die übrigen nicht
+            # mitreißen. Der Supervisor fängt Fehler ohnehin ab — das hier ist das
+            # letzte Netz, damit gather nicht beim ersten Fehler alles abbricht.
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for task, result in zip(tasks, results):
+                if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+                    self.logger.error(f"Loop endete mit Fehler: {result!r}")
         except asyncio.CancelledError:
             self.logger.info("Bot wird beendet...")
         finally:
+            # Laufende Tasks sauber abräumen, bevor stop() den Feed schließt.
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             await self.stop()
 
     async def stop(self):
@@ -317,14 +349,83 @@ class TradingBot:
 
         self.logger.info("Bot gestoppt.")
 
+    def _spawn(self, coro):
+        """
+        Startet einen Hintergrund-Task und hält eine Referenz darauf. Ohne diese
+        Referenz darf der GC den Task vor Fertigstellung einsammeln — verlorene
+        Telegram-Alerts ohne jede Spur. Exceptions werden geloggt statt verschluckt.
+        """
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        task.add_done_callback(self._log_task_exception)
+        return task
+
+    def _log_task_exception(self, task):
+        """Holt die Exception eines Hintergrund-Tasks ab, damit sie im Log landet."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            self.logger.error(f"Hintergrund-Task fehlgeschlagen: {exc!r}")
+
+    async def _supervise(self, factory, name: str):
+        """
+        Hält einen Loop am Leben. Fliegt ihm eine unerwartete Exception um die
+        Ohren, wird er nach wachsender Pause neu gestartet, statt über gather()
+        den kompletten Bot mitzureißen.
+        """
+        backoff = 5
+        while self.running:
+            try:
+                await factory()
+                return  # regulär beendet (self.running == False)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self.logger.error(
+                    f"Loop '{name}' abgestürzt: {e!r} — Neustart in {backoff}s"
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 300)
+
+    def _check_price_freshness(self, fresh: dict, all_prices: dict):
+        """Meldet Zustandswechsel zwischen frischen und veralteten Preisdaten."""
+        stale = set(all_prices) - set(fresh)
+        if stale and not self._prices_stale:
+            self._prices_stale = True
+            ages = ", ".join(
+                f"{s} {self.crypto_feed.get_price_age(s):.0f}s" for s in sorted(stale)
+            )
+            self.logger.warning(
+                f"[DATEN VERALTET] Handel pausiert für: {ages} "
+                f"(Grenze {self._max_price_age:.0f}s)"
+            )
+            if self.reporter.telegram:
+                self._spawn(self.reporter.telegram.send_message(
+                    f"⚠️ <b>Datenausfall</b>\nKeine frischen Preise für: {ages}\n"
+                    f"Handel und Exit-Prüfung pausieren, bis der Feed liefert."
+                ))
+        elif not stale and self._prices_stale:
+            self._prices_stale = False
+            self.logger.info("[DATEN OK] Preise wieder frisch — Handel läuft weiter.")
+            if self.reporter.telegram:
+                self._spawn(self.reporter.telegram.send_message(
+                    "✅ <b>Feed wieder da</b>\nPreise sind aktuell, Handel läuft weiter."
+                ))
+
     async def _main_loop(self):
         """Haupt-Event-Loop"""
         self.logger.info("Haupt-Loop gestartet")
 
         while self.running:
             try:
-                # Preis-Updates verarbeiten
-                prices = self.crypto_feed.get_prices()
+                # Preis-Updates verarbeiten. Nur frische Preise fließen weiter —
+                # update_position_prices und _check_exit_conditions überspringen
+                # Symbole, die hier fehlen, statt auf alten Kursen zu handeln.
+                all_prices = self.crypto_feed.get_prices()
+                prices = self.crypto_feed.get_prices(max_age_seconds=self._max_price_age)
+                self._check_price_freshness(prices, all_prices)
                 self.portfolio.update_position_prices(prices)
 
                 # Pending Orders prüfen
@@ -364,7 +465,7 @@ class TradingBot:
                 for symbol in self.momentum.pairs:
                     # 5m-Kerzen für Signal (weniger Rauschen als 1m)
                     candles = self.crypto_feed.get_candles(symbol, '5m')
-                    price = self.crypto_feed.get_price(symbol)
+                    price = self.crypto_feed.get_price(symbol, max_age_seconds=self._max_price_age)
 
                     if candles is None or price is None:
                         continue
@@ -402,7 +503,7 @@ class TradingBot:
             try:
                 for symbol in self.scalper.pairs:
                     candles = self.crypto_feed.get_candles(symbol, '1m')
-                    price = self.crypto_feed.get_price(symbol)
+                    price = self.crypto_feed.get_price(symbol, max_age_seconds=self._max_price_age)
 
                     if candles is None or price is None:
                         continue
@@ -537,7 +638,7 @@ class TradingBot:
 
                     candles = self._completed_candles(
                         self.crypto_feed.get_candles(symbol, '5m', n=251))  # 250 fertige Kerzen (200er-EMA)
-                    price = self.crypto_feed.get_price(symbol)
+                    price = self.crypto_feed.get_price(symbol, max_age_seconds=self._max_price_age)
 
                     if candles is None or price is None:
                         continue
@@ -607,7 +708,7 @@ class TradingBot:
                                 name.replace("_", " ").title()
                                 for name, _ in sorted(breakdown.items(), key=lambda x: getattr(x[1], 'score', 0), reverse=True)[:3]
                             ]
-                            asyncio.create_task(
+                            self._spawn(
                                 self.reporter.send_confluence_signal_decision(
                                     signal, regime=regime_name, top_factors=top_factor_names
                                 )
@@ -715,8 +816,9 @@ class TradingBot:
 
         state = self.portfolio.get_state()
 
-        # Max 5 gleichzeitige Positionen
-        if len(state.positions) >= 5:
+        # Positions-Obergrenze aus der Config (der RiskManager prüft sie ohnehin;
+        # die früher hier hartcodierte 5 widersprach settings.yaml).
+        if len(state.positions) >= self.risk_manager.max_concurrent_positions:
             return
 
         if state.equity < 20:
@@ -748,18 +850,21 @@ class TradingBot:
             self.logger.info(f"Cooldown aktiv: {risk_check.reason}")
             return
 
-        # ATR-basierte Position Size (2% Risiko pro Trade)
+        # Position Sizing wie im Backtest: Margin ist der Equity-Anteil,
+        # das Notional (= size) ergibt sich daraus mal Hebel.
         if sl_distance_pct > 0 and hasattr(signal, 'atr_value') and signal.atr_value > 0:
-            position_size = self.risk_manager.size_from_risk(state.equity, sl_distance_pct)
+            margin = self.risk_manager.size_from_risk(state.equity, sl_distance_pct)
         else:
-            position_size = state.equity * 0.20
+            margin = state.equity * 0.20
         # Skaliert auf Kapital: Min 15% des Equity, Max 25% des Equity
-        min_size = max(10.0, state.equity * 0.15)
-        max_size = state.equity * 0.25
-        position_size = max(min_size, min(max_size, position_size))
+        min_margin = max(10.0, state.equity * 0.15)
+        max_margin = state.equity * 0.25
+        margin = max(min_margin, min(max_margin, margin))
 
-        if position_size > state.balance or state.balance < 20:
+        if margin > state.balance or state.balance < 20:
             return
+
+        position_size = margin * signal.suggested_leverage
 
         side = 'buy' if signal.signal_type == SignalType.LONG else 'sell'
 
@@ -773,22 +878,40 @@ class TradingBot:
         )
 
         if result.success:
+            # Die tatsächlich gefüllte Größe buchen, nicht die angeforderte —
+            # bei einem Partial Fill hielt das Portfolio sonst mehr als die Order.
+            filled_size = result.order.filled_size or position_size
             self.portfolio.open_position(
                 symbol=signal.symbol,
                 side='long' if signal.signal_type == SignalType.LONG else 'short',
-                size=position_size,
+                size=filled_size,
                 price=result.execution_price,
                 leverage=signal.suggested_leverage,
                 strategy=strategy_name,
                 market_type=strategy_name,
                 stop_loss=signal.stop_loss,
-                take_profit=signal.take_profit
+                take_profit=signal.take_profit,
+                fees=result.total_fees
             )
 
             self.reporter.print_info(
                 f"{strategy_name.upper()}: {signal.signal_type.value.upper()} {signal.symbol} "
                 f"@ ${result.execution_price:.4f} (Conf: {signal.confidence:.0%})"
             )
+
+            # Telegram-Alert bei Eröffnung. Vorher gab es NUR beim Schließen einen
+            # Alert — die Eröffnung war bloß Konsolen-Ausgabe.
+            if self.reporter.telegram and self._telegram_config.get('send_trade_alerts', True):
+                direction = signal.signal_type.value.upper()
+                emoji = '🟢' if direction == 'LONG' else '🔴'
+                msg = (
+                    f"{emoji} <b>TRADE AUF</b> {direction} {signal.symbol}\n"
+                    f"Einstieg: {result.execution_price:.4f}\n"
+                    f"TP: {signal.take_profit:.4f} | SL: {signal.stop_loss:.4f}\n"
+                    f"Größe: {filled_size:.2f} (Hebel {signal.suggested_leverage}x) | "
+                    f"Konfidenz {signal.confidence:.0%}"
+                )
+                self._spawn(self.reporter.telegram.send_message(msg))
 
     async def _execute_confluence_signal(self, signal):
         """
@@ -875,7 +998,7 @@ class TradingBot:
             # Telegram nur wenn Event-Alerts aktiviert sind (Default aus —
             # Nici will nur Trade-Open/-Close + periodischen Bericht)
             if self.reporter.telegram and self._telegram_config.get('event_alerts', False):
-                asyncio.create_task(self.reporter.telegram.send_message(msg))
+                self._spawn(self.reporter.telegram.send_message(msg))
 
     def _check_macro_event_alert(self):
         """
@@ -919,7 +1042,7 @@ class TradingBot:
             )
             self.reporter.print_warning(f"MACRO EVENT: {event_name}")
             if self.reporter.telegram and self._telegram_config.get('event_alerts', False):
-                asyncio.create_task(self.reporter.telegram.send_message(msg))
+                self._spawn(self.reporter.telegram.send_message(msg))
 
         elif not currently_in and self._was_in_macro_event:
             # Rausgegangen
@@ -935,7 +1058,7 @@ class TradingBot:
             )
             self.reporter.print_info(f"Macro Event vorbei: {last}")
             if self.reporter.telegram and self._telegram_config.get('event_alerts', False):
-                asyncio.create_task(self.reporter.telegram.send_message(msg))
+                self._spawn(self.reporter.telegram.send_message(msg))
 
     def _update_factor_attribution(self, trade, factor_breakdown: Dict):
         """Phase 6: Aktualisiert die per-Factor Win/Loss/PnL Statistik."""
@@ -1041,6 +1164,11 @@ class TradingBot:
         )
 
         if trade:
+            # Schließungsgrund protokollieren — ohne ihn ist im Nachhinein nicht
+            # nachvollziehbar, ob TP, SL oder ein Risk-Eingriff geschlossen hat.
+            self.logger.info(
+                f"[CLOSE] {symbol} {trade.side} @ {price:.4f} | PnL {trade.pnl:+.2f} | Grund: {reason}"
+            )
             self.reporter.print_trade_executed(trade)
             await self.reporter.send_trade_alert(trade)
 
@@ -1062,8 +1190,16 @@ class TradingBot:
     async def _telegram_hourly_loop(self):
         """Sendet periodischen Telegram-Report (Intervall konfigurierbar, Default 5h)"""
         interval_s = int(self._telegram_config.get('report_interval_hours', 5) * 3600)
-        await asyncio.sleep(interval_s)   # erste Sendung nach einem vollen Intervall
+        # Wanduhr statt langem asyncio.sleep: auf macOS zählt asyncio nur WACHE
+        # Zeit — bei Maintenance Sleep im Batteriebetrieb sammelt ein 5h-Timer
+        # real über 15h nicht genug an und feuert nie. Darum in kurzen Schritten
+        # schlafen und gegen datetime.now() prüfen.
+        next_report = datetime.now() + timedelta(seconds=interval_s)
         while self.running:
+            if datetime.now() < next_report:
+                await asyncio.sleep(60)
+                continue
+            next_report = datetime.now() + timedelta(seconds=interval_s)
             try:
                 state = self.portfolio.get_state()
                 metrics = self.risk_manager.get_metrics(
@@ -1077,11 +1213,21 @@ class TradingBot:
                 )
             except Exception as e:
                 self.logger.error(f"Telegram-Loop Fehler: {e}")
-            await asyncio.sleep(interval_s)
 
     async def _close_all_positions(self, reason: str):
         """Schließt alle Positionen"""
+        # Bewusst ohne Altersfilter: das hier ist der Notfallpfad (Risk-Limit,
+        # Shutdown). Bei totem Feed gar nicht zu schließen wäre schlechter als
+        # zum letzten bekannten Kurs zu schließen — der Preis wird aber vermerkt,
+        # damit ein dadurch verzerrter PnL später nachvollziehbar bleibt.
         prices = self.crypto_feed.get_prices()
+        for symbol in list(self.portfolio.positions.keys()):
+            age = self.crypto_feed.get_price_age(symbol)
+            if age > self._max_price_age:
+                self.logger.warning(
+                    f"[NOTFALL-EXIT] {symbol} wird auf einem {age:.0f}s alten Preis "
+                    f"geschlossen ({reason}) — PnL kann abweichen."
+                )
 
         for symbol in list(self.portfolio.positions.keys()):
             price = prices.get(symbol)
@@ -1125,9 +1271,14 @@ def main():
     pid_file = Path('/tmp/trading-bot.pid')
     if pid_file.exists():
         old_pid = int(pid_file.read_text().strip())
-        if Path(f'/proc/{old_pid}').exists():
+        # os.kill(pid, 0) statt /proc-Check — /proc existiert auf macOS nicht,
+        # wodurch der Lock nie griff und Doppel-Instanzen möglich waren.
+        try:
+            os.kill(old_pid, 0)
             print(f"Bot läuft bereits (PID {old_pid}). Beende.")
             sys.exit(0)
+        except (ProcessLookupError, PermissionError):
+            pass  # verwaistes PID-File — weiter
     pid_file.write_text(str(os.getpid()))
 
     bot = TradingBot()
