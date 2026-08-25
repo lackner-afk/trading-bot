@@ -142,6 +142,42 @@ wenige Ausprägungen, die Quintile trennen dann nach Kalendertagen statt nach
 Signalstärke. Erkennbar am nicht-monotonen Verlauf (Einbruch im obersten
 Quintil). Faktor-Analysen deshalb nie unter 90 Tagen.
 
+## Zeitrahmen 1h statt 5m (Schritt 2 des Datenquellen-Plans): negativ
+
+Dieselben Faktoren, dieselben drei Fenster, 1h-Kerzen, Horizont 120 Bars = 5 Tage:
+
+| Fenster | Trefferquote 5m | Trefferquote 1h |
+|---|---|---|
+| Mai–Aug 2026 | 30,6 % | **19,3 %** |
+| Feb–Mai 2026 | 28,6 % | **20,3 %** |
+| Nov 2025–Feb 2026 | 25,7 % | **33,8 %** |
+
+In zwei von drei Fenstern deutlich schlechter. Die ICs sind betragsmäßig größer
+(bis ±0,14), wechseln aber weiter die Vorzeichen, und die Quintil-Verläufe werden
+erratisch — bei ~2.400 statt 46.000 Signalen ist das grösstenteils Rauschen.
+**Der Zeitrahmen ist nicht die Ursache.**
+
+## Null-Modell: der Vorsprung gegenüber Zufall
+
+`tools/null_model.py` vergleicht dieselben Kerzen, TP/SL-Regeln, Horizonte und
+die ATR-Verteilung — nur Einstiegszeitpunkt und Richtung werden gewürfelt.
+
+| Fenster | Confluence | Zufall | Differenz | |
+|---|---|---|---|---|
+| Mai–Aug 2026 | 26,1 % | 25,6 % | +0,6 % (1,9 σ) | nicht unterscheidbar |
+| Feb–Mai 2026 | 28,6 % | 26,9 % | +1,7 % (5,5 σ) | besser als Zufall |
+| Nov 2025–Feb 2026 | 25,7 % | 26,8 % | −1,0 % (−3,4 σ) | schlechter als Zufall |
+
+Im Mittel **+0,4 Prozentpunkte** gegenüber Münzwurf-Einstiegen. Der Vorsprung ist
+im mittleren Fenster mit 5,5 Standardfehlern real, aber nicht stabil — im dritten
+kehrt er sich signifikant um. Und er ist um eine Größenordnung zu klein: bis zum
+Break-even fehlen ~11 Punkte, geliefert wird im besten Fall 1,7.
+
+Auf beiden Zeitrastern landen die Trefferquoten also fast genau dort, wo ein
+Zufallsprozess mit diesem Chance-Risiko-Verhältnis landet. Merke: Eine
+Trefferquote ist ohne diesen Vergleich nicht interpretierbar — 30 % klingt
+schlecht, 60 % gut; was zählt, ist der Abstand zum Zufall bei gleichem TP/SL.
+
 ## Nächste Schritte, falls weiterverfolgt
 
 1. **Andere Datenquellen.** Der Bot sieht nur Kerzen. Orderbuchtiefe und

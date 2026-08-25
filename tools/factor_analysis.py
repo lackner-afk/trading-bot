@@ -29,7 +29,13 @@ sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.par
 import tools.backtest_confluence as bt
 
 
-def outcome_for(candles, i, direction, tp_pct, sl_pct, horizon=288):
+# Wie viele Kerzen ein Signal Zeit bekommt, TP oder SL zu erreichen.
+# 288 x 5m = 24 h; bei 1h-Kerzen sind 120 Bars = 5 Tage sinnvoller, weil
+# derselbe ATR-Vielfache-Abstand dort laenger braucht.
+HORIZON_BARS = int(os.environ.get('HORIZON_BARS', 288))
+
+
+def outcome_for(candles, i, direction, tp_pct, sl_pct, horizon=None):
     """
     Ausgang eines Signals: 1 = TP zuerst, 0 = SL zuerst, None = keins innerhalb
     des Horizonts (288 Kerzen a 5m = 24 h).
@@ -42,6 +48,7 @@ def outcome_for(candles, i, direction, tp_pct, sl_pct, horizon=288):
     tp = entry * (1 + d * tp_pct)
     sl = entry * (1 - d * sl_pct)
 
+    horizon = HORIZON_BARS if horizon is None else horizon
     hi = candles['high'].values
     lo = candles['low'].values
     end = min(i + 1 + horizon, len(candles))
@@ -74,8 +81,8 @@ def quintile_table(rows, factor):
 
 def main():
     tp_mult, sl_mult = bt.TPSL_PROFILES[0]
-    print(f"Faktor-Analyse | {bt.DAYS} Tage | TP {tp_mult}xATR / SL {sl_mult}xATR "
-          f"| Ende {bt.BACKTEST_END or 'jetzt'}", flush=True)
+    print(f"Faktor-Analyse | {bt.DAYS} Tage {bt.TIMEFRAME} | TP {tp_mult}xATR / SL {sl_mult}xATR "
+          f"| Horizont {HORIZON_BARS} Kerzen | Ende {bt.BACKTEST_END or 'jetzt'}", flush=True)
 
     fng = bt.fetch_fng_history()
     ex = ccxt.binance({'enableRateLimit': True})

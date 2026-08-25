@@ -39,6 +39,9 @@ DAYS = int(os.environ.get('DAYS', 30))
 BACKTEST_END = os.environ.get('BACKTEST_END')  # ISO-Datum oder leer = bis jetzt
 SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
 WINDOW = 250          # wie live: n=250 fuer 200er-EMA
+# Kerzen-Zeitrahmen. 5m ist fuer Indikatoren stark verrauscht; auf 1h steckt
+# mehr Struktur in den Daten und die Gebuehr faellt seltener an.
+TIMEFRAME = os.environ.get('TIMEFRAME', '5m')
 # Ueber die Umgebung setzbar, um echte Boersen-Gebuehren durchzurechnen:
 #   Bitpanda Fusion Stufe 1 = 0.0025, One Trading = 0.0015, Annahme bisher = 0.0006
 TAKER_FEE = float(os.environ.get('TAKER_FEE', 0.0006))
@@ -102,7 +105,7 @@ def fetch_candles(exchange, symbol, days):
     since = end - days * 24 * 3600 * 1000
     all_c = []
     while True:
-        batch = exchange.fetch_ohlcv(symbol, '5m', since=since, limit=1000)
+        batch = exchange.fetch_ohlcv(symbol, TIMEFRAME, since=since, limit=1000)
         if not batch:
             break
         all_c.extend(batch)
@@ -288,7 +291,7 @@ def main():
 
     print("Lade Fear&Greed-Historie...", flush=True)
     fng = fetch_fng_history()
-    print(f"Lade {DAYS} Tage 5m-Kerzen via Binance...", flush=True)
+    print(f"Lade {DAYS} Tage {TIMEFRAME}-Kerzen via Binance...", flush=True)
     ex = ccxt.binance({'enableRateLimit': True})
     candles = {sym: fetch_candles(ex, sym, DAYS) for sym in SYMBOLS}
     n = min(len(df) for df in candles.values())
@@ -322,7 +325,7 @@ def main():
                for th in ths for (tp, sl) in TPSL_PROFILES for cd in COOLDOWNS]
 
     print("\n" + "=" * 80)
-    print(f"SCHWELLWERT-SWEEP  |  {DAYS} Tage 5m  |  Buy&Hold (Ø 3 Coins): {buy_hold:+.1%}")
+    print(f"SCHWELLWERT-SWEEP  |  {DAYS} Tage {TIMEFRAME}  |  Buy&Hold (Ø 3 Coins): {buy_hold:+.1%}")
     print("=" * 80)
     print(f"{'Schwelle':>8} {'TPxATR':>7} {'SLxATR':>7} {'CD':>3} {'Return':>8} {'Trades':>7} {'WinRate':>8} {'PF':>6} {'MaxDD':>7} {'Sharpe':>8} {'L/S':>9}")
     for r in sorted(results, key=lambda x: (-x['win_rate'])):
