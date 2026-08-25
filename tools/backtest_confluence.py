@@ -152,6 +152,12 @@ def build_signal_grid(base_cfg, candles, fng_hist, n):
                     'score': signal.confluence_score, 'conf': signal.confidence,
                     'dir': signal.direction, 'lev': signal.suggested_leverage,
                     'atr': atr,
+                    # Einzelscores je Faktor — Grundlage fuer tools/factor_analysis.py,
+                    # das misst, welcher Faktor ueberhaupt Vorhersagekraft hat.
+                    'factors': {
+                        name: (fr.score, fr.direction)
+                        for name, fr in (signal.factor_breakdown or {}).items()
+                    },
                 }
         if (i - WINDOW) % 2000 == 0:
             print(f"[Pass 1] {i}/{n} | Signale {len(grid)} | {_time.time()-t0:.0f}s",

@@ -86,13 +86,74 @@ Jetzt ATR-normalisiert (`spread / atr_pct`), Median 0,483 statt 0,008. Die
 Backtest-Performance verbessert das allerdings **nicht** — der Faktor ist nur
 nicht mehr kaputt.
 
+## Faktor-Analyse (25.08.2026): es fehlt das Signal, nicht die Kalibrierung
+
+Gemessen mit `tools/factor_analysis.py`: Für jedes Signal wird der reine Ausgang
+bestimmt (läuft der Kurs zuerst ins TP oder ins SL, ohne Portfolio-Effekte), dann
+je Faktor die Rangkorrelation zwischen Score und Ausgang — der Information
+Coefficient. Über dieselben drei 90-Tage-Fenster, je ~46.000 auswertbare Signale.
+
+### Einzelfaktoren: keiner ist über Marktphasen stabil
+
+| Faktor | Mai–Aug | Feb–Mai | Nov–Feb | stabil? |
+|---|---|---|---|---|
+| multi_timeframe_trend | −0,053 | −0,004 | −0,008 | nein |
+| momentum | −0,023 | +0,003 | −0,001 | nein |
+| sentiment | +0,022 | +0,032 | **−0,063** | Vorzeichen dreht |
+| mean_reversion | +0,021 | +0,010 | +0,008 | ja, aber ≈ 0 |
+| volatility_filter | −0,012 | −0,052 | −0,042 | nein |
+| volume_confirmation | −0,002 | −0,004 | +0,022 | nein |
+| macro_news_filter | konstant | konstant | konstant | reiner Ballast |
+
+Wechselnde Vorzeichen zwischen Marktphasen heißt: kein Signal, sondern
+angepasstes Rauschen.
+
+### Der Gesamtscore hat ebenfalls keine Vorhersagekraft
+
+| Fenster | IC | Trefferquote Q1→Q5 |
+|---|---|---|
+| Mai–Aug 2026 | −0,009 | 27 % 26 % 26 % 25 % 26 % |
+| Feb–Mai 2026 | +0,016 | 29 % 25 % 29 % 30 % 29 % |
+| Nov 2025–Feb 2026 | **−0,055** | 29 % 29 % 24 % 24 % 23 % |
+
+In zwei Fenstern ist die Trefferquote über alle Quintile praktisch identisch, im
+dritten fällt sie monoton. **`min_confluence_score` filtert damit nicht nach
+Qualität, sondern nur nach Menge** — die gesamte Kalibrierhistorie an dieser
+Schwelle (0,66 → 0,647 → Perzentil-Sweeps) optimierte einen Parameter, der nichts
+sortiert.
+
+### Größenordnung
+
+Trefferquote über alle Signale: 30,6 % / 28,6 % / 25,7 %. Nötig bei TP 12× / SL 5×
+sind ~39 %. Für die fehlenden ~10 Punkte bräuchte es einen IC um 0,15; vorhanden
+sind 0,01–0,06 mit wechselndem Vorzeichen. Das ist keine Lücke, die Gewichtung,
+Schwellen oder das Aussortieren einzelner Faktoren schließen können.
+
+**Konsequenz: Nicht weiter an Gewichten, Schwellen oder TP/SL drehen.** Die sieben
+Faktoren sind OHLCV-Ableitungen auf 5m-Kerzen plus ein täglicher Stimmungsindex —
+auf diesem Zeitraster ist kein verwertbarer Vorsprung in den Daten.
+
+### Methodischer Merkposten
+
+Ein erster Lauf über nur 10 Tage zeigte scheinbar starke Werte (sentiment
+IC −0,375, volatility_filter +0,260). Beides war ein Artefakt: Langsam variierende
+Faktoren — Fear & Greed liefert einen Wert pro Tag — haben über kurze Strecken zu
+wenige Ausprägungen, die Quintile trennen dann nach Kalendertagen statt nach
+Signalstärke. Erkennbar am nicht-monotonen Verlauf (Einbruch im obersten
+Quintil). Faktor-Analysen deshalb nie unter 90 Tagen.
+
 ## Nächste Schritte, falls weiterverfolgt
 
-1. Die Confluence-Faktoren selbst prüfen — bei ~35 % Trefferquote gegen ~41 %
-   nötige liegt das Problem in der Signalqualität.
-2. Handelsfrequenz senken (100–500 Trades je Fenster; die Gebühr skaliert mit der
-   Anzahl). Größere Zeitrahmen als 5m prüfen.
-3. Erst wenn ein Profil über alle Fenster positiv ist, über Kapitaleinsatz reden.
+1. **Andere Datenquellen.** Der Bot sieht nur Kerzen. Orderbuchtiefe und
+   -ungleichgewicht, Funding Rates, Open Interest, Liquidationen bleiben
+   ungenutzt — daher kommen kurzfristige Krypto-Signale üblicherweise. Der
+   Fusion-Feed liefert bereits Orderbuchdaten.
+2. **Größerer Zeitrahmen.** 5m ist für Kerzen-Indikatoren stark verrauscht; auf
+   1h/1d ist mehr Struktur vorhanden, und die Gebühr fällt seltener an.
+3. **Jeden neuen Faktor zuerst durch `tools/factor_analysis.py` schicken.** Ein
+   IC unter 0,03 oder ein Vorzeichenwechsel zwischen Fenstern heißt: nicht
+   einbauen. Das kostet Minuten statt Wochen Papierbetrieb.
+4. Erst wenn ein Profil über alle Fenster positiv ist, über Kapitaleinsatz reden.
 
 ## Werkzeug
 
