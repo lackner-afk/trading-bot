@@ -178,6 +178,44 @@ Zufallsprozess mit diesem Chance-Risiko-Verhältnis landet. Merke: Eine
 Trefferquote ist ohne diesen Vergleich nicht interpretierbar — 30 % klingt
 schlecht, 60 % gut; was zählt, ist der Abstand zum Zufall bei gleichem TP/SL.
 
+## Funding Rate (Schritt 1 des Datenquellen-Plans): negativ
+
+Getestet mit `tools/funding_factor_test.py`. These: Hohe positive Funding Rates
+zeigen überhitzte Long-Positionierung und gehen Rücksetzern voraus — dann müsste
+ein Long-Einstieg bei hoher Rate schlechter laufen, also ein negativer IC.
+
+Methodik: Funding wird alle 8 h fixiert, über 90 Tage sind das 270 Werte je
+Symbol. Ein Test pro 5m-Kerze hätte 45.000 stark autokorrelierte Beobachtungen
+und viel zu optimistische p-Werte ergeben — deshalb genau **eine Beobachtung je
+Funding-Periode**.
+
+| Fenster | IC | p | Beobachtungen |
+|---|---|---|---|
+| Mai–Aug 2026 | +0,025 | 0,52 | 670 |
+| Feb–Mai 2026 | −0,042 | 0,27 | 696 |
+| Nov 2025–Feb 2026 | +0,021 | 0,59 | 635 |
+
+Nichts davon ist signifikant, die Vorzeichen wechseln, kein Quintil-Gradient.
+
+**Einschränkung, fairerweise:** Die Raten lagen durchgehend zwischen −0,009 % und
++0,010 % pro 8 h, also um den Binance-Normalwert. Extreme Positionierung, bei der
+dieser Faktor erst aussagekräftig wird, kam in den 270 Tagen nicht vor. Der Test
+schliesst nicht aus, dass Funding in einer Euphorie- oder Panikphase etwas taugt —
+für den Alltagsbetrieb liefert es nichts. Mit ~670 Beobachtungen liessen sich zudem
+nur Effekte ab etwa |IC| 0,08 nachweisen; ein kleinerer echter Effekt wäre
+untergegangen, würde aber ohnehin nicht reichen (nötig wären ~0,15).
+
+## Abbruchkriterium erreicht (26.08.2026)
+
+Der Plan legte vorab fest: Zeigt nach Schritt 1 und 2 kein Faktor über drei
+Fenster einen stabilen IC ≥ 0,03, ist die Strategie-Idee auf diesem Zeitraster
+erschöpft. Schritt 2 (Zeitrahmen 1h): negativ. Schritt 1 (Funding Rate): negativ.
+
+**Konsequenz: keine weitere Optimierung an Gewichten, Schwellen, TP/SL oder
+weiteren Faktoren aus Kerzendaten.** Offen bleibt allein Schritt 0 — Orderbuch-
+und Orderflow-Daten selbst sammeln, weil sie historisch nicht beschaffbar sind
+und als einzige Quelle noch ungeprüft ist.
+
 ## Nächste Schritte, falls weiterverfolgt
 
 1. **Andere Datenquellen.** Der Bot sieht nur Kerzen. Orderbuchtiefe und
