@@ -218,7 +218,7 @@ class Reporter:
                 "[bold cyan]Paper-Trading-Bot[/bold cyan]\n\n"
                 f"[green]Mode:[/green] {config.get('general', {}).get('mode', 'paper')}\n"
                 f"[green]Startkapital:[/green] ${config.get('general', {}).get('start_capital', 10000):,.2f}\n"
-                f"[green]Datenfeed:[/green] One Trading (Live WebSocket)\n\n"
+                f"[green]Datenfeed:[/green] {config.get('general', {}).get('data_feed', 'kraken')}\n\n"
                 "[yellow]ACHTUNG: Dies ist eine SIMULATION - kein echtes Geld![/yellow]"
             ),
             title="[bold white]🤖 Bot Started[/bold white]",

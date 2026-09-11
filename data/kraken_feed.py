@@ -28,7 +28,7 @@ class KrakenFeed:
     """
 
     DEFAULT_PAIRS = ['BTC_EUR', 'ETH_EUR', 'SOL_EUR', 'XRP_EUR']
-    TIMEFRAMES = ['1m', '5m', '15m', '1h']
+    TIMEFRAMES = ['1m', '5m', '15m', '1h', '1d']   # 1d für die DailyTrendStrategy
 
     # So viele Kerzen je Timeframe vorhalten. Muss über 250 liegen, sonst fällt
     # der 200-EMA-Trendfilter der ConfluenceStrategy still auf eine kürzere

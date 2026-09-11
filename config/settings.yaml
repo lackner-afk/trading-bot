@@ -26,6 +26,9 @@ general:
   max_price_age_seconds: 60
   base_currency: EUR
   log_level: INFO
+  # Marktdaten im Paper-Modus: kraken (ohne Key) | fusion (braucht FUSION_API_KEY,
+  # zeigt die echten Fusion-Kurse und Spreads).
+  data_feed: kraken
 
   # Zusätzliche Live-Guardrails (werden in späteren Phasen hart erzwungen)
   # max_real_capital_exposure_eur: 500
@@ -86,7 +89,10 @@ strategies:
   # CONFLUENCE (Phase 1-6 neues Multi-Factor System) — aktiviert
   # ============================================================
   confluence:
-    enabled: true
+    # DEAKTIVIERT seit 11.09.2026: unter echten Fusion-Gebühren (0,25 % je Seite)
+    # über drei unabhängige 90-Tage-Fenster verlustbringend, Schwelle je
+    # Fenster instabil (docs/BACKTEST_BEFUNDE.md). Ersetzt durch daily_trend.
+    enabled: false
     interval_seconds: 45
     # ACHTUNG Skala: Der Confluence-Score liegt auf 0-1 (gewichtetes Mittel der
     # Faktor-Scores). Die alten Werte 5.8/3.5 stammten von einer nie umgesetzten
@@ -116,6 +122,31 @@ strategies:
     min_signal_confidence: 0.0    # Gate im Loop aus — min_confluence_score im Aggregator ist maßgeblich
     loss_cooldown_seconds: 1800   # Symbol 30 Min pausieren nach Verlust-Exit (gegen Verlustketten)
 
+  # ============================================================
+  # DAILY TREND — langsame Trendfolge auf Tageskerzen (aktiv seit 11.09.2026)
+  # ============================================================
+  # Long/Flat, Spot, kein Hebel, kein Short — passt zu Bitpanda Fusion.
+  # Einstieg: Tagesschluss > SMA(ma_days) * (1 + entry_buffer_pct), SMA steigend.
+  # Ausstieg: Tagesschluss < SMA(ma_days) * (1 - exit_buffer_pct).
+  # Notstopp: max_loss_pct unter dem Einstieg, geprüft gegen den Live-Preis.
+  # Erwartung: 10–25 Trades pro Jahr. Begründung und Backtest-Anleitung:
+  # docs/TREND_TAGESBASIS.md — vor Live erst mit tools/backtest_daily_trend.py
+  # über alle Jahresfenster prüfen (Parameter NICHT auf ein Fenster optimieren).
+  daily_trend:
+    enabled: true
+    pairs:
+      - BTC_EUR
+      - ETH_EUR
+    ma_days: 100
+    entry_buffer_pct: 0.01
+    exit_buffer_pct: 0.02
+    require_rising_ma: true
+    slope_days: 10
+    max_loss_pct: 0.08         # 2 % Risiko-Kappung / 8 % = max. 25 % Kapital -> 20 %-Kappung greift
+    allocation_pct: 0.20       # je Symbol; der RiskManager kappt ohnehin bei 20 %
+    min_order_amount: 25       # Fusion-Mindestorder (BTC-EUR). Unter 125 € Equity: keine Order möglich.
+    interval_seconds: 3600     # stündlich prüfen, gehandelt wird nur je neuer Tageskerze
+
 risk:
   max_risk_per_trade: 0.02      # 2% des Portfolios
   max_daily_drawdown: 0.10       # 10% → Pause bis nächster Tag
@@ -125,8 +156,11 @@ risk:
   cooldown_after_losses: 300     # 5 Min Pause nach 3 Verlusten
 
 fees:
-  crypto_maker: 0.0004  # 0.04%
-  crypto_taker: 0.0006  # 0.06%
+  # Bitpanda Fusion Stufe 1 (bis 100.000 € Monatsvolumen): 0,25 % je Seite,
+  # kein Maker-Rabatt. Die alten 0,04/0,06 % stammten von einer Futures-Börse
+  # und ließen jeden Backtest um den Faktor 4 zu billig aussehen.
+  crypto_maker: 0.0025  # 0.25%
+  crypto_taker: 0.0025  # 0.25%
 
 slippage:
   min: 0.0001  # 0.01%

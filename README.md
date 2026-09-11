@@ -6,13 +6,24 @@ Async Python Paper-Trading-Bot für Crypto-Spot-Märkte auf [One Trading](https:
 
 **→ Bevor du jemals echtes Geld einsetzt: Lies `LIVE_TRADING.md` (im Projekt-Root)!**
 
+## Aktive Strategie: Trendfolge auf Tagesbasis (seit 11.09.2026)
+
+Long/Flat auf Tageskerzen, Spot, kein Hebel, kein Short — ausgelegt auf Bitpanda
+Fusion (0,25 % Gebühr je Seite, 25 € Mindestorder). Alle schnelleren Strategien
+sind abgeschaltet, weil sie unter diesen Bedingungen verlieren.
+Details, Regeln und Kapitalgrenze: [`docs/TREND_TAGESBASIS.md`](docs/TREND_TAGESBASIS.md).
+
+```bash
+python tools/backtest_daily_trend.py      # Backtest über mehrere Jahresfenster
+python -m pytest tests/ -q                # Tests (ohne Netzwerk)
+```
+
 ## Features
 
-- **Live-Datenfeed**: One Trading WebSocket (PRICE_TICKS) + REST API für Candlesticks
-- **EMA-Momentum**: EMA 9/21 Crossover-Strategie mit RSI-Filter
-- **Crypto-Scalper**: RSI+Bollinger Mean-Reversion und Breakout-Trading
-- **ML-Predictor**: Gradient Boosting für Preis-Richtungsprognosen
-- **Risk-Management**: Kelly-Criterion, Drawdown-Limits, Trailing-Stop
+- **Datenfeeds**: Kraken (ohne Key) oder Bitpanda Fusion (`general.data_feed: fusion`)
+- **DailyTrend**: SMA-Trendfolge auf Tageskerzen mit Hysterese und Notstopp
+- **Legacy (deaktiviert)**: EMA-Momentum, Scalper, ML-Predictor, Confluence
+- **Risk-Management**: harte Grenzen für Positionsgröße, Risiko je Trade, Drawdown
 
 ## Installation
 

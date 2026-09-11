@@ -4,7 +4,7 @@ Trading-Bot Haupt-Orchestrator
 Koordiniert Datenfeeds, Strategien und Execution
 
 Unterstützt zwei Modi:
-- Paper (Default): Simulierte Orders + Kraken oder OneTrading Feed
+- Paper (Default): Simulierte Orders + Kraken- oder Fusion-Feed (general.data_feed)
 - Live: Echte Orders auf One Trading via LiveOrderEngine + Reconciliation
 """
 
@@ -26,11 +26,13 @@ from core.order_engine import OrderEngine
 from core.live_order_engine import LiveOrderEngine
 from core.reconciliation import run_startup_reconciliation
 from data.kraken_feed import KrakenFeed
+from data.fusion_feed import FusionFeed
 from data.onetrading_ccxt_feed import OneTradingCCXTFeed
 from strategies.crypto_scalper import CryptoScalper, SignalType
 from strategies.momentum import MomentumStrategy
 from strategies.ml_predictor import MLPredictor
 from strategies.confluence_strategy import ConfluenceStrategy  # New 2026 multi-factor system
+from strategies.daily_trend import DailyTrendStrategy
 from notifications.reporter import Reporter
 
 
@@ -134,6 +136,10 @@ class TradingBot:
         momentum_config = strategy_config.get('momentum', {})
         scalper_config = strategy_config.get('scalper', {})
         pairs = momentum_config.get('pairs', scalper_config.get('pairs', []))
+        daily_trend_config = strategy_config.get('daily_trend', {})
+        if daily_trend_config.get('enabled'):
+            # Die Trendfolge braucht ihre eigenen Paare im Feed (Tageskerzen).
+            pairs = list(daily_trend_config.get('pairs', pairs))
 
         if self.is_live:
             # === LIVE MODE ===
@@ -180,8 +186,19 @@ class TradingBot:
         else:
             # === PAPER MODE (Standard) ===
             self.order_engine = OrderEngine(config=fees_config)
-            # Kraken als Default für Paper (gute EUR-Paare, kein Key nötig)
-            self.crypto_feed = KrakenFeed(config={'pairs': pairs})
+            feed_name = str(general.get('data_feed', 'kraken')).lower()
+            if feed_name == 'fusion':
+                # Bitpanda Fusion liefert auch Marktdaten nur mit API-Key.
+                import os
+                fusion_key = os.getenv('FUSION_API_KEY') or os.getenv('BITPANDA_API_KEY')
+                if not fusion_key:
+                    raise RuntimeError(
+                        "general.data_feed ist 'fusion', aber FUSION_API_KEY fehlt in secrets.env."
+                    )
+                self.crypto_feed = FusionFeed(api_key=fusion_key, config={'pairs': pairs})
+            else:
+                # Kraken als Default für Paper (gute EUR-Paare, kein Key nötig)
+                self.crypto_feed = KrakenFeed(config={'pairs': pairs})
 
         # Strategien
         self.momentum = MomentumStrategy(config=momentum_config)
@@ -197,6 +214,17 @@ class TradingBot:
             self.logger.info("ConfluenceStrategy (neues Multi-Factor System) aktiviert")
         else:
             self.confluence_strategy = None
+
+        # Trendfolge auf Tageskerzen (Long/Flat, Spot) — siehe docs/TREND_TAGESBASIS.md
+        self.daily_trend: Optional[DailyTrendStrategy] = None
+        if daily_trend_config.get('enabled'):
+            self.daily_trend = DailyTrendStrategy(config=daily_trend_config)
+            self.logger.info(
+                f"DailyTrendStrategy aktiviert: {', '.join(self.daily_trend.pairs)} | "
+                f"SMA{self.daily_trend.params.ma_days} "
+                f"+{self.daily_trend.params.entry_buffer_pct:.0%}/-{self.daily_trend.params.exit_buffer_pct:.0%} | "
+                f"Notstopp {self.daily_trend.params.max_loss_pct:.0%}"
+            )
 
         # Phase 6: Regime tracking for change alerting
         self._last_regime_name: Optional[str] = None
@@ -308,10 +336,13 @@ class TradingBot:
             asyncio.create_task(self._supervise(self._telegram_hourly_loop, 'telegram')),
         ]
 
+        if self.daily_trend is not None:
+            tasks.append(asyncio.create_task(self._supervise(self._daily_trend_loop, 'daily_trend')))
+
         if self.use_confluence_strategy:
             # Nur das neue Multi-Factor Confluence System (Phase 1-6)
             tasks.append(asyncio.create_task(self._supervise(self._confluence_loop, 'confluence')))
-        else:
+        elif self.daily_trend is None:
             # Alte Strategien (wenn Confluence nicht als Haupt-System aktiviert ist)
             tasks.append(asyncio.create_task(self._supervise(self._momentum_loop, 'momentum')))
             tasks.append(asyncio.create_task(self._supervise(self._scalper_loop, 'scalper')))
@@ -737,6 +768,170 @@ class TradingBot:
                 self.logger.error(f"Fehler im Confluence-Loop: {e}")
                 await asyncio.sleep(30)
 
+    async def _daily_trend_loop(self):
+        """
+        Trendfolge auf Tageskerzen: eine Entscheidung je abgeschlossener Tageskerze.
+
+        Der Loop läuft stündlich, handelt aber nur, wenn seit der letzten
+        Prüfung eine neue Tageskerze abgeschlossen wurde. So sieht der Bot
+        dieselben Kerzen wie der Backtester (tools/backtest_daily_trend.py).
+        """
+        strat = self.daily_trend
+        if strat is None:
+            return
+
+        self.logger.info(
+            f"DailyTrend-Loop gestartet ({', '.join(strat.pairs)}, Prüfung alle "
+            f"{strat.interval_seconds // 60} Min)"
+        )
+
+        min_equity = strat.min_equity_for_trade(self.risk_manager.MAX_POSITION_SIZE)
+        state = self.portfolio.get_state()
+        if state.equity < min_equity:
+            self.logger.warning(
+                f"[DAILY TREND] Eigenkapital {state.equity:.2f} € liegt unter {min_equity:.0f} €. "
+                f"Mit der 20 %-Kappung je Position und {strat.min_order_amount:.0f} € Mindestorder "
+                f"kann keine Order platziert werden — der Bot beobachtet nur."
+            )
+
+        evaluated: Dict[str, object] = {}   # symbol -> Zeitstempel der zuletzt bewerteten Tageskerze
+
+        while self.running:
+            try:
+                for symbol in strat.pairs:
+                    candles = self._completed_candles(
+                        self.crypto_feed.get_candles(symbol, '1d', n=strat.params.warmup_bars + 20),
+                        timeframe_minutes=1440,
+                    )
+                    if candles is None or len(candles) < strat.params.warmup_bars:
+                        have = 0 if candles is None else len(candles)
+                        self.logger.debug(f"[DAILY TREND] {symbol}: {have}/{strat.params.warmup_bars} Tageskerzen")
+                        continue
+
+                    last_ts = candles['timestamp'].iloc[-1]
+                    if evaluated.get(symbol) == last_ts:
+                        continue
+
+                    price = self.crypto_feed.get_price(symbol, max_age_seconds=self._max_price_age)
+                    if price is None:
+                        continue   # nächste Runde erneut versuchen
+
+                    position = self.portfolio.positions.get(symbol)
+                    if position is not None:
+                        if position.market_type == 'daily_trend':
+                            should_exit, reason = strat.check_trend_exit(symbol, candles)
+                            if should_exit:
+                                await self._close_position(symbol, price, reason)
+                            else:
+                                self.logger.info(f"[DAILY TREND] {symbol}: Trend intakt, Position bleibt")
+                    else:
+                        signal = strat.analyze(symbol, candles, price)
+                        if signal is not None:
+                            self.logger.info(f"[DAILY TREND] {symbol}: {signal.reason}")
+                            await self._execute_daily_trend_signal(signal)
+                        else:
+                            sma = float(candles['close'].tail(strat.params.ma_days).mean())
+                            self.logger.info(
+                                f"[DAILY TREND] {symbol}: kein Einstieg (Schluss "
+                                f"{float(candles['close'].iloc[-1]):.2f}, SMA{strat.params.ma_days} {sma:.2f})"
+                            )
+
+                    evaluated[symbol] = last_ts
+
+                await asyncio.sleep(strat.interval_seconds)
+
+            except Exception as e:
+                self.logger.error(f"Fehler im DailyTrend-Loop: {e!r}")
+                await asyncio.sleep(60)
+
+    async def _execute_daily_trend_signal(self, signal):
+        """
+        Kauft Spot ohne Hebel. Größe: Wunschanteil, dann die harten Grenzen des
+        RiskManagers, dann das verfügbare Cash. Unter der Mindestorder der
+        Börse wird nicht gehandelt, sondern erklärt, warum.
+        """
+        strat = self.daily_trend
+        if strat is None or signal.symbol in self.portfolio.positions:
+            return
+
+        state = self.portfolio.get_state()
+        size = strat.target_notional(state.equity)
+        sl_distance_pct = strat.params.max_loss_pct
+
+        # check_trade meldet je Aufruf nur eine Reduktion — deshalb wiederholen,
+        # bis die Größe alle Regeln erfüllt.
+        risk_check = None
+        for _ in range(4):
+            risk_check = self.risk_manager.check_trade(
+                portfolio_equity=state.equity,
+                position_size=size,
+                leverage=1,
+                current_positions=len(state.positions),
+                consecutive_losses=self.portfolio.consecutive_losses,
+                daily_drawdown=self.portfolio.get_daily_drawdown(),
+                sl_distance_pct=sl_distance_pct,
+            )
+            if (risk_check.action == RiskAction.REDUCE_SIZE
+                    and risk_check.suggested_size and risk_check.suggested_size < size):
+                size = risk_check.suggested_size
+                continue
+            break
+
+        if risk_check.action in (RiskAction.BLOCK, RiskAction.COOLDOWN, RiskAction.CLOSE_ALL):
+            self.logger.warning(f"[DAILY TREND] {signal.symbol} nicht gekauft: {risk_check.reason}")
+            return
+
+        fee_rate = self.config.get('fees', {}).get('crypto_taker', 0.0006)
+        size = min(size, state.balance / (1.0 + fee_rate) * 0.999)
+
+        if size < strat.min_order_amount:
+            self.logger.warning(
+                f"[DAILY TREND] {signal.symbol}: Ordergröße {size:.2f} € unter Mindestorder "
+                f"{strat.min_order_amount:.0f} € (Equity {state.equity:.2f} €, Kappung "
+                f"{self.risk_manager.MAX_POSITION_SIZE:.0%}). Kein Kauf."
+            )
+            return
+
+        result = await self.order_engine.execute_market_order(
+            symbol=signal.symbol,
+            side='buy',
+            size=size,
+            current_price=signal.price,
+            leverage=1,
+            strategy='daily_trend',
+        )
+        if not result.success:
+            self.logger.warning(f"[DAILY TREND] Order für {signal.symbol} nicht ausgeführt")
+            return
+
+        filled_size = result.order.filled_size or size
+        self.portfolio.open_position(
+            symbol=signal.symbol,
+            side='long',
+            size=filled_size,
+            price=result.execution_price,
+            leverage=1,
+            strategy='daily_trend',
+            market_type='daily_trend',
+            stop_loss=signal.stop_loss,
+            take_profit=None,
+            fees=result.total_fees,
+        )
+        self.reporter.print_info(
+            f"DAILY TREND: KAUF {signal.symbol} @ {result.execution_price:.2f} € | "
+            f"{filled_size:.2f} € | Notstopp {signal.stop_loss:.2f}"
+        )
+        if self.reporter.telegram and self._telegram_config.get('send_trade_alerts', True):
+            msg = (
+                f"🟢 <b>TREND-KAUF</b> {signal.symbol}\n"
+                f"Einstieg: {result.execution_price:.2f} €\n"
+                f"Größe: {filled_size:.2f} € (Spot, kein Hebel)\n"
+                f"Notstopp: {signal.stop_loss:.2f} € | Ausstieg, wenn der Tagesschluss unter die "
+                f"SMA{strat.params.ma_days} fällt\n"
+                f"{signal.reason}"
+            )
+            self._spawn(self.reporter.telegram.send_message(msg))
+
     async def _risk_check_loop(self):
         """Risk-Check Loop (alle 5 Minuten)"""
         self.logger.info("Risk-Check-Loop gestartet")
@@ -1130,6 +1325,17 @@ class TradingBot:
                     await self._close_position(symbol, current_price, reason)
                 continue
 
+            if position.market_type == 'daily_trend':
+                # Trendfolge: der reguläre Ausstieg passiert im DailyTrend-Loop auf
+                # Tagesschluss-Basis. Hier nur der Notstopp gegen den Live-Preis.
+                sl = position.stop_loss
+                if sl and current_price <= sl:
+                    await self._close_position(
+                        symbol, current_price,
+                        f"Notstopp erreicht ({current_price:.2f} <= {sl:.2f})"
+                    )
+                continue
+
             if position.market_type == 'momentum':
                 strategy = self.momentum
             else:
@@ -1154,7 +1360,10 @@ class TradingBot:
         if not position:
             return
 
-        fees = position.size * 0.0006  # Taker Fee (size ist bereits in USD)
+        # Taker-Gebühr aus der Config (Fusion Stufe 1: 0,25 %). Der alte Festwert
+        # 0,06 % ließ jeden Exit um den Faktor 4 zu billig aussehen.
+        fee_rate = self.config.get('fees', {}).get('crypto_taker', 0.0006)
+        fees = position.size * fee_rate
 
         trade = self.portfolio.close_position(
             symbol=symbol,
@@ -1254,6 +1463,9 @@ class TradingBot:
             'scalper': self.scalper.get_statistics(),
             'ml': self.ml_predictor.get_statistics()
         }
+
+        if self.daily_trend is not None:
+            stats['daily_trend'] = self.daily_trend.get_statistics()
 
         if self.confluence_strategy is not None:
             stats['confluence'] = {

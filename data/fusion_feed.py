@@ -56,7 +56,7 @@ class FusionFeed:
 
     BASE_URL = 'https://api.fusion.bitpanda.com'
     DEFAULT_PAIRS = ['BTC_EUR', 'ETH_EUR', 'SOL_EUR']
-    TIMEFRAMES = ['1m', '5m', '15m', '1h']
+    TIMEFRAMES = ['1m', '5m', '15m', '1h', '1d']   # 1d für die DailyTrendStrategy
 
     # Wie kraken_feed.CANDLE_HISTORY: über 250, damit der 200-EMA-Trendfilter
     # nicht still auf eine kürzere Spanne zurückfällt.

@@ -17,13 +17,22 @@ python backtest.py
 # Run parameter grid search for strategy optimization
 python backtest.py --grid
 
+# Backtest the active DailyTrend strategy (daily candles, Fusion fees, several windows)
+python tools/backtest_daily_trend.py
+python tools/backtest_daily_trend.py --capital 100,250,500 --ma 50,100,150,200 --max-loss 0.08
+
+# Run the test suite (no network needed)
+python -m pytest tests/ -q
+
 # Monitor logs in real-time
 tail -f bot.log
 ```
 
 ## Architecture Overview
 
-This is an **async Python paper-trading bot** for crypto spot markets, trading EUR pairs. It uses real-time data from Kraken (via CCXT), multiple concurrent trading strategies, simulated order execution, and a SQLite-backed portfolio.
+This is an **async Python paper-trading bot** for crypto spot markets, trading EUR pairs. It uses real-time data from Kraken (via CCXT) or Bitpanda Fusion (REST), simulated order execution, and a SQLite-backed portfolio.
+
+**Active strategy since 2026-09-11: `strategies/daily_trend.py`** — slow trend following on daily candles, long/flat, spot, no leverage, no shorts. Everything faster (Confluence on 5m, Momentum, Scalper, ML) is disabled because it loses money under Bitpanda Fusion's real conditions (0.25% fee per side, spot only, 25 EUR minimum order). See `docs/TREND_TAGESBASIS.md` and `docs/BACKTEST_BEFUNDE.md` before touching strategy code.
 
 ### Core Flow
 
@@ -55,14 +64,22 @@ trading-bot/
 │   └── backtester.py           # Historical simulation engine with grid-search support
 ├── strategies/
 │   ├── __init__.py
-│   ├── momentum.py             # EMA 9/21 crossover + RSI filter + 1h trend filter
+│   ├── daily_trend.py          # ACTIVE: SMA trend following on daily candles, long/flat, spot
+│   ├── momentum.py             # EMA 9/21 crossover + RSI filter + 1h trend filter (disabled)
 │   ├── crypto_scalper.py       # RSI+BB+Volume mean-reversion & breakout (currently disabled)
 │   └── ml_predictor.py         # GradientBoosting price direction predictor (optional LSTM)
 ├── notifications/
 │   ├── __init__.py
 │   └── reporter.py             # Rich console UI + Telegram/Discord notifications
-├── main.py                     # Bot orchestrator with 7 async loops
-├── backtest.py                 # Standalone backtester entry point
+├── tools/
+│   ├── backtest_daily_trend.py # Backtester for the active strategy (same signal code as the bot)
+│   └── backtest_confluence.py  # Legacy Confluence calibration sweep
+├── tests/                      # pytest suite (synthetic data, no network)
+├── docs/
+│   ├── TREND_TAGESBASIS.md     # Why daily trend following, rules, capital limit, how to backtest
+│   └── BACKTEST_BEFUNDE.md     # Why Confluence was retired (fees, overfitting)
+├── main.py                     # Bot orchestrator with async loops
+├── backtest.py                 # Legacy backtester entry point
 ├── requirements.txt
 └── trades.db                   # SQLite database (auto-created at runtime)
 ```
@@ -78,7 +95,9 @@ trading-bot/
 | `core/reconciliation.py` | Startup reconciliation between local state and exchange (critical for live) |
 | `data/onetrading_ccxt_feed.py` | Recommended live data feed (CCXT `onetrading`, supports auth) |
 | `data/kraken_feed.py` | Good public EUR feed for paper mode |
-| `strategies/momentum.py` | EMA 9/21 crossover with RSI + 1h trend filter (main strategy) |
+| `strategies/daily_trend.py` | **Active**: SMA(100) trend following on daily candles, long/flat, hysteresis buffers, 8% emergency stop |
+| `data/fusion_feed.py` | Bitpanda Fusion REST feed (needs `FUSION_API_KEY`, select with `general.data_feed: fusion`) |
+| `strategies/momentum.py` | EMA 9/21 crossover with RSI + 1h trend filter (disabled) |
 | `strategies/crypto_scalper.py` | RSI+BB+Volume mean-reversion & breakout |
 | `strategies/ml_predictor.py` | Gradient Boosting price direction predictor |
 | `notifications/reporter.py` | Rich console + Telegram (Money Boy / "i bims" style) |
@@ -90,7 +109,8 @@ The `TradingBot` class runs 7 concurrent async loops:
 | Loop | Interval | Responsibility |
 |------|----------|----------------|
 | `_main_loop` | 1s | Price updates, pending order checks, exit conditions (TP/SL/trailing) |
-| `_momentum_loop` | 30s | EMA crossover signals on 5m candles with 1h trend filter |
+| `_daily_trend_loop` | 1h | **Active**. Acts once per completed daily candle: buy when close > SMA with buffer and rising SMA, sell when close < SMA minus buffer |
+| `_momentum_loop` | 30s | EMA crossover signals on 5m candles with 1h trend filter (disabled) |
 | `_scalper_loop` | 15s | RSI/BB/breakout signals on 1m candles (disabled in config) |
 | `_ml_loop` | 5min | Model retraining and ML-based signal generation |
 | `_risk_check_loop` | 5min | Drawdown and exposure checks; may pause trading |
@@ -129,7 +149,22 @@ All feeds compute these on candle data:
 
 ## Strategies
 
-### Momentum (strategies/momentum.py) — ENABLED
+### Daily Trend (strategies/daily_trend.py) — ENABLED
+
+- **Signal** on completed daily candles (UTC), running candle is cut off
+  - ENTRY: close > SMA(100) × 1.01 and SMA(100) > SMA(100) ten days ago
+  - EXIT: close < SMA(100) × 0.98
+  - Emergency stop: 8% below entry, checked against live price in `_main_loop`
+- **Spot only**: leverage 1, long/flat, no take-profit
+- **Sizing**: 20% of equity per symbol, then RiskManager hard limits, then cash. Below the 25 EUR Fusion minimum order nothing is bought. With the 20% cap this means **equity below 125 EUR cannot trade at all** — the bot logs a warning and only observes.
+- **Backtester parity**: `tools/backtest_daily_trend.py` uses the same `compute_state()` function, fills at next day's open, applies fee, slippage, minimum order, hard risk limits and intraday stop. Judge parameters across all yearly windows, never by the best one. `--max-loss` is the first parameter to sweep on real data: a tighter stop keeps the 20% size but gets hit more often, a wider stop shrinks the size via the 2% risk cap.
+- **Expected**: 10–25 trades per year. Evidence says smaller drawdown than buy-and-hold, not reliably more return.
+
+### Confluence (strategies/confluence_strategy.py) — DISABLED
+
+Multi-factor system on 5m candles. Retired 2026-09-11: negative across three independent 90-day windows under real Fusion fees, optimal threshold unstable per window (see `docs/BACKTEST_BEFUNDE.md`). Keep it disabled.
+
+### Momentum (strategies/momentum.py) — DISABLED
 
 - **Signal**: EMA9 crosses EMA21 on 5m candles + RSI filter
   - LONG: EMA9 > EMA21 + RSI in [35, 55]
@@ -147,7 +182,7 @@ All feeds compute these on candle data:
 - **Leverage**: Base 20x, max 50x, scaled by confidence
 - Disabled via `scalper.enabled: false` in settings.yaml (too noisy on 1m timeframe)
 
-### ML Predictor (strategies/ml_predictor.py) — ENABLED
+### ML Predictor (strategies/ml_predictor.py) — DISABLED
 
 - **Model**: `GradientBoostingClassifier` (100 estimators, depth=5, lr=0.1)
 - **Features**: RSI, RSI-change, BB position, volume ratio, 5m/15m price change, EMA cross, momentum, volatility, sentiment
@@ -217,12 +252,26 @@ All feeds compute these on candle data:
 ```yaml
 general:
   mode: paper          # NEVER change to 'live' without explicit user confirmation
-  start_capital: 100   # EUR
+  start_capital: 100   # EUR — below 125 the daily_trend strategy cannot place a 25 EUR minimum order
   base_currency: EUR
+  data_feed: kraken    # kraken | fusion (fusion needs FUSION_API_KEY)
 
 strategies:
-  momentum:
+  daily_trend:
     enabled: true
+    pairs: [BTC_EUR, ETH_EUR]
+    ma_days: 100
+    entry_buffer_pct: 0.01
+    exit_buffer_pct: 0.02
+    require_rising_ma: true
+    slope_days: 10
+    max_loss_pct: 0.08
+    allocation_pct: 0.20
+    min_order_amount: 25
+    interval_seconds: 3600
+
+  momentum:
+    enabled: false
     leverage: 10        # Base leverage (scales 10–20x by confidence)
     pairs: [BTC_EUR, ETH_EUR, SOL_EUR]
     take_profit: 0.015  # 1.5%
@@ -238,9 +287,12 @@ strategies:
     enabled: false      # Disabled — too noisy on 1m candles
 
   ml:
-    enabled: true
+    enabled: false
     retrain_hours: 6
     min_confidence: 0.65
+
+  confluence:
+    enabled: false      # Retired — see docs/BACKTEST_BEFUNDE.md
 
 risk:
   max_risk_per_trade: 0.02
@@ -251,8 +303,8 @@ risk:
   cooldown_after_losses: 300
 
 fees:
-  crypto_maker: 0.0004
-  crypto_taker: 0.0006
+  crypto_maker: 0.0025  # Bitpanda Fusion tier 1: 0.25% per side, no maker rebate
+  crypto_taker: 0.0025
 
 notifications:
   console: true
@@ -267,6 +319,7 @@ notifications:
 Copy `config/secrets.env.example` to `config/secrets.env` and set:
 - `TELEGRAM_BOT_TOKEN`: Bot token from @BotFather
 - `TELEGRAM_CHAT_ID`: Target chat/user ID
+- `FUSION_API_KEY`: Bitpanda Fusion key (market data needs it too), for `data_feed: fusion` and `--source fusion` backtests
 
 ## Code Conventions
 
@@ -315,3 +368,6 @@ Copy `config/secrets.env.example` to `config/secrets.env` and set:
 4. The **scalper strategy is intentionally disabled** — do not re-enable without testing
 5. All Telegram messages intentionally use casual Austrian dialect — do not "fix" the style
 6. The backtester uses **Binance data**, not CoinGecko (the existing CLAUDE.md was outdated on this point)
+7. **Do not re-enable Confluence, Momentum, Scalper or ML** as trading strategies. Under Fusion fees (0.50% round-trip) every sub-hourly strategy tested here loses money. Any new strategy idea must first pass `tools/backtest_daily_trend.py`-style checks: real fees, long-only, minimum order, several independent windows.
+8. **Bitpanda Fusion is spot only**: no shorts, no leverage. Never assume otherwise in strategy code.
+9. The 20% position cap and 2% risk cap in `RiskManager` mean the bot needs at least 125 EUR equity to place a 25 EUR order. Do not "fix" this by lowering the minimum order or raising the caps on your own — that is the account owner's decision.
