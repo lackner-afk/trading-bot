@@ -31,6 +31,7 @@ from strategies.crypto_scalper import CryptoScalper, SignalType
 from strategies.momentum import MomentumStrategy
 from strategies.ml_predictor import MLPredictor
 from strategies.confluence_strategy import ConfluenceStrategy  # New 2026 multi-factor system
+from strategies.jdk_orderflow import JDKOrderflowStrategy
 from notifications.reporter import Reporter
 
 
@@ -198,6 +199,19 @@ class TradingBot:
         else:
             self.confluence_strategy = None
 
+        # JDK-Orderflow-Strategie (Key Levels + Orderflow-Bestätigung, 1h)
+        jdk_config = strategy_config.get('jdk', {})
+        if jdk_config.get('enabled', False):
+            self.jdk = JDKOrderflowStrategy(config=jdk_config)
+            # Nur Pairs, für die der Feed auch Kerzen lädt
+            missing = [p for p in self.jdk.pairs if p not in pairs]
+            if missing:
+                self.logger.warning(f"JDK: Pairs ohne Feed werden ignoriert: {missing}")
+            self.jdk.pairs = [p for p in self.jdk.pairs if p in pairs]
+            self.logger.info(f"JDK-Orderflow-Strategie aktiviert für {self.jdk.pairs}")
+        else:
+            self.jdk = None
+
         # Phase 6: Regime tracking for change alerting
         self._last_regime_name: Optional[str] = None
         self._last_regime_confidence: float = 0.0
@@ -316,6 +330,9 @@ class TradingBot:
             tasks.append(asyncio.create_task(self._supervise(self._momentum_loop, 'momentum')))
             tasks.append(asyncio.create_task(self._supervise(self._scalper_loop, 'scalper')))
             tasks.append(asyncio.create_task(self._supervise(self._ml_loop, 'ml')))
+
+        if self.jdk is not None:
+            tasks.append(asyncio.create_task(self._supervise(self._jdk_loop, 'jdk')))
 
         # Warte auf Beendigung
         try:
@@ -737,6 +754,45 @@ class TradingBot:
                 self.logger.error(f"Fehler im Confluence-Loop: {e}")
                 await asyncio.sleep(30)
 
+    async def _jdk_loop(self):
+        """
+        JDK-Orderflow-Loop: prüft auf abgeschlossenen 1h-Kerzen, ob der Preis eine
+        Key-Level-Zone mit Orderflow-Bestätigung testet oder die VAL zurückerobert.
+        """
+        jdk_cfg = self.config.get('strategies', {}).get('jdk', {})
+        interval = jdk_cfg.get('interval_seconds', 60)
+        timeframe = self.jdk.timeframe
+        tf_minutes = int(self.jdk._bar_delta().total_seconds() // 60)
+        self.logger.info(f"JDK-Loop gestartet ({timeframe}, alle {interval}s)")
+
+        while self.running:
+            try:
+                for symbol in self.jdk.pairs:
+                    # Wie im Backtest: bei offener Position nicht neu bewerten,
+                    # sonst verbraucht ein ungenutztes Signal den Cooldown.
+                    if symbol in self.portfolio.positions:
+                        continue
+                    candles = self._completed_candles(
+                        self.crypto_feed.get_candles(symbol, timeframe, n=self.jdk.lookback_bars + 1),
+                        timeframe_minutes=tf_minutes)
+                    price = self.crypto_feed.get_price(symbol, max_age_seconds=self._max_price_age)
+                    if candles is None or price is None:
+                        continue
+
+                    signal = self.jdk.analyze(symbol, candles, price)
+                    if signal is None:
+                        continue
+
+                    self.logger.info(f"[JDK] {signal.signal_type.value.upper()} {symbol} @ {price:.2f} | "
+                                     f"{signal.reason}")
+                    await self._execute_signal(signal, strategy_name='jdk')
+
+                await asyncio.sleep(interval)
+
+            except Exception as e:
+                self.logger.error(f"Fehler im JDK-Loop: {e}")
+                await asyncio.sleep(30)
+
     async def _risk_check_loop(self):
         """Risk-Check Loop (alle 5 Minuten)"""
         self.logger.info("Risk-Check-Loop gestartet")
@@ -1106,12 +1162,24 @@ class TradingBot:
 
             current_price = prices[symbol]
 
+            # JDK: Stop auf Break-Even nachziehen, sobald der Trade 1R im Plus ist.
+            # Danach gelten dieselben festen SL/TP-Regeln wie bei Confluence.
+            if position.market_type == 'jdk' and self.jdk is not None:
+                new_sl = self.jdk.breakeven_stop(position.side, position.entry_price,
+                                                 position.stop_loss, current_price)
+                if new_sl is not None:
+                    self.logger.info(f"[JDK] {symbol}: Stop auf Break-Even {new_sl:.2f} "
+                                     f"(vorher {position.stop_loss:.2f})")
+                    position.stop_loss = new_sl
+                    self.portfolio._save_state()
+
             # Richtige Strategie für Exit-Check wählen (Phase 5)
-            if position.market_type == 'confluence':
-                # Dedizierte Confluence-Exits: NUR die ATR-kalibrierten TP/SL aus dem
-                # Signal (5x/7x ATR). Kein Trailing-Stop — der Momentum-Fallback mit
-                # 0.5%-Trailing hat Gewinner vor dem Ziel gekappt und damit das im
-                # Backtest kalibrierte Profil (68% WR) zerstört.
+            if position.market_type in ('confluence', 'jdk'):
+                # Dedizierte Exits (Confluence + JDK): NUR die festen TP/SL aus dem
+                # Signal (Confluence: 5x/7x ATR, JDK: nächstes Key Level). Kein
+                # Trailing-Stop — der Momentum-Fallback mit 0.5%-Trailing hat
+                # Gewinner vor dem Ziel gekappt und damit das im Backtest
+                # kalibrierte Profil (68% WR) zerstört.
                 sl = position.stop_loss
                 tp = position.take_profit
                 should_exit, reason = False, ''
@@ -1260,6 +1328,9 @@ class TradingBot:
                 'enabled': True,
                 'last_regime': getattr(self.confluence_strategy, '_last_regime', None),
             }
+
+        if self.jdk is not None:
+            stats['jdk'] = self.jdk.get_statistics()
 
         return stats
 
