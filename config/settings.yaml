@@ -83,10 +83,13 @@ strategies:
     min_confidence: 0.65
 
   # ============================================================
-  # CONFLUENCE (Phase 1-6 neues Multi-Factor System) — aktiviert
+  # CONFLUENCE (Phase 1-6 neues Multi-Factor System) — DEAKTIVIERT
   # ============================================================
+  # Aus seit Einführung der JDK-Strategie, damit JDK allein und sauber
+  # messbar läuft (unter realen Gebühren verlustbringend, siehe
+  # docs/BACKTEST_BEFUNDE.md). Parameter bleiben für Vergleiche erhalten.
   confluence:
-    enabled: true
+    enabled: false
     interval_seconds: 45
     # ACHTUNG Skala: Der Confluence-Score liegt auf 0-1 (gewichtetes Mittel der
     # Faktor-Scores). Die alten Werte 5.8/3.5 stammten von einer nie umgesetzten
