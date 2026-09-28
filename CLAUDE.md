@@ -81,6 +81,7 @@ trading-bot/
 | `strategies/momentum.py` | EMA 9/21 crossover with RSI + 1h trend filter (main strategy) |
 | `strategies/crypto_scalper.py` | RSI+BB+Volume mean-reversion & breakout |
 | `strategies/ml_predictor.py` | Gradient Boosting price direction predictor |
+| `strategies/jdk_orderflow.py` | Key levels (VAL/POC/nPOC/AVWAP) + orderflow confirmation, after JDK Analysis |
 | `notifications/reporter.py` | Rich console + Telegram (Money Boy / "i bims" style) |
 
 ### Async Loop Structure (main.py)
@@ -139,6 +140,16 @@ All feeds compute these on candle data:
 - **Cooldown**: 300s per symbol after signal
 - **Leverage**: 10–20x depending on confidence (RSI + EMA spread)
 - **Backtest results**: +4.2% return, 60% win rate, 6.3% max DD, Sharpe 1.14
+
+### JDK Orderflow (strategies/jdk_orderflow.py) — ENABLED (paper, untested on real data)
+
+- Approach of JDK Analysis (@The_JDK99): trade key levels only when orderflow confirms
+- **Levels (1h, 10-day range)**: range VAL/POC/VAH, naked POCs, LVNs, uptrend AVWAP, session VWAP, 50% range
+- **Setup 1 `level_test`**: ≥2 level types in one zone + rejection wick or CVD absorption
+- **Setup 2 `failed_auction`**: close below range VAL, then 2 closes back above with buy delta
+- Orderflow delta is estimated from OHLCV (no footprint data via CCXT)
+- Spot: `long_only: true`, `leverage: 1`; min R:R 2 after 0.25% fees; stop to break-even at +1R
+- Loop `_jdk_loop` (60s) in main.py; backtest: `python tools/backtest_jdk.py`; docs: `docs/JDK_STRATEGIE.md`
 
 ### Scalper (strategies/crypto_scalper.py) — DISABLED
 

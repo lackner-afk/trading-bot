@@ -83,10 +83,13 @@ strategies:
     min_confidence: 0.65
 
   # ============================================================
-  # CONFLUENCE (Phase 1-6 neues Multi-Factor System) — aktiviert
+  # CONFLUENCE (Phase 1-6 neues Multi-Factor System) — DEAKTIVIERT
   # ============================================================
+  # Aus seit Einführung der JDK-Strategie, damit JDK allein und sauber
+  # messbar läuft (unter realen Gebühren verlustbringend, siehe
+  # docs/BACKTEST_BEFUNDE.md). Parameter bleiben für Vergleiche erhalten.
   confluence:
-    enabled: true
+    enabled: false
     interval_seconds: 45
     # ACHTUNG Skala: Der Confluence-Score liegt auf 0-1 (gewichtetes Mittel der
     # Faktor-Scores). Die alten Werte 5.8/3.5 stammten von einer nie umgesetzten
@@ -115,6 +118,44 @@ strategies:
     align_with_trend: true
     min_signal_confidence: 0.0    # Gate im Loop aus — min_confluence_score im Aggregator ist maßgeblich
     loss_cooldown_seconds: 1800   # Symbol 30 Min pausieren nach Verlust-Exit (gegen Verlustketten)
+
+  # ============================================================
+  # JDK-ORDERFLOW (Ansatz von JDK Analysis / @The_JDK99)
+  # ============================================================
+  # Key Levels (Range-VAL/POC/VAH, nPOC, LVN, AVWAP, Session-VWAP, 50%) +
+  # Orderflow-Bestätigung (geschätztes Delta, Absorption, Ablehnung).
+  # Zwei Setups: Level-Test mit Confluence und Failed Auction / VAL-Reclaim.
+  # Details: docs/JDK_STRATEGIE.md. Backtest: tools/backtest_jdk.py
+  # NOCH NICHT MIT ECHTEN DATEN GEBACKTESTET — nur Paper-Betrieb.
+  jdk:
+    enabled: true
+    interval_seconds: 60
+    timeframe: 1h              # Levels und Trigger auf 1h — weniger Trades, Gebühren fallen weniger ins Gewicht
+    pairs:
+      - BTC_EUR
+      - ETH_EUR
+      - SOL_EUR
+    long_only: true            # Spot-Börse (Bitpanda Fusion): keine Shorts
+    leverage: 1                # Spot: kein Hebel
+    lookback_bars: 240         # 10 Tage Range für das Volumenprofil
+    profile_exclude_bars: 12   # letzte 12h (der Test selbst) nicht ins Range-Profil
+    profile_bins: 48
+    value_area_pct: 0.70
+    min_confluence_levels: 2   # mind. 2 verschiedene Level-Typen in der Zone
+    zone_atr_mult: 0.35        # Zonenbreite: max(0.35×ATR, 0.2% des Preises)
+    zone_min_pct: 0.002
+    wick_ratio: 0.4            # Ablehnung: unterer Docht ≥ 40% der Kerze
+    divergence_lookback: 12    # Absorption: neues Tief, aber höheres CVD-Tief
+    volume_spike_mult: 1.5
+    acceptance_bars: 2         # Reclaim: 2 Schlusskurse in Folge über der VAL
+    reclaim_lookback: 24       # max. Dauer des Ausflugs unter die VAL (Kerzen)
+    max_deviation_atr: 4.0     # tiefer = Range-Bruch, kein Fehlausbruch
+    sl_buffer_atr: 0.25        # Stop 0.25×ATR unter Zone/Deviation-Tief
+    min_rr: 2.0                # Mindest-Chance/Risiko nach Gebühren
+    min_tp_pct: 0.010          # Ziel mind. 1% entfernt (Round-Trip 0.5%)
+    fee_pct: 0.0025            # Taker-Gebühr Bitpanda Fusion Stufe 1
+    breakeven_at_r: 1.0        # Stop auf Break-Even (inkl. Gebühren) ab +1R
+    cooldown_bars: 6           # 6 Kerzen Pause pro Symbol nach einem Signal
 
 risk:
   max_risk_per_trade: 0.02      # 2% des Portfolios
