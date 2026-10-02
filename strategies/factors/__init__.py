@@ -16,6 +16,7 @@ from .technical import (
 from .macro_news import MacroNewsFilter
 from .economic_calendar import EconomicCalendar, EconomicEvent, EventImpact
 from .sentiment import SentimentFactor
+from .order_flow import OrderFlowFactor, compute_order_flow
 
 __all__ = [
     "Factor",
@@ -23,4 +24,5 @@ __all__ = [
     "MultiTimeframeTrendFactor",
     "MomentumFactor",
     "VolatilityFilter",
+    "OrderFlowFactor",
 ]
