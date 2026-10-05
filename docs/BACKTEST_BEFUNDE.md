@@ -22,7 +22,7 @@ mehr das Money Management.
 | Shorts möglich | Fusion ist Spot: *„Short selling is not supported by this API"* |
 | Hebel 6× | Kein Leverage-Feld in der Fusion-Order-API |
 | Startkapital 10.000 € im Harness | Reales Konto: 100 € |
-| Mindestordergröße egal | Fusion: **25 €** je Order (BTC-EUR) |
+| Mindestordergröße egal | Fusion: **25 €** je Order (BTC-EUR, gemessen über `/v1/pairs` → `minOrderAmount` am 24.08.2026; kann je Paar und über die Zeit abweichen — der Bot liest den Wert seit Okt. 2026 bei jedem Start neu) |
 | 200-EMA-Trendfilter | Live nur 99er-EMA — `.tail(100)` kappte die Historie |
 
 ## Der Kern: das Risiko/Ertrag-Verhältnis

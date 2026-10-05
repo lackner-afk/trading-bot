@@ -93,6 +93,10 @@ auf der später gehandelt werden soll. Orders bleiben im Paper-Modus simuliert.
 - Fehlt der Key, bricht der Bot beim Start mit einer klaren Meldung ab
 - Alternative ohne Key: `data_feed: kraken`
 
+Die Simulation hält sich an die Regeln von Bitpanda Fusion (`exchange_rules` in `config/settings.yaml`):
+nur Kaufen/Verkaufen (keine Shorts, kein Hebel), 0,25 % Gebühr pro Order und die Mindestordergröße,
+die Bitpanda beim Start pro Paar meldet (steht im `bot.log`: `BTC_EUR: min. Ordervolumen … EUR`).
+
 ## Datenfeed: One Trading (Live-Modus)
 
 | Kanal | Protokoll | Zweck |

@@ -198,10 +198,17 @@ All feeds compute these on candle data:
 | Parameter | Detail |
 |-----------|--------|
 | Slippage | 0.01–0.05% random, scales with order size |
-| Maker fee | 0.04% |
-| Taker fee | 0.06% |
+| Maker fee | 0.25% (`fees.crypto_maker`, Bitpanda Fusion tier 1) |
+| Taker fee | 0.25% (`fees.crypto_taker`) — also used for exit fees in `_close_position` |
 | Latency | 50–200ms simulated |
 | Partial fills | Orders >$50k have 20–30% partial fill probability |
+
+### Exchange Rules (`exchange_rules` in settings.yaml)
+
+Applied in `_execute_signal` in every mode, so paper results match Bitpanda Fusion:
+- `spot_only: true` → SHORT signals are skipped, leverage forced to 1
+- Minimum order per pair comes from FusionFeed `/v1/pairs` (`minOrderAmount`); `min_order_eur` is only the fallback.
+  Orders below the minimum are raised to it if that stays within the 25% margin cap, otherwise skipped
 
 ### Order Types
 

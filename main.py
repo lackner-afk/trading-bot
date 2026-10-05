@@ -242,6 +242,12 @@ class TradingBot:
         # Telegram-Config
         self._telegram_config = self.config.get('notifications', {}).get('telegram', {})
 
+        # Regeln der Zielbörse (Bitpanda Fusion): Spot = nur Long, kein Hebel
+        exchange_rules = self.config.get('exchange_rules', {})
+        self.spot_only: bool = bool(exchange_rules.get('spot_only', True))
+        self._min_order_fallback: float = float(exchange_rules.get('min_order_eur', 10.0))
+        self._throttled_logs: Dict[str, datetime] = {}
+
         # Dashboard: Verlauf, Aktivitäts-Feed und Pause-Schalter
         self.dashboard_store = DashboardStore(
             db_path=str(self.portfolio.db_path),
@@ -410,6 +416,19 @@ class TradingBot:
         exc = task.exception()
         if exc is not None:
             self.logger.error(f"Hintergrund-Task fehlgeschlagen: {exc!r}")
+
+    def _min_order_amount(self, symbol: str) -> float:
+        """Mindestorder in EUR: was die Börse meldet (/v1/pairs), sonst der Wert aus der Config."""
+        reported = getattr(self.crypto_feed, 'min_order_amount', {}).get(symbol)
+        return reported if reported and reported > 0 else self._min_order_fallback
+
+    def _log_throttled(self, key: str, message: str, every_s: int = 1800):
+        """Loggt eine wiederkehrende Meldung höchstens alle every_s Sekunden."""
+        now = datetime.now()
+        last = self._throttled_logs.get(key)
+        if last is None or (now - last).total_seconds() >= every_s:
+            self._throttled_logs[key] = now
+            self.logger.info(message)
 
     async def _record_event(self, event):
         """Schreibt einen Eintrag in den Dashboard-Feed. Fehler dort dürfen nie den Handel stören."""
@@ -882,6 +901,16 @@ class TradingBot:
         if self.trading_paused:
             return
 
+        # Regeln der Zielbörse — gelten auch im Paper-Modus, sonst rechnet der
+        # Test mit Shorts und Hebel, die es auf Bitpanda Fusion nicht gibt.
+        if self.spot_only and signal.signal_type != SignalType.LONG:
+            self._log_throttled(
+                f"short:{signal.symbol}",
+                f"[SPOT] Short-Signal {signal.symbol} ignoriert — die Börse kann nicht shorten."
+            )
+            return
+        leverage = 1 if self.spot_only else signal.suggested_leverage
+
         # Prüfe ob bereits Position für dieses Symbol existiert
         if signal.symbol in self.portfolio.positions:
             return
@@ -905,7 +934,7 @@ class TradingBot:
         risk_check = self.risk_manager.check_trade(
             portfolio_equity=state.equity,
             position_size=state.equity * 0.1,
-            leverage=signal.suggested_leverage,
+            leverage=leverage,
             current_positions=len(state.positions),
             consecutive_losses=self.portfolio.consecutive_losses,
             daily_drawdown=self.portfolio.get_daily_drawdown(),
@@ -936,7 +965,21 @@ class TradingBot:
         if margin > state.balance or state.balance < 20:
             return
 
-        position_size = margin * signal.suggested_leverage
+        position_size = margin * leverage
+
+        # Mindestordergröße der Börse: knapp darunter auf das Minimum anheben,
+        # solange die bisherigen Obergrenzen halten — sonst lieber gar nicht handeln.
+        min_order = self._min_order_amount(signal.symbol)
+        if position_size < min_order:
+            if min_order <= max_margin * leverage and min_order / leverage <= state.balance:
+                position_size = min_order
+            else:
+                self._log_throttled(
+                    f"minorder:{signal.symbol}",
+                    f"[MINDESTORDER] {signal.symbol}: {position_size:.2f} € unter Börsen-Minimum "
+                    f"{min_order:.2f} € und Anheben würde die Positionsgrenze sprengen — kein Trade."
+                )
+                return
 
         side = 'buy' if signal.signal_type == SignalType.LONG else 'sell'
 
@@ -945,7 +988,7 @@ class TradingBot:
             side=side,
             size=position_size,
             current_price=signal.price,
-            leverage=signal.suggested_leverage,
+            leverage=leverage,
             strategy=strategy_name
         )
 
@@ -958,7 +1001,7 @@ class TradingBot:
                 side='long' if signal.signal_type == SignalType.LONG else 'short',
                 size=filled_size,
                 price=result.execution_price,
-                leverage=signal.suggested_leverage,
+                leverage=leverage,
                 strategy=strategy_name,
                 market_type=strategy_name,
                 stop_loss=signal.stop_loss,
@@ -967,7 +1010,7 @@ class TradingBot:
             )
             if position:
                 await self._record_event(open_event(
-                    signal.symbol, position.side, signal.suggested_leverage, strategy_name
+                    signal.symbol, position.side, leverage, strategy_name
                 ))
 
             self.reporter.print_info(
@@ -984,7 +1027,7 @@ class TradingBot:
                     f"{emoji} <b>TRADE AUF</b> {direction} {signal.symbol}\n"
                     f"Einstieg: {result.execution_price:.4f}\n"
                     f"TP: {signal.take_profit:.4f} | SL: {signal.stop_loss:.4f}\n"
-                    f"Größe: {filled_size:.2f} (Hebel {signal.suggested_leverage}x) | "
+                    f"Größe: {filled_size:.2f} (Hebel {leverage}x) | "
                     f"Konfidenz {signal.confidence:.0%}"
                 )
                 self._spawn(self.reporter.telegram.send_message(msg))
@@ -1230,7 +1273,8 @@ class TradingBot:
         if not position:
             return
 
-        fees = position.size * 0.0006  # Taker Fee (size ist bereits in USD)
+        # Taker-Gebühr aus der Config (Bitpanda Fusion: 0,25 %) — war fest 0,06 %
+        fees = position.size * self.order_engine.fees.get('crypto_taker', 0.0006)
 
         trade = self.portfolio.close_position(
             symbol=symbol,

@@ -258,12 +258,13 @@ def strategy_name(key: Optional[str]) -> str:
 def open_event(symbol: str, side: str, leverage: float, strategy: str,
                ts: Optional[datetime] = None) -> ActivityEvent:
     direction = 'Long' if side == 'long' else 'Short'
+    lever = f" · Hebel {leverage:g}x" if leverage > 1 else ''
     return ActivityEvent(
         timestamp=ts or datetime.now(),
         kind='open',
         symbol=symbol,
         title=f"Einstieg {coin_name(symbol)}",
-        subtitle=f"{strategy_name(strategy)} · {direction} · Hebel {leverage:g}x",
+        subtitle=f"{strategy_name(strategy)} · {direction}{lever}",
         amount=None,
     )
 

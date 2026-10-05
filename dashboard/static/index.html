@@ -569,7 +569,9 @@
       ['Max. Risiko pro Trade', pct(s.max_risk_per_trade)],
       ['Max. Tages-Drawdown', pct(s.max_daily_drawdown, 0)],
       ['Max. Positionsgröße', s.max_position_size != null ? pct(s.max_position_size, 0) : '–'],
-      ['Max. Hebel', `${s.max_leverage}x`],
+      ['Handelsart', s.spot_only ? 'Spot — nur Long, ohne Hebel' : `Margin — bis ${s.max_leverage}x Hebel`],
+      ['Gebühr pro Order', s.taker_fee != null ? pct(s.taker_fee, 2) : '–'],
+      ['Mindestorder', Object.entries(s.min_orders || {}).map(([k, v]) => `${k.split('_')[0]} ${eur.format(v)}`).join(', ') || '–'],
       ['Max. gleichzeitige Positionen', s.max_concurrent_positions],
     ];
     $('settings').innerHTML = kv.map(([k, v]) => `<div>${esc(k)}</div><div>${esc(v)}</div>`).join('');

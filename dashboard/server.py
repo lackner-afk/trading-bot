@@ -380,4 +380,7 @@ class DashboardServer:
             'max_position_size': risk.get('max_position_size'),
             'max_leverage': rm.max_leverage,
             'max_concurrent_positions': rm.max_concurrent_positions,
+            'spot_only': self.bot.spot_only,
+            'taker_fee': self.bot.order_engine.fees.get('crypto_taker'),
+            'min_orders': {s: self.bot._min_order_amount(s) for s in pairs},
         }
