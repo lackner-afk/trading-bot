@@ -211,6 +211,15 @@ class Reporter:
         if self.session:
             await self.session.close()
 
+    @staticmethod
+    def _feed_name(config: Dict) -> str:
+        """Name der Kursquelle für den Banner — muss zur Auswahl in main.py passen."""
+        general = config.get('general', {})
+        if general.get('mode', 'paper') == 'live':
+            return 'One Trading (CCXT)'
+        return {'bitpanda': 'Bitpanda Fusion', 'kraken': 'Kraken'}.get(
+            general.get('data_feed', 'bitpanda'), general.get('data_feed', '?'))
+
     def print_startup_banner(self, config: Dict):
         """Zeigt Startup-Banner"""
         banner = Panel(
@@ -218,7 +227,7 @@ class Reporter:
                 "[bold cyan]Paper-Trading-Bot[/bold cyan]\n\n"
                 f"[green]Mode:[/green] {config.get('general', {}).get('mode', 'paper')}\n"
                 f"[green]Startkapital:[/green] ${config.get('general', {}).get('start_capital', 10000):,.2f}\n"
-                f"[green]Datenfeed:[/green] One Trading (Live WebSocket)\n\n"
+                f"[green]Datenfeed:[/green] {self._feed_name(config)}\n\n"
                 "[yellow]ACHTUNG: Dies ist eine SIMULATION - kein echtes Geld![/yellow]"
             ),
             title="[bold white]🤖 Bot Started[/bold white]",

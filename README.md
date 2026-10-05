@@ -20,7 +20,7 @@ Async Python Paper-Trading-Bot für Crypto-Spot-Märkte auf [One Trading](https:
 # Dependencies installieren
 pip install -r requirements.txt
 
-# Konfiguration vorbereiten (API Key optional)
+# Konfiguration vorbereiten — BITPANDA_API_KEY eintragen (für die Kurse nötig)
 cp config/secrets.env.example config/secrets.env
 ```
 
@@ -83,7 +83,17 @@ trading-bot/
 └── backtest.py                # Standalone Backtest-Runner
 ```
 
-## Datenfeed: One Trading
+## Datenfeed im Paper-Modus: Bitpanda Fusion
+
+Standard ist `general.data_feed: bitpanda` in `config/settings.yaml`. Der Bot holt Kurse,
+Kerzen und Geld-/Briefkurse (Orderbuch) direkt von Bitpanda Fusion — also von der Börse,
+auf der später gehandelt werden soll. Orders bleiben im Paper-Modus simuliert.
+
+- Braucht `BITPANDA_API_KEY` in `config/secrets.env`, auch für reine Marktdaten
+- Fehlt der Key, bricht der Bot beim Start mit einer klaren Meldung ab
+- Alternative ohne Key: `data_feed: kraken`
+
+## Datenfeed: One Trading (Live-Modus)
 
 | Kanal | Protokoll | Zweck |
 |-------|-----------|-------|

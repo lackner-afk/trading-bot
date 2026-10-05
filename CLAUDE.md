@@ -23,12 +23,12 @@ tail -f bot.log
 
 ## Architecture Overview
 
-This is an **async Python paper-trading bot** for crypto spot markets, trading EUR pairs. It uses real-time data from Kraken (via CCXT), multiple concurrent trading strategies, simulated order execution, and a SQLite-backed portfolio.
+This is an **async Python paper-trading bot** for crypto spot markets, trading EUR pairs. It uses real-time data from Bitpanda Fusion (paper mode default, `general.data_feed`), multiple concurrent trading strategies, simulated order execution, and a SQLite-backed portfolio.
 
 ### Core Flow
 
 1. **main.py** orchestrates everything via `asyncio` event loops
-2. **KrakenFeed** (primary) provides real-time prices via polling + historical candles via CCXT
+2. **FusionFeed** (paper default) provides Bitpanda Fusion prices, orderbook bid/ask and candles via REST; **KrakenFeed** is the keyless alternative (`data_feed: kraken`)
 3. **OneTradingFeed** (alternative) provides prices via WebSocket + REST candlesticks
 4. **Strategies** analyze data and generate directional signals
 5. **OrderEngine** simulates execution with realistic slippage and fees
@@ -104,7 +104,16 @@ The `TradingBot` class runs 7 concurrent async loops:
 
 ## Data Feeds
 
-### Primary: Kraken (kraken_feed.py)
+### Primary (paper): Bitpanda Fusion (fusion_feed.py)
+
+- Selected by `general.data_feed: bitpanda` (default); requires `BITPANDA_API_KEY` even for market data — startup fails loudly without it
+- Base URL `https://api.fusion.bitpanda.com`, pair format `BTC-EUR` mapped to `BTC_EUR`
+- Prices: `/v1/tickers` every 5s (mid price only) + `/v1/orderbook` for real bid/ask
+- Candles: `/v1/candles` every 60s (Unix seconds), `/v1/pairs` checked at startup (min order amount)
+
+### Alternative: Kraken (kraken_feed.py)
+
+- Selected by `general.data_feed: kraken`
 
 - Symbol mapping: `BTC_EUR` → `BTC/EUR` internally
 - Prices: `fetch_tickers` polled every 5s

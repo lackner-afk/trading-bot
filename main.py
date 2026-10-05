@@ -4,7 +4,7 @@ Trading-Bot Haupt-Orchestrator
 Koordiniert Datenfeeds, Strategien und Execution
 
 Unterstützt zwei Modi:
-- Paper (Default): Simulierte Orders + Kraken oder OneTrading Feed
+- Paper (Default): Simulierte Orders + Bitpanda-Fusion-Kurse (oder Kraken)
 - Live: Echte Orders auf One Trading via LiveOrderEngine + Reconciliation
 """
 
@@ -26,6 +26,7 @@ from core.order_engine import OrderEngine
 from core.live_order_engine import LiveOrderEngine
 from core.reconciliation import run_startup_reconciliation
 from data.kraken_feed import KrakenFeed
+from data.fusion_feed import FusionFeed
 from data.onetrading_ccxt_feed import OneTradingCCXTFeed
 from strategies.crypto_scalper import CryptoScalper, SignalType
 from strategies.momentum import MomentumStrategy
@@ -182,8 +183,25 @@ class TradingBot:
         else:
             # === PAPER MODE (Standard) ===
             self.order_engine = OrderEngine(config=fees_config)
-            # Kraken als Default für Paper (gute EUR-Paare, kein Key nötig)
-            self.crypto_feed = KrakenFeed(config={'pairs': pairs})
+            data_feed = general.get('data_feed', 'bitpanda')
+            if data_feed == 'bitpanda':
+                # Bitpanda Fusion: echte Kurse und Orderbuch der Börse, auf der
+                # später gehandelt werden soll. Braucht auch für Marktdaten einen Key.
+                import os
+                bitpanda_key = os.getenv('BITPANDA_API_KEY')
+                if not bitpanda_key:
+                    raise RuntimeError(
+                        "data_feed: bitpanda, aber BITPANDA_API_KEY fehlt in config/secrets.env! "
+                        "(Alternativ in settings.yaml data_feed: kraken setzen.)"
+                    )
+                self.crypto_feed = FusionFeed(api_key=bitpanda_key, config={'pairs': pairs})
+                self.logger.info("Datenfeed: Bitpanda Fusion")
+            elif data_feed == 'kraken':
+                # Öffentliche Kraken-Kurse, kein Key nötig
+                self.crypto_feed = KrakenFeed(config={'pairs': pairs})
+                self.logger.info("Datenfeed: Kraken")
+            else:
+                raise RuntimeError(f"Unbekannter data_feed '{data_feed}' — erlaubt: bitpanda, kraken")
 
         # Strategien
         self.momentum = MomentumStrategy(config=momentum_config)

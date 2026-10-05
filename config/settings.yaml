@@ -21,6 +21,10 @@ general:
   # tun würde. Erst nach einer erfolgreichen Testphase auf false setzen.
   shadow_mode: true
   start_capital: 100
+  # Woher die Kurse im Paper-Modus kommen:
+  #   bitpanda = Bitpanda Fusion (braucht BITPANDA_API_KEY in secrets.env)
+  #   kraken   = öffentliche Kraken-Kurse (kein Key)
+  data_feed: bitpanda
   # Preise, die älter sind, gelten als unbrauchbar: kein Entry, keine SL/TP-Prüfung.
   # Schützt bei Feed-Ausfall und nach macOS-Sleep vor Handel auf Geisterpreisen.
   max_price_age_seconds: 60
