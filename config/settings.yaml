@@ -146,6 +146,17 @@ notifications:
     event_alerts: false           # Regime-Wechsel- und Macro-Event-Meldungen aus
 
 # ============================================================
+# DASHBOARD ("Panda Pro") — im Browser: http://127.0.0.1:8080
+# ============================================================
+dashboard:
+  enabled: true
+  host: 127.0.0.1          # 0.0.0.0 = im Heimnetz erreichbar → dann DASHBOARD_TOKEN Pflicht
+  port: 8080
+  bot_name: Panda-9
+  initials: NL             # Kürzel oben rechts
+  snapshot_minutes: 5      # wie oft der Equity-Verlauf gespeichert wird
+
+# ============================================================
 # PHASE 6: MONITORING & ATTRIBUTION (wird in Code gelesen)
 # ============================================================
 monitoring:

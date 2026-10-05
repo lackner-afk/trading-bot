@@ -37,6 +37,24 @@ python backtest.py
 python backtest.py --grid
 ```
 
+## Dashboard ("Panda Pro")
+
+Läuft automatisch mit dem Bot. Im Browser öffnen: **http://127.0.0.1:8080**
+
+- **Gesamtwert** mit Verlauf (1T / 1W / 1M / 1J / Max) — alle 5 Min. gespeichert
+- **Bot-Karte** mit Schalter: aus = keine neuen Einstiege, Stop-Loss/Take-Profit laufen weiter.
+  Die Pause bleibt auch nach einem Neustart bestehen.
+- **Allokation**, **Strategien** (Ergebnis 30 Tage), **Risiko-Tacho** (0–100), **Letzte Aktivität**
+- Aktualisiert sich alle 5 Sekunden, funktioniert auch am Handy
+
+Einstellungen in `config/settings.yaml` unter `dashboard:`. Standardmäßig nur auf dem eigenen
+Rechner erreichbar. Für den Zugriff vom iPhone im WLAN `host: 0.0.0.0` setzen **und**
+`DASHBOARD_TOKEN` in `config/secrets.env` — ohne Token startet das Dashboard dann nicht.
+Aufruf: `http://<IP-des-Macs>:8080/?token=<DASHBOARD_TOKEN>`
+
+**Risiko-Wert:** 50 % Ausnutzung des Tages-Drawdown-Limits, 20 % belegte Positions-Slots,
+20 % gebundene Margin, 10 % Verlustserie. Unter 25 niedrig, ab 75 hoch.
+
 ## Projektstruktur
 
 ```

@@ -32,6 +32,8 @@ from strategies.momentum import MomentumStrategy
 from strategies.ml_predictor import MLPredictor
 from strategies.confluence_strategy import ConfluenceStrategy  # New 2026 multi-factor system
 from notifications.reporter import Reporter
+from dashboard.store import DashboardStore, open_event, close_event, control_event
+from dashboard.server import DashboardServer
 
 
 class TradingBot:
@@ -222,6 +224,23 @@ class TradingBot:
         # Telegram-Config
         self._telegram_config = self.config.get('notifications', {}).get('telegram', {})
 
+        # Dashboard: Verlauf, Aktivitäts-Feed und Pause-Schalter
+        self.dashboard_store = DashboardStore(
+            db_path=str(self.portfolio.db_path),
+            start_capital=general.get('start_capital', 10000)
+        )
+        dashboard_config = self.config.get('dashboard', {})
+        self.dashboard_enabled = dashboard_config.get('enabled', False)
+        self.dashboard = DashboardServer(self, self.dashboard_store, dashboard_config)
+
+        # Pause gilt nur für NEUE Einstiege — SL/TP laufen weiter. Der Zustand
+        # überlebt Neustarts, sonst würde der LaunchAgent eine Pause stillschweigend
+        # aufheben. Ohne Dashboard gibt es keinen Schalter, also auch keine Pause.
+        paused_flag = self.dashboard_store.get_flag('trading_paused') == '1'
+        self.trading_paused = paused_flag and self.dashboard_enabled
+        if paused_flag and not self.dashboard_enabled:
+            self.logger.warning("Gespeicherte Pause ignoriert — Dashboard ist deaktiviert.")
+
         # Callback setzen (funktioniert für beide Engines)
         self.order_engine.on_fill = self._on_order_fill
 
@@ -317,6 +336,11 @@ class TradingBot:
             tasks.append(asyncio.create_task(self._supervise(self._scalper_loop, 'scalper')))
             tasks.append(asyncio.create_task(self._supervise(self._ml_loop, 'ml')))
 
+        if self.dashboard_enabled:
+            tasks.append(asyncio.create_task(self._supervise(self.dashboard.run, 'dashboard')))
+        if self.trading_paused:
+            self.logger.warning("Bot startet PAUSIERT (über Dashboard gesetzt) — keine neuen Einstiege.")
+
         # Warte auf Beendigung
         try:
             # return_exceptions=True: ein gestorbener Loop darf die übrigen nicht
@@ -368,6 +392,33 @@ class TradingBot:
         exc = task.exception()
         if exc is not None:
             self.logger.error(f"Hintergrund-Task fehlgeschlagen: {exc!r}")
+
+    async def _record_event(self, event):
+        """Schreibt einen Eintrag in den Dashboard-Feed. Fehler dort dürfen nie den Handel stören."""
+        try:
+            await asyncio.to_thread(self.dashboard_store.add_event, event)
+        except Exception as e:
+            self.logger.warning(f"Dashboard-Eintrag fehlgeschlagen: {e!r}")
+
+    async def set_trading_paused(self, paused: bool, source: str = 'Dashboard'):
+        """Pausiert neue Einstiege oder nimmt sie wieder auf. Exits laufen immer weiter."""
+        if paused == self.trading_paused:
+            return
+        self.trading_paused = paused
+        await asyncio.to_thread(self.dashboard_store.set_flag, 'trading_paused', '1' if paused else '0')
+
+        if paused:
+            self.logger.warning(f"[PAUSE] Neue Einstiege pausiert ({source}). SL/TP bleiben aktiv.")
+            event = control_event("Bot pausiert", f"über {source} · nur Exits aktiv")
+            msg = "⏸️ <b>Bot pausiert</b>\nKeine neuen Einstiege. Offene Positionen behalten SL/TP."
+        else:
+            self.logger.info(f"[PAUSE] Handel wieder aufgenommen ({source}).")
+            event = control_event("Bot fortgesetzt", f"über {source}")
+            msg = "▶️ <b>Bot läuft wieder</b>\nNeue Einstiege sind wieder erlaubt."
+
+        await self._record_event(event)
+        if self.reporter.telegram:
+            self._spawn(self.reporter.telegram.send_message(msg))
 
     async def _supervise(self, factory, name: str):
         """
@@ -810,6 +861,9 @@ class TradingBot:
     async def _execute_signal(self, signal, strategy_name: str = 'momentum',
                              regime: str = None, macro_risk_multiplier: float = 1.0):
         """Führt Trading-Signal aus (Momentum oder Scalper)"""
+        if self.trading_paused:
+            return
+
         # Prüfe ob bereits Position für dieses Symbol existiert
         if signal.symbol in self.portfolio.positions:
             return
@@ -881,7 +935,7 @@ class TradingBot:
             # Die tatsächlich gefüllte Größe buchen, nicht die angeforderte —
             # bei einem Partial Fill hielt das Portfolio sonst mehr als die Order.
             filled_size = result.order.filled_size or position_size
-            self.portfolio.open_position(
+            position = self.portfolio.open_position(
                 symbol=signal.symbol,
                 side='long' if signal.signal_type == SignalType.LONG else 'short',
                 size=filled_size,
@@ -893,6 +947,10 @@ class TradingBot:
                 take_profit=signal.take_profit,
                 fees=result.total_fees
             )
+            if position:
+                await self._record_event(open_event(
+                    signal.symbol, position.side, signal.suggested_leverage, strategy_name
+                ))
 
             self.reporter.print_info(
                 f"{strategy_name.upper()}: {signal.signal_type.value.upper()} {signal.symbol} "
@@ -1170,6 +1228,7 @@ class TradingBot:
                 f"[CLOSE] {symbol} {trade.side} @ {price:.4f} | PnL {trade.pnl:+.2f} | Grund: {reason}"
             )
             self.reporter.print_trade_executed(trade)
+            await self._record_event(close_event(symbol, trade.pnl, position.market_type, reason))
             await self.reporter.send_trade_alert(trade)
 
             # Phase 6: Factor Attribution Update (wenn der Trade aus dem Confluence-System kam)

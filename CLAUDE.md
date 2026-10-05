@@ -58,6 +58,10 @@ trading-bot/
 │   ├── momentum.py             # EMA 9/21 crossover + RSI filter + 1h trend filter
 │   ├── crypto_scalper.py       # RSI+BB+Volume mean-reversion & breakout (currently disabled)
 │   └── ml_predictor.py         # GradientBoosting price direction predictor (optional LSTM)
+├── dashboard/
+│   ├── server.py               # aiohttp web server (Panda Pro UI), /api/state + /api/pause
+│   ├── store.py                # SQLite tables: equity_snapshots, dashboard_events, bot_flags
+│   └── static/index.html       # Single-file dashboard UI (vanilla JS + SVG, no CDN)
 ├── notifications/
 │   ├── __init__.py
 │   └── reporter.py             # Rich console UI + Telegram/Discord notifications
@@ -96,6 +100,7 @@ The `TradingBot` class runs 7 concurrent async loops:
 | `_risk_check_loop` | 5min | Drawdown and exposure checks; may pause trading |
 | `_reporting_loop` | 1h | Portfolio summaries in console |
 | `_telegram_hourly_loop` | 1h | Telegram notifications (rate-limited) |
+| `dashboard.run` | 5min | Web dashboard on 127.0.0.1:8080 + equity snapshots (if `dashboard.enabled`) |
 
 ## Data Feeds
 
@@ -298,6 +303,15 @@ Copy `config/secrets.env.example` to `config/secrets.env` and set:
 2. Momentum (EMA Cross)
 3. Mean Reversion (RSI+BB)
 4. Breakout (20-period high/low)
+
+## Dashboard (dashboard/)
+
+- Runs inside the bot process; reads live state from `TradingBot` (portfolio, risk manager, feed)
+- `TradingBot.trading_paused` blocks NEW entries only (checked in `_execute_signal`); exits keep running.
+  Persisted in `bot_flags` so a restart doesn't silently resume trading
+- Open/close/pause events are recorded via `TradingBot._record_event()` — failures there must never block trading
+- Binding to a non-loopback host requires `DASHBOARD_TOKEN`; POSTs check Origin + JSON content type
+- On first start the store backfills equity curve + activity from the existing `trades` table
 
 ## Notifications (notifications/reporter.py)
 
