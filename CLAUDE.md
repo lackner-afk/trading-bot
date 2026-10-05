@@ -286,18 +286,25 @@ Copy `config/secrets.env.example` to `config/secrets.env` and set:
 - Max 3 concurrent positions, 10% max per position, 5-period cooldown
 - Generates: Return%, Sharpe, Max DD, Win rate, Profit factor, Alpha vs. Buy&Hold
 
-<<<<<<< HEAD
 **Live Mode** is heavily guarded (see `LIVE_TRADING.md` and `tools/paper_to_live_checklist.py`). The bot supports both Paper and Live mode with proper branching in `main.py`.
 
-## Testing Strategies
-=======
 ### Strategies Tested in Backtest
->>>>>>> 9b3f3a1453c8b75481e9d6b3c1503aeaaedb5af7
 
 1. Scalper (RSI+BB+Volume)
 2. Momentum (EMA Cross)
 3. Mean Reversion (RSI+BB)
 4. Breakout (20-period high/low)
+
+## Bitpanda Trading Limits (docs/BITPANDA_API_LIMITS.md)
+
+Exchange-side safety net, independent of `core/risk_manager.py`:
+
+- `POST https://api.public.bitpanda.com/v1/trading-limits` with header `x-api-key`
+- Body: `buy_limit`, `sell_limit` (numbers), `currency_id` (UUID) — all required
+- `200` returns the limits plus `buy_budget_remaining` / `sell_budget_remaining`; `409` = limits already set for this key (POST cannot overwrite)
+- Limits are per API key, per day
+- Helper: `python tools/bitpanda_trading_limit.py --buy X --sell Y --currency-id <UUID> [--confirm]` (dry run without `--confirm`)
+- Keep `sell_limit` above `buy_limit` — otherwise the bot may be unable to close positions
 
 ## Notifications (notifications/reporter.py)
 

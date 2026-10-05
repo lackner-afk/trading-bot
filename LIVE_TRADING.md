@@ -128,6 +128,7 @@ Wir bauen die Schutzmaßnahmen jetzt schrittweise ein.
 
 ### Stufe 2: Small Capital Validation (1–5 % deines geplanten Risikokapitals)
 - [ ] `live_explicit_confirmation: true` + `LIVE_TRADING_ENABLED` gesetzt
+- [ ] **Tägliches Handelslimit auf dem Bitpanda-API-Key gesetzt** (`tools/bitpanda_trading_limit.py`, Verkaufslimit großzügiger als Kauflimit) — siehe [docs/BITPANDA_API_LIMITS.md](docs/BITPANDA_API_LIMITS.md)
 - [ ] Max. 200–500 € echtes Risiko (je nach deinem Gesamtvermögen)
 - [ ] Tägliche manuelle Überprüfung der Fills + Reconciliation
 - [ ] Stop-Loss / Drawdown-Limits in der Praxis beobachtet
