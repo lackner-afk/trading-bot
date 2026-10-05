@@ -4,7 +4,7 @@ Trading-Bot Haupt-Orchestrator
 Koordiniert Datenfeeds, Strategien und Execution
 
 Unterstützt zwei Modi:
-- Paper (Default): Simulierte Orders + Kraken oder OneTrading Feed
+- Paper (Default): Simulierte Orders + Bitpanda-Fusion-Kurse (oder Kraken)
 - Live: Echte Orders auf One Trading via LiveOrderEngine + Reconciliation
 """
 
@@ -26,12 +26,15 @@ from core.order_engine import OrderEngine
 from core.live_order_engine import LiveOrderEngine
 from core.reconciliation import run_startup_reconciliation
 from data.kraken_feed import KrakenFeed
+from data.fusion_feed import FusionFeed
 from data.onetrading_ccxt_feed import OneTradingCCXTFeed
 from strategies.crypto_scalper import CryptoScalper, SignalType
 from strategies.momentum import MomentumStrategy
 from strategies.ml_predictor import MLPredictor
 from strategies.confluence_strategy import ConfluenceStrategy  # New 2026 multi-factor system
 from notifications.reporter import Reporter
+from dashboard.store import DashboardStore, open_event, close_event, control_event
+from dashboard.server import DashboardServer
 
 
 class TradingBot:
@@ -180,8 +183,25 @@ class TradingBot:
         else:
             # === PAPER MODE (Standard) ===
             self.order_engine = OrderEngine(config=fees_config)
-            # Kraken als Default für Paper (gute EUR-Paare, kein Key nötig)
-            self.crypto_feed = KrakenFeed(config={'pairs': pairs})
+            data_feed = general.get('data_feed', 'bitpanda')
+            if data_feed == 'bitpanda':
+                # Bitpanda Fusion: echte Kurse und Orderbuch der Börse, auf der
+                # später gehandelt werden soll. Braucht auch für Marktdaten einen Key.
+                import os
+                bitpanda_key = os.getenv('BITPANDA_API_KEY')
+                if not bitpanda_key:
+                    raise RuntimeError(
+                        "data_feed: bitpanda, aber BITPANDA_API_KEY fehlt in config/secrets.env! "
+                        "(Alternativ in settings.yaml data_feed: kraken setzen.)"
+                    )
+                self.crypto_feed = FusionFeed(api_key=bitpanda_key, config={'pairs': pairs})
+                self.logger.info("Datenfeed: Bitpanda Fusion")
+            elif data_feed == 'kraken':
+                # Öffentliche Kraken-Kurse, kein Key nötig
+                self.crypto_feed = KrakenFeed(config={'pairs': pairs})
+                self.logger.info("Datenfeed: Kraken")
+            else:
+                raise RuntimeError(f"Unbekannter data_feed '{data_feed}' — erlaubt: bitpanda, kraken")
 
         # Strategien
         self.momentum = MomentumStrategy(config=momentum_config)
@@ -221,6 +241,29 @@ class TradingBot:
 
         # Telegram-Config
         self._telegram_config = self.config.get('notifications', {}).get('telegram', {})
+
+        # Regeln der Zielbörse (Bitpanda Fusion): Spot = nur Long, kein Hebel
+        exchange_rules = self.config.get('exchange_rules', {})
+        self.spot_only: bool = bool(exchange_rules.get('spot_only', True))
+        self._min_order_fallback: float = float(exchange_rules.get('min_order_eur', 10.0))
+        self._throttled_logs: Dict[str, datetime] = {}
+
+        # Dashboard: Verlauf, Aktivitäts-Feed und Pause-Schalter
+        self.dashboard_store = DashboardStore(
+            db_path=str(self.portfolio.db_path),
+            start_capital=general.get('start_capital', 10000)
+        )
+        dashboard_config = self.config.get('dashboard', {})
+        self.dashboard_enabled = dashboard_config.get('enabled', False)
+        self.dashboard = DashboardServer(self, self.dashboard_store, dashboard_config)
+
+        # Pause gilt nur für NEUE Einstiege — SL/TP laufen weiter. Der Zustand
+        # überlebt Neustarts, sonst würde der LaunchAgent eine Pause stillschweigend
+        # aufheben. Ohne Dashboard gibt es keinen Schalter, also auch keine Pause.
+        paused_flag = self.dashboard_store.get_flag('trading_paused') == '1'
+        self.trading_paused = paused_flag and self.dashboard_enabled
+        if paused_flag and not self.dashboard_enabled:
+            self.logger.warning("Gespeicherte Pause ignoriert — Dashboard ist deaktiviert.")
 
         # Callback setzen (funktioniert für beide Engines)
         self.order_engine.on_fill = self._on_order_fill
@@ -317,6 +360,11 @@ class TradingBot:
             tasks.append(asyncio.create_task(self._supervise(self._scalper_loop, 'scalper')))
             tasks.append(asyncio.create_task(self._supervise(self._ml_loop, 'ml')))
 
+        if self.dashboard_enabled:
+            tasks.append(asyncio.create_task(self._supervise(self.dashboard.run, 'dashboard')))
+        if self.trading_paused:
+            self.logger.warning("Bot startet PAUSIERT (über Dashboard gesetzt) — keine neuen Einstiege.")
+
         # Warte auf Beendigung
         try:
             # return_exceptions=True: ein gestorbener Loop darf die übrigen nicht
@@ -368,6 +416,46 @@ class TradingBot:
         exc = task.exception()
         if exc is not None:
             self.logger.error(f"Hintergrund-Task fehlgeschlagen: {exc!r}")
+
+    def _min_order_amount(self, symbol: str) -> float:
+        """Mindestorder in EUR: was die Börse meldet (/v1/pairs), sonst der Wert aus der Config."""
+        reported = getattr(self.crypto_feed, 'min_order_amount', {}).get(symbol)
+        return reported if reported and reported > 0 else self._min_order_fallback
+
+    def _log_throttled(self, key: str, message: str, every_s: int = 1800):
+        """Loggt eine wiederkehrende Meldung höchstens alle every_s Sekunden."""
+        now = datetime.now()
+        last = self._throttled_logs.get(key)
+        if last is None or (now - last).total_seconds() >= every_s:
+            self._throttled_logs[key] = now
+            self.logger.info(message)
+
+    async def _record_event(self, event):
+        """Schreibt einen Eintrag in den Dashboard-Feed. Fehler dort dürfen nie den Handel stören."""
+        try:
+            await asyncio.to_thread(self.dashboard_store.add_event, event)
+        except Exception as e:
+            self.logger.warning(f"Dashboard-Eintrag fehlgeschlagen: {e!r}")
+
+    async def set_trading_paused(self, paused: bool, source: str = 'Dashboard'):
+        """Pausiert neue Einstiege oder nimmt sie wieder auf. Exits laufen immer weiter."""
+        if paused == self.trading_paused:
+            return
+        self.trading_paused = paused
+        await asyncio.to_thread(self.dashboard_store.set_flag, 'trading_paused', '1' if paused else '0')
+
+        if paused:
+            self.logger.warning(f"[PAUSE] Neue Einstiege pausiert ({source}). SL/TP bleiben aktiv.")
+            event = control_event("Bot pausiert", f"über {source} · nur Exits aktiv")
+            msg = "⏸️ <b>Bot pausiert</b>\nKeine neuen Einstiege. Offene Positionen behalten SL/TP."
+        else:
+            self.logger.info(f"[PAUSE] Handel wieder aufgenommen ({source}).")
+            event = control_event("Bot fortgesetzt", f"über {source}")
+            msg = "▶️ <b>Bot läuft wieder</b>\nNeue Einstiege sind wieder erlaubt."
+
+        await self._record_event(event)
+        if self.reporter.telegram:
+            self._spawn(self.reporter.telegram.send_message(msg))
 
     async def _supervise(self, factory, name: str):
         """
@@ -810,6 +898,19 @@ class TradingBot:
     async def _execute_signal(self, signal, strategy_name: str = 'momentum',
                              regime: str = None, macro_risk_multiplier: float = 1.0):
         """Führt Trading-Signal aus (Momentum oder Scalper)"""
+        if self.trading_paused:
+            return
+
+        # Regeln der Zielbörse — gelten auch im Paper-Modus, sonst rechnet der
+        # Test mit Shorts und Hebel, die es auf Bitpanda Fusion nicht gibt.
+        if self.spot_only and signal.signal_type != SignalType.LONG:
+            self._log_throttled(
+                f"short:{signal.symbol}",
+                f"[SPOT] Short-Signal {signal.symbol} ignoriert — die Börse kann nicht shorten."
+            )
+            return
+        leverage = 1 if self.spot_only else signal.suggested_leverage
+
         # Prüfe ob bereits Position für dieses Symbol existiert
         if signal.symbol in self.portfolio.positions:
             return
@@ -833,7 +934,7 @@ class TradingBot:
         risk_check = self.risk_manager.check_trade(
             portfolio_equity=state.equity,
             position_size=state.equity * 0.1,
-            leverage=signal.suggested_leverage,
+            leverage=leverage,
             current_positions=len(state.positions),
             consecutive_losses=self.portfolio.consecutive_losses,
             daily_drawdown=self.portfolio.get_daily_drawdown(),
@@ -864,7 +965,21 @@ class TradingBot:
         if margin > state.balance or state.balance < 20:
             return
 
-        position_size = margin * signal.suggested_leverage
+        position_size = margin * leverage
+
+        # Mindestordergröße der Börse: knapp darunter auf das Minimum anheben,
+        # solange die bisherigen Obergrenzen halten — sonst lieber gar nicht handeln.
+        min_order = self._min_order_amount(signal.symbol)
+        if position_size < min_order:
+            if min_order <= max_margin * leverage and min_order / leverage <= state.balance:
+                position_size = min_order
+            else:
+                self._log_throttled(
+                    f"minorder:{signal.symbol}",
+                    f"[MINDESTORDER] {signal.symbol}: {position_size:.2f} € unter Börsen-Minimum "
+                    f"{min_order:.2f} € und Anheben würde die Positionsgrenze sprengen — kein Trade."
+                )
+                return
 
         side = 'buy' if signal.signal_type == SignalType.LONG else 'sell'
 
@@ -873,7 +988,7 @@ class TradingBot:
             side=side,
             size=position_size,
             current_price=signal.price,
-            leverage=signal.suggested_leverage,
+            leverage=leverage,
             strategy=strategy_name
         )
 
@@ -881,18 +996,22 @@ class TradingBot:
             # Die tatsächlich gefüllte Größe buchen, nicht die angeforderte —
             # bei einem Partial Fill hielt das Portfolio sonst mehr als die Order.
             filled_size = result.order.filled_size or position_size
-            self.portfolio.open_position(
+            position = self.portfolio.open_position(
                 symbol=signal.symbol,
                 side='long' if signal.signal_type == SignalType.LONG else 'short',
                 size=filled_size,
                 price=result.execution_price,
-                leverage=signal.suggested_leverage,
+                leverage=leverage,
                 strategy=strategy_name,
                 market_type=strategy_name,
                 stop_loss=signal.stop_loss,
                 take_profit=signal.take_profit,
                 fees=result.total_fees
             )
+            if position:
+                await self._record_event(open_event(
+                    signal.symbol, position.side, leverage, strategy_name
+                ))
 
             self.reporter.print_info(
                 f"{strategy_name.upper()}: {signal.signal_type.value.upper()} {signal.symbol} "
@@ -908,7 +1027,7 @@ class TradingBot:
                     f"{emoji} <b>TRADE AUF</b> {direction} {signal.symbol}\n"
                     f"Einstieg: {result.execution_price:.4f}\n"
                     f"TP: {signal.take_profit:.4f} | SL: {signal.stop_loss:.4f}\n"
-                    f"Größe: {filled_size:.2f} (Hebel {signal.suggested_leverage}x) | "
+                    f"Größe: {filled_size:.2f} (Hebel {leverage}x) | "
                     f"Konfidenz {signal.confidence:.0%}"
                 )
                 self._spawn(self.reporter.telegram.send_message(msg))
@@ -1154,7 +1273,8 @@ class TradingBot:
         if not position:
             return
 
-        fees = position.size * 0.0006  # Taker Fee (size ist bereits in USD)
+        # Taker-Gebühr aus der Config (Bitpanda Fusion: 0,25 %) — war fest 0,06 %
+        fees = position.size * self.order_engine.fees.get('crypto_taker', 0.0006)
 
         trade = self.portfolio.close_position(
             symbol=symbol,
@@ -1170,6 +1290,7 @@ class TradingBot:
                 f"[CLOSE] {symbol} {trade.side} @ {price:.4f} | PnL {trade.pnl:+.2f} | Grund: {reason}"
             )
             self.reporter.print_trade_executed(trade)
+            await self._record_event(close_event(symbol, trade.pnl, position.market_type, reason))
             await self.reporter.send_trade_alert(trade)
 
             # Phase 6: Factor Attribution Update (wenn der Trade aus dem Confluence-System kam)

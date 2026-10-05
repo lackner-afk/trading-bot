@@ -23,12 +23,12 @@ tail -f bot.log
 
 ## Architecture Overview
 
-This is an **async Python paper-trading bot** for crypto spot markets, trading EUR pairs. It uses real-time data from Kraken (via CCXT), multiple concurrent trading strategies, simulated order execution, and a SQLite-backed portfolio.
+This is an **async Python paper-trading bot** for crypto spot markets, trading EUR pairs. It uses real-time data from Bitpanda Fusion (paper mode default, `general.data_feed`), multiple concurrent trading strategies, simulated order execution, and a SQLite-backed portfolio.
 
 ### Core Flow
 
 1. **main.py** orchestrates everything via `asyncio` event loops
-2. **KrakenFeed** (primary) provides real-time prices via polling + historical candles via CCXT
+2. **FusionFeed** (paper default) provides Bitpanda Fusion prices, orderbook bid/ask and candles via REST; **KrakenFeed** is the keyless alternative (`data_feed: kraken`)
 3. **OneTradingFeed** (alternative) provides prices via WebSocket + REST candlesticks
 4. **Strategies** analyze data and generate directional signals
 5. **OrderEngine** simulates execution with realistic slippage and fees
@@ -58,6 +58,10 @@ trading-bot/
 │   ├── momentum.py             # EMA 9/21 crossover + RSI filter + 1h trend filter
 │   ├── crypto_scalper.py       # RSI+BB+Volume mean-reversion & breakout (currently disabled)
 │   └── ml_predictor.py         # GradientBoosting price direction predictor (optional LSTM)
+├── dashboard/
+│   ├── server.py               # aiohttp web server (Panda Pro UI), /api/state + /api/pause
+│   ├── store.py                # SQLite tables: equity_snapshots, dashboard_events, bot_flags
+│   └── static/index.html       # Single-file dashboard UI (vanilla JS + SVG, no CDN)
 ├── notifications/
 │   ├── __init__.py
 │   └── reporter.py             # Rich console UI + Telegram/Discord notifications
@@ -96,10 +100,20 @@ The `TradingBot` class runs 7 concurrent async loops:
 | `_risk_check_loop` | 5min | Drawdown and exposure checks; may pause trading |
 | `_reporting_loop` | 1h | Portfolio summaries in console |
 | `_telegram_hourly_loop` | 1h | Telegram notifications (rate-limited) |
+| `dashboard.run` | 5min | Web dashboard on 127.0.0.1:8080 + equity snapshots (if `dashboard.enabled`) |
 
 ## Data Feeds
 
-### Primary: Kraken (kraken_feed.py)
+### Primary (paper): Bitpanda Fusion (fusion_feed.py)
+
+- Selected by `general.data_feed: bitpanda` (default); requires `BITPANDA_API_KEY` even for market data — startup fails loudly without it
+- Base URL `https://api.fusion.bitpanda.com`, pair format `BTC-EUR` mapped to `BTC_EUR`
+- Prices: `/v1/tickers` every 5s (mid price only) + `/v1/orderbook` for real bid/ask
+- Candles: `/v1/candles` every 60s (Unix seconds), `/v1/pairs` checked at startup (min order amount)
+
+### Alternative: Kraken (kraken_feed.py)
+
+- Selected by `general.data_feed: kraken`
 
 - Symbol mapping: `BTC_EUR` → `BTC/EUR` internally
 - Prices: `fetch_tickers` polled every 5s
@@ -184,10 +198,17 @@ All feeds compute these on candle data:
 | Parameter | Detail |
 |-----------|--------|
 | Slippage | 0.01–0.05% random, scales with order size |
-| Maker fee | 0.04% |
-| Taker fee | 0.06% |
+| Maker fee | 0.25% (`fees.crypto_maker`, Bitpanda Fusion tier 1) |
+| Taker fee | 0.25% (`fees.crypto_taker`) — also used for exit fees in `_close_position` |
 | Latency | 50–200ms simulated |
 | Partial fills | Orders >$50k have 20–30% partial fill probability |
+
+### Exchange Rules (`exchange_rules` in settings.yaml)
+
+Applied in `_execute_signal` in every mode, so paper results match Bitpanda Fusion:
+- `spot_only: true` → SHORT signals are skipped, leverage forced to 1
+- Minimum order per pair comes from FusionFeed `/v1/pairs` (`minOrderAmount`); `min_order_eur` is only the fallback.
+  Orders below the minimum are raised to it if that stays within the 25% margin cap, otherwise skipped
 
 ### Order Types
 
@@ -305,6 +326,15 @@ Exchange-side safety net, independent of `core/risk_manager.py`:
 - Limits are per API key, per day
 - Helper: `python tools/bitpanda_trading_limit.py --buy X --sell Y --currency-id <UUID> [--confirm]` (dry run without `--confirm`)
 - Keep `sell_limit` above `buy_limit` — otherwise the bot may be unable to close positions
+
+## Dashboard (dashboard/)
+
+- Runs inside the bot process; reads live state from `TradingBot` (portfolio, risk manager, feed)
+- `TradingBot.trading_paused` blocks NEW entries only (checked in `_execute_signal`); exits keep running.
+  Persisted in `bot_flags` so a restart doesn't silently resume trading
+- Open/close/pause events are recorded via `TradingBot._record_event()` — failures there must never block trading
+- Binding to a non-loopback host requires `DASHBOARD_TOKEN`; POSTs check Origin + JSON content type
+- On first start the store backfills equity curve + activity from the existing `trades` table
 
 ## Notifications (notifications/reporter.py)
 

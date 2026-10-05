@@ -20,7 +20,7 @@ Async Python Paper-Trading-Bot für Crypto-Spot-Märkte auf [One Trading](https:
 # Dependencies installieren
 pip install -r requirements.txt
 
-# Konfiguration vorbereiten (API Key optional)
+# Konfiguration vorbereiten — BITPANDA_API_KEY eintragen (für die Kurse nötig)
 cp config/secrets.env.example config/secrets.env
 ```
 
@@ -36,6 +36,24 @@ python backtest.py
 # Parameter-Optimierung (Grid Search)
 python backtest.py --grid
 ```
+
+## Dashboard ("Panda Pro")
+
+Läuft automatisch mit dem Bot. Im Browser öffnen: **http://127.0.0.1:8080**
+
+- **Gesamtwert** mit Verlauf (1T / 1W / 1M / 1J / Max) — alle 5 Min. gespeichert
+- **Bot-Karte** mit Schalter: aus = keine neuen Einstiege, Stop-Loss/Take-Profit laufen weiter.
+  Die Pause bleibt auch nach einem Neustart bestehen.
+- **Allokation**, **Strategien** (Ergebnis 30 Tage), **Risiko-Tacho** (0–100), **Letzte Aktivität**
+- Aktualisiert sich alle 5 Sekunden, funktioniert auch am Handy
+
+Einstellungen in `config/settings.yaml` unter `dashboard:`. Standardmäßig nur auf dem eigenen
+Rechner erreichbar. Für den Zugriff vom iPhone im WLAN `host: 0.0.0.0` setzen **und**
+`DASHBOARD_TOKEN` in `config/secrets.env` — ohne Token startet das Dashboard dann nicht.
+Aufruf: `http://<IP-des-Macs>:8080/?token=<DASHBOARD_TOKEN>`
+
+**Risiko-Wert:** 50 % Ausnutzung des Tages-Drawdown-Limits, 20 % belegte Positions-Slots,
+20 % gebundene Margin, 10 % Verlustserie. Unter 25 niedrig, ab 75 hoch.
 
 ## Projektstruktur
 
@@ -65,7 +83,21 @@ trading-bot/
 └── backtest.py                # Standalone Backtest-Runner
 ```
 
-## Datenfeed: One Trading
+## Datenfeed im Paper-Modus: Bitpanda Fusion
+
+Standard ist `general.data_feed: bitpanda` in `config/settings.yaml`. Der Bot holt Kurse,
+Kerzen und Geld-/Briefkurse (Orderbuch) direkt von Bitpanda Fusion — also von der Börse,
+auf der später gehandelt werden soll. Orders bleiben im Paper-Modus simuliert.
+
+- Braucht `BITPANDA_API_KEY` in `config/secrets.env`, auch für reine Marktdaten
+- Fehlt der Key, bricht der Bot beim Start mit einer klaren Meldung ab
+- Alternative ohne Key: `data_feed: kraken`
+
+Die Simulation hält sich an die Regeln von Bitpanda Fusion (`exchange_rules` in `config/settings.yaml`):
+nur Kaufen/Verkaufen (keine Shorts, kein Hebel), 0,25 % Gebühr pro Order und die Mindestordergröße,
+die Bitpanda beim Start pro Paar meldet (steht im `bot.log`: `BTC_EUR: min. Ordervolumen … EUR`).
+
+## Datenfeed: One Trading (Live-Modus)
 
 | Kanal | Protokoll | Zweck |
 |-------|-----------|-------|

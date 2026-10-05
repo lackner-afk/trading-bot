@@ -1,0 +1,632 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#09090b">
+<title>Panda Pro</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%2334d399'/%3E%3Cstop offset='1' stop-color='%238b8cf6'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #09090b;
+    --card: #141416;
+    --card-2: #1c1c1f;
+    --line: #26262a;
+    --text: #f4f4f5;
+    --muted: #8b8b93;
+    --faint: #5b5b63;
+    --green: #34d399;
+    --green-soft: rgba(52, 211, 153, .14);
+    --red: #f87171;
+    --red-soft: rgba(248, 113, 113, .14);
+    --violet: #8b8cf6;
+    --amber: #fbbf24;
+    --radius: 20px;
+    --font: "Inter", ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--font); -webkit-font-smoothing: antialiased; }
+  body { min-height: 100vh; background:
+    radial-gradient(900px 500px at 100% -10%, rgba(139,140,246,.10), transparent 60%),
+    radial-gradient(700px 400px at -10% 0%, rgba(52,211,153,.06), transparent 60%), var(--bg); }
+  button { font: inherit; color: inherit; }
+  .num { font-variant-numeric: tabular-nums; }
+
+  /* ---------- Kopfzeile ---------- */
+  header {
+    position: sticky; top: 0; z-index: 10;
+    display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
+    padding: 14px 24px; border-bottom: 1px solid #18181b;
+    background: rgba(9,9,11,.8); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 14px; }
+  .brand .logo { width: 22px; height: 22px; border-radius: 6px; background: linear-gradient(135deg, var(--green), var(--violet)); }
+  .brand .pro { color: var(--muted); font-weight: 400; }
+  nav { display: flex; gap: 4px; }
+  nav button {
+    border: 0; background: transparent; color: var(--muted); font-size: 13px;
+    padding: 7px 13px; border-radius: 999px; cursor: pointer;
+  }
+  nav button:hover { color: var(--text); }
+  nav button[aria-current="page"] { background: #232327; color: var(--text); }
+  .head-right { display: flex; justify-content: flex-end; align-items: center; gap: 10px; }
+  .mode-pill { font-size: 11px; padding: 4px 9px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+  .mode-pill.live { color: var(--red); border-color: rgba(248,113,113,.4); }
+  .avatar {
+    width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center;
+    background: #2a2a2f; font-size: 11px; font-weight: 600; letter-spacing: .02em;
+  }
+
+  /* ---------- Layout ---------- */
+  main { max-width: 1180px; margin: 0 auto; padding: 28px 24px 60px; }
+  .grid { display: grid; gap: 16px; }
+  .row-1 { grid-template-columns: 1fr 340px; }
+  .row-2 { grid-template-columns: repeat(3, 1fr); margin-top: 16px; }
+  .card {
+    background: var(--card); border: 1px solid #1f1f23; border-radius: var(--radius);
+    padding: 22px; min-width: 0;
+  }
+  .card h2 { font-size: 14px; font-weight: 600; margin: 0 0 18px; }
+  .label { font-size: 12px; color: var(--muted); }
+  .view[hidden] { display: none; }
+
+  /* ---------- Gesamtwert ---------- */
+  .equity-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+  .big { font-size: clamp(40px, 6vw, 60px); font-weight: 600; letter-spacing: -.035em; line-height: 1.05; margin: 6px 0 8px; }
+  .big .dec { color: #6e6e76; }
+  .delta { font-size: 13px; }
+  .up { color: var(--green); } .down { color: var(--red); } .flat { color: var(--muted); }
+  .delta .label { margin-left: 6px; }
+  .ranges { display: flex; background: #1f1f23; border-radius: 10px; padding: 3px; gap: 2px; }
+  .ranges button {
+    border: 0; background: transparent; color: var(--muted); font-size: 12px;
+    padding: 6px 11px; border-radius: 8px; cursor: pointer;
+  }
+  .ranges button[aria-pressed="true"] { background: #3a3a40; color: var(--text); }
+  .chart { position: relative; height: 220px; margin-top: 18px; }
+  .chart svg { width: 100%; height: 100%; display: block; overflow: visible; }
+  .chart .tip {
+    position: absolute; pointer-events: none; transform: translate(-50%, -120%);
+    background: #232327; border: 1px solid var(--line); border-radius: 10px; padding: 6px 9px;
+    font-size: 12px; white-space: nowrap; opacity: 0; transition: opacity .1s;
+  }
+  .chart .tip .label { display: block; font-size: 11px; }
+  .empty { color: var(--faint); font-size: 13px; display: grid; place-items: center; height: 100%; text-align: center; }
+
+  /* ---------- Bot-Karte ---------- */
+  .bot-head { display: flex; justify-content: space-between; align-items: flex-start; }
+  .bot-name { font-size: 18px; font-weight: 600; }
+  .status { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px var(--green-soft); }
+  .dot.paused { background: var(--amber); box-shadow: 0 0 0 3px rgba(251,191,36,.15); }
+  .dot.warn { background: var(--red); box-shadow: 0 0 0 3px var(--red-soft); }
+  .switch {
+    position: relative; width: 50px; height: 30px; border-radius: 999px; border: 0; cursor: pointer;
+    background: #3a3a40; transition: background .2s; flex: none;
+  }
+  .switch::after {
+    content: ""; position: absolute; top: 3px; left: 3px; width: 24px; height: 24px; border-radius: 50%;
+    background: #fff; transition: transform .2s; box-shadow: 0 1px 3px rgba(0,0,0,.4);
+  }
+  .switch[aria-checked="true"] { background: var(--green); }
+  .switch[aria-checked="true"]::after { transform: translateX(20px); }
+  .switch:disabled { opacity: .5; cursor: progress; }
+  .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 18px; }
+  .tile { background: var(--card-2); border-radius: 14px; padding: 12px 14px; }
+  .tile .v { font-size: 21px; font-weight: 600; margin-top: 6px; letter-spacing: -.01em; }
+  .insight {
+    margin-top: 12px; border-radius: 14px; padding: 12px 14px; font-size: 13px; line-height: 1.45;
+    background: linear-gradient(135deg, rgba(52,211,153,.10), rgba(139,140,246,.10));
+    border: 1px solid rgba(52,211,153,.18);
+  }
+  .insight .label { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; color: var(--text); font-size: 11px; }
+
+  /* ---------- Allokation ---------- */
+  .alloc { display: flex; align-items: center; gap: 20px; }
+  .donut { width: 120px; height: 120px; flex: none; position: relative; }
+  .donut svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+  .donut .center { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; }
+  .donut .center b { font-size: 20px; }
+  .legend { list-style: none; margin: 0; padding: 0; flex: 1; min-width: 0; }
+  .legend li { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 5px 0; }
+  .legend .sw { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+  .legend .n { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .legend .p { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+
+  /* ---------- Strategien ---------- */
+  .strat { margin-bottom: 14px; }
+  .strat-top { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 7px; }
+  .strat-top .off { color: var(--faint); margin-left: 6px; }
+  .strat-top .v { font-family: var(--mono); font-size: 11px; }
+  .bar { height: 4px; border-radius: 4px; background: #26262a; overflow: hidden; }
+  .bar i { display: block; height: 100%; border-radius: 4px; }
+  .foot { font-size: 11px; color: var(--muted); margin-top: 8px; }
+
+  /* ---------- Risiko ---------- */
+  .gauge { width: 150px; margin: 0 auto; position: relative; }
+  .gauge svg { width: 100%; display: block; }
+  .gauge .val { position: absolute; left: 0; right: 0; bottom: 4px; text-align: center; }
+  .gauge .val b { font-size: 34px; font-weight: 600; letter-spacing: -.02em; display: block; line-height: 1; }
+  .risk-label { text-align: center; font-size: 13px; margin-top: 14px; }
+  .risk-sub { text-align: center; font-size: 11px; color: var(--muted); margin-top: 8px; }
+
+  /* ---------- Aktivität ---------- */
+  .activity { margin-top: 16px; }
+  .act-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+  .act-head h2 { margin: 0; }
+  .link { border: 0; background: none; color: var(--green); font-size: 12px; cursor: pointer; padding: 0; }
+  .rows { list-style: none; margin: 0; padding: 0; }
+  .rows li {
+    display: grid; grid-template-columns: 34px 1fr 140px 110px; align-items: center; gap: 12px;
+    padding: 13px 0; border-top: 1px solid #1f1f23;
+  }
+  .chip {
+    width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center;
+    font-size: 8.5px; font-weight: 700; letter-spacing: .02em; background: #232327; color: var(--muted);
+  }
+  .chip.win { background: var(--green-soft); color: var(--green); }
+  .chip.loss { background: var(--red-soft); color: var(--red); }
+  .rows .t { font-size: 14px; }
+  .rows .s { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .rows .when { font-size: 12px; color: var(--muted); }
+  .rows .amt { text-align: right; font-family: var(--mono); font-size: 13px; }
+
+  /* ---------- Unterseiten ---------- */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; padding: 0 0 10px; }
+  td { padding: 12px 0; border-top: 1px solid #1f1f23; }
+  td.r, th.r { text-align: right; font-family: var(--mono); }
+  .kv { display: grid; grid-template-columns: 1fr auto; gap: 0; font-size: 13px; }
+  .kv div { padding: 12px 0; border-top: 1px solid #1f1f23; }
+  .kv div:nth-child(even) { text-align: right; font-family: var(--mono); }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 16px; line-height: 1.5; }
+  code { font-family: var(--mono); font-size: 12px; background: #1f1f23; padding: 1px 5px; border-radius: 4px; }
+
+  .banner {
+    display: none; margin-bottom: 16px; padding: 12px 16px; border-radius: 14px; font-size: 13px;
+    background: var(--red-soft); border: 1px solid rgba(248,113,113,.35);
+  }
+  .banner.show { display: block; }
+
+  /* ---------- Mobil ---------- */
+  @media (max-width: 960px) {
+    .row-1 { grid-template-columns: 1fr; }
+    .row-2 { grid-template-columns: 1fr 1fr; }
+    .row-2 .risk { grid-column: span 2; }
+  }
+  @media (max-width: 640px) {
+    header { grid-template-columns: 1fr auto; padding: 12px 16px; }
+    nav { grid-column: 1 / -1; grid-row: 2; overflow-x: auto; margin-top: 10px; }
+    main { padding: 18px 16px 48px; }
+    .card { padding: 18px; }
+    .row-2 { grid-template-columns: 1fr; }
+    .row-2 .risk { grid-column: auto; }
+    .equity-head { flex-direction: column; }
+    .chart { height: 180px; }
+    .rows li { grid-template-columns: 34px 1fr auto; }
+    .rows .when { grid-column: 2; grid-row: 2; margin-top: -8px; }
+    .rows .amt { grid-row: 1; grid-column: 3; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><span class="logo" aria-hidden="true"></span>Panda <span class="pro">Pro</span></div>
+  <nav aria-label="Bereiche">
+    <button data-view="overview" aria-current="page">Übersicht</button>
+    <button data-view="strategies">Strategien</button>
+    <button data-view="history">Verlauf</button>
+    <button data-view="settings">Einstellungen</button>
+  </nav>
+  <div class="head-right">
+    <span class="mode-pill" id="mode-pill">Paper</span>
+    <span class="avatar" id="avatar" aria-hidden="true"></span>
+  </div>
+</header>
+
+<main>
+  <div class="banner" id="banner">Keine Verbindung zum Bot. Läuft <code>python main.py</code>? Neuer Versuch alle 5 Sekunden.</div>
+
+  <!-- ====================== Übersicht ====================== -->
+  <section class="view" id="view-overview">
+    <div class="grid row-1">
+      <div class="card">
+        <div class="equity-head">
+          <div>
+            <div class="label">Gesamtwert</div>
+            <div class="big num" id="equity">–</div>
+            <div class="delta num" id="delta"></div>
+          </div>
+          <div class="ranges" role="group" aria-label="Zeitraum">
+            <button data-range="1T">1T</button>
+            <button data-range="1W" aria-pressed="true">1W</button>
+            <button data-range="1M">1M</button>
+            <button data-range="1J">1J</button>
+            <button data-range="Max">Max</button>
+          </div>
+        </div>
+        <div class="chart" id="chart"><div class="empty">Lade Verlauf …</div></div>
+      </div>
+
+      <div class="card">
+        <div class="bot-head">
+          <div>
+            <div class="bot-name" id="bot-name">–</div>
+            <div class="status"><span class="dot" id="status-dot"></span><span id="status-text">–</span></div>
+          </div>
+          <button class="switch" id="toggle" role="switch" aria-checked="true" aria-label="Neue Einstiege erlauben"></button>
+        </div>
+        <div class="tiles">
+          <div class="tile"><div class="label">Trades heute</div><div class="v num" id="t-today">–</div></div>
+          <div class="tile"><div class="label">Trefferquote</div><div class="v num" id="t-wr">–</div></div>
+          <div class="tile"><div class="label">Max. Drawdown</div><div class="v num" id="t-dd">–</div></div>
+          <div class="tile"><div class="label">Laufzeit</div><div class="v num" id="t-up">–</div></div>
+        </div>
+        <div class="insight">
+          <div class="label"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6"/></svg>Einblick</div>
+          <div id="insight">–</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid row-2">
+      <div class="card">
+        <h2>Allokation</h2>
+        <div class="alloc">
+          <div class="donut"><svg viewBox="0 0 42 42" id="donut"></svg><div class="center"><b class="num" id="asset-count">–</b><span class="label">Assets</span></div></div>
+          <ul class="legend" id="legend"></ul>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Strategien</h2>
+        <div id="strats"></div>
+        <div class="foot">Gewinn/Verlust der letzten 30 Tage</div>
+      </div>
+      <div class="card risk">
+        <h2>Risiko</h2>
+        <div class="gauge">
+          <svg viewBox="0 0 120 70" id="gauge"></svg>
+          <div class="val"><b class="num" id="risk-score">–</b><span class="label">von 100</span></div>
+        </div>
+        <div class="risk-label" id="risk-label">–</div>
+        <div class="risk-sub" id="risk-sub"></div>
+      </div>
+    </div>
+
+    <div class="card activity">
+      <div class="act-head"><h2>Letzte Aktivität</h2><button class="link" data-goto="history">Alle anzeigen</button></div>
+      <ul class="rows" id="activity"></ul>
+    </div>
+  </section>
+
+  <!-- ====================== Strategien ====================== -->
+  <section class="view" id="view-strategies" hidden>
+    <div class="card">
+      <h2>Strategien · letzte 30 Tage</h2>
+      <table>
+        <thead><tr><th>Strategie</th><th>Status</th><th class="r">Trades</th><th class="r">Trefferquote</th><th class="r">Ergebnis</th></tr></thead>
+        <tbody id="strat-table"></tbody>
+      </table>
+      <p class="hint">Strategien werden in <code>config/settings.yaml</code> unter <code>strategies:</code> ein- und ausgeschaltet.</p>
+    </div>
+  </section>
+
+  <!-- ====================== Verlauf ====================== -->
+  <section class="view" id="view-history" hidden>
+    <div class="card">
+      <h2>Verlauf</h2>
+      <ul class="rows" id="history"></ul>
+    </div>
+  </section>
+
+  <!-- ====================== Einstellungen ====================== -->
+  <section class="view" id="view-settings" hidden>
+    <div class="card">
+      <h2>Einstellungen</h2>
+      <div class="kv" id="settings"></div>
+      <p class="hint">Nur Anzeige. Geändert wird in <code>config/settings.yaml</code>, danach den Bot neu starten.
+        Die Risiko-Grenzen in <code>core/risk_manager.py</code> sind hart begrenzt und lassen sich per Config nur verschärfen.</p>
+    </div>
+  </section>
+</main>
+
+<script>
+(() => {
+  const token = new URLSearchParams(location.search).get('token') || '';
+  const headers = token ? { 'X-Dashboard-Token': token } : {};
+  const $ = (id) => document.getElementById(id);
+  const COLORS = { BTC: '#f4f4f5', ETH: '#34d399', SOL: '#8b8cf6', XRP: '#38bdf8', EUR: '#4b4b52' };
+  const EXTRA = ['#fbbf24', '#f472b6', '#22d3ee', '#a3e635', '#fb923c'];
+  const STRAT_COLORS = { confluence: '#34d399', momentum: '#8b8cf6', scalper: '#fbbf24', ml: '#38bdf8' };
+  const RANGE_TEXT = { '1T': 'in 24 Stunden', '1W': 'diese Woche', '1M': 'in 30 Tagen', '1J': 'in einem Jahr', 'Max': 'seit Start' };
+
+  let range = '1W';
+  let state = null;
+  let busy = false;
+
+  const eur = new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' });
+  const num2 = new Intl.NumberFormat('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const pct = (x, d = 1) => (x * 100).toLocaleString('de-DE', { minimumFractionDigits: d, maximumFractionDigits: d }) + ' %';
+  const signed = (x, f) => (x > 0 ? '+' : x < 0 ? '−' : '±') + f(Math.abs(x));
+  const tone = (x) => x > 0.005 ? 'up' : x < -0.005 ? 'down' : 'flat';
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+  const colorFor = (coin, i) => COLORS[coin] || EXTRA[i % EXTRA.length];
+
+  function when(iso) {
+    const d = new Date(iso), now = new Date();
+    const time = d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+    const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+    const diff = Math.round((day(now) - day(d)) / 86400000);
+    if (diff === 0) return `Heute, ${time}`;
+    if (diff === 1) return `Gestern, ${time}`;
+    return d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' }) + `, ${time}`;
+  }
+
+  // ---------------------------------------------------------------- Laden
+  async function load() {
+    try {
+      const res = await fetch(`/api/state?range=${encodeURIComponent(range)}`, { headers, cache: 'no-store' });
+      if (res.status === 401) throw new Error('token');
+      if (!res.ok) throw new Error(res.status);
+      state = await res.json();
+      $('banner').classList.remove('show');
+      render();
+    } catch (e) {
+      const b = $('banner');
+      b.textContent = e.message === 'token'
+        ? 'Zugang verweigert — die Adresse braucht ?token=… (DASHBOARD_TOKEN aus config/secrets.env).'
+        : 'Keine Verbindung zum Bot. Läuft python main.py? Neuer Versuch alle 5 Sekunden.';
+      b.classList.add('show');
+    }
+  }
+
+  // ---------------------------------------------------------------- Rendern
+  function render() {
+    const s = state;
+    $('avatar').textContent = s.bot.initials || '';
+    $('avatar').style.display = s.bot.initials ? '' : 'none';
+    const pill = $('mode-pill');
+    pill.textContent = s.bot.mode === 'live' ? (s.bot.shadow ? 'Live · Shadow' : 'Live · Echtgeld') : 'Paper';
+    pill.classList.toggle('live', s.bot.mode === 'live' && !s.bot.shadow);
+
+    // Gesamtwert
+    const [whole, dec] = num2.format(s.equity.value).split(',');
+    $('equity').innerHTML = `[${esc(whole)},<span class="dec">${esc(dec)} €</span>]`;
+    const t = tone(s.equity.change);
+    $('delta').innerHTML = `<span class="${t}">${signed(s.equity.change, v => eur.format(v))} (${signed(s.equity.change_pct, v => pct(v))})</span><span class="label">${RANGE_TEXT[s.equity.range] || ''}</span>`;
+    drawChart(s.equity.series, t);
+
+    // Bot
+    $('bot-name').textContent = s.bot.name;
+    $('status-text').textContent = s.bot.status;
+    const warn = /Kurse|Cooldown/.test(s.bot.status);
+    $('status-dot').className = 'dot' + (s.bot.paused ? ' paused' : warn ? ' warn' : '');
+    if (!busy) $('toggle').setAttribute('aria-checked', String(!s.bot.paused));
+    $('t-today').textContent = s.stats.trades_today;
+    $('t-wr').textContent = s.stats.total_trades ? pct(s.stats.win_rate, 0) : '–';
+    $('t-dd').textContent = pct(s.stats.max_drawdown_30d);
+    $('t-up').textContent = uptime(s.stats.running_since);
+    $('insight').textContent = s.bot.insight;
+
+    drawAllocation(s.allocation);
+    drawStrategies(s.strategies);
+    drawRisk(s.risk);
+    $('activity').innerHTML = rows(s.activity.slice(0, 5));
+    $('history').innerHTML = rows(s.activity) || '<li><span></span><span class="s">Noch keine Aktivität.</span></li>';
+    drawStrategyTable(s.strategies);
+    drawSettings(s.settings);
+  }
+
+  function uptime(iso) {
+    if (!iso) return '–';
+    const h = (Date.now() - new Date(iso).getTime()) / 3600000;
+    return h < 24 ? `${Math.max(0, Math.floor(h))} Std` : `${Math.floor(h / 24)} T`;
+  }
+
+  // ---------------------------------------------------------------- Chart
+  function drawChart(series, t) {
+    const box = $('chart');
+    if (!series || series.length < 2) {
+      box.innerHTML = '<div class="empty">Noch zu wenig Verlauf — der erste Punkt wird beim Start gespeichert,<br>danach alle paar Minuten.</div>';
+      return;
+    }
+    const W = box.clientWidth || 600, H = box.clientHeight || 220, pad = 8;
+    const xs = series.map(p => new Date(p[0]).getTime()), ys = series.map(p => p[1]);
+    const x0 = xs[0], x1 = xs[xs.length - 1] || x0 + 1;
+    let y0 = Math.min(...ys), y1 = Math.max(...ys);
+    const span = (y1 - y0) || Math.max(1, y1 * 0.01);
+    y0 -= span * 0.25; y1 += span * 0.15;
+    const X = v => ((v - x0) / ((x1 - x0) || 1)) * W;
+    const Y = v => pad + (1 - (v - y0) / (y1 - y0)) * (H - pad * 2);
+    const pts = series.map((p, i) => [X(xs[i]), Y(ys[i])]);
+    const line = smooth(pts);
+    const color = t === 'down' ? 'var(--red)' : 'var(--green)';
+    const grid = [0.25, 0.5, 0.75].map(f => `<line x1="0" x2="${W}" y1="${H * f}" y2="${H * f}" stroke="#1f1f23"/>`).join('');
+    box.innerHTML = `
+      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Verlauf des Gesamtwerts">
+        <defs><linearGradient id="fill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="${t === 'down' ? '#f87171' : '#34d399'}" stop-opacity=".32"/>
+          <stop offset="1" stop-color="${t === 'down' ? '#f87171' : '#34d399'}" stop-opacity="0"/>
+        </linearGradient></defs>
+        ${grid}
+        <path d="${line} L ${W} ${H} L 0 ${H} Z" fill="url(#fill)"/>
+        <path d="${line}" fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke"/>
+        <line id="cross" y1="0" y2="${H}" stroke="#3a3a40" stroke-dasharray="3 3" opacity="0"/>
+        <circle id="cdot" r="4" fill="${color}" stroke="#141416" stroke-width="2" opacity="0"/>
+      </svg><div class="tip" id="tip"></div>`;
+    const svg = box.querySelector('svg'), tip = $('tip'), cross = $('cross'), cdot = $('cdot');
+    const move = (ev) => {
+      const r = svg.getBoundingClientRect();
+      const cx = ((ev.touches ? ev.touches[0].clientX : ev.clientX) - r.left) / r.width * W;
+      let i = 0, best = Infinity;
+      pts.forEach((p, j) => { const d = Math.abs(p[0] - cx); if (d < best) { best = d; i = j; } });
+      const [px, py] = pts[i];
+      cross.setAttribute('x1', px); cross.setAttribute('x2', px); cross.setAttribute('opacity', 1);
+      cdot.setAttribute('cx', px); cdot.setAttribute('cy', py); cdot.setAttribute('opacity', 1);
+      tip.style.left = (px / W * r.width) + 'px'; tip.style.top = (py / H * r.height) + 'px';
+      tip.innerHTML = `<b class="num">${eur.format(ys[i])}</b><span class="label">${when(series[i][0])}</span>`;
+      tip.style.opacity = 1;
+    };
+    const leave = () => { tip.style.opacity = 0; cross.setAttribute('opacity', 0); cdot.setAttribute('opacity', 0); };
+    svg.addEventListener('mousemove', move); svg.addEventListener('touchmove', move, { passive: true });
+    svg.addEventListener('mouseleave', leave); svg.addEventListener('touchend', leave);
+  }
+
+  // Weiche Kurve (Catmull-Rom → Bézier), ohne über die Punkte hinauszuschießen
+  function smooth(p) {
+    if (p.length < 3) return 'M ' + p.map(q => q.join(' ')).join(' L ');
+    let d = `M ${p[0][0]} ${p[0][1]}`;
+    for (let i = 0; i < p.length - 1; i++) {
+      const a = p[i - 1] || p[i], b = p[i], c = p[i + 1], e = p[i + 2] || c;
+      const k = 1 / 6;
+      const c1 = [b[0] + (c[0] - a[0]) * k, b[1] + (c[1] - a[1]) * k];
+      const c2 = [c[0] - (e[0] - b[0]) * k, c[1] - (e[1] - b[1]) * k];
+      const lo = Math.min(b[1], c[1]), hi = Math.max(b[1], c[1]);
+      c1[1] = Math.min(hi, Math.max(lo, c1[1])); c2[1] = Math.min(hi, Math.max(lo, c2[1]));
+      d += ` C ${c1[0]} ${c1[1]}, ${c2[0]} ${c2[1]}, ${c[0]} ${c[1]}`;
+    }
+    return d;
+  }
+
+  // ---------------------------------------------------------------- Allokation
+  function drawAllocation(items) {
+    const r = 15.915, gap = items.length > 1 ? 1.2 : 0;
+    let offset = 0, i = 0;
+    const segs = items.filter(a => a.share > 0).map(a => {
+      const len = Math.max(0, a.share * 100 - gap);
+      const s = `<circle cx="21" cy="21" r="${r}" fill="none" stroke="${colorFor(a.coin, i++)}" stroke-width="5"
+        stroke-dasharray="${len} ${100 - len}" stroke-dashoffset="${-offset}"/>`;
+      offset += a.share * 100;
+      return s;
+    }).join('');
+    $('donut').innerHTML = `<circle cx="21" cy="21" r="${r}" fill="none" stroke="#26262a" stroke-width="5"/>` + segs;
+    $('asset-count').textContent = items.length;
+    $('legend').innerHTML = items.map((a, j) => `
+      <li><span class="sw" style="background:${colorFor(a.coin, j)}"></span>
+      <span class="n">${esc(a.name)}${a.side === 'short' ? ' · Short' : ''}</span>
+      <span class="p">${pct(a.share, 0)}</span></li>`).join('');
+  }
+
+  // ---------------------------------------------------------------- Strategien
+  function drawStrategies(list) {
+    if (!list.length) { $('strats').innerHTML = '<div class="label">Keine Strategie aktiv.</div>'; return; }
+    const max = Math.max(...list.map(s => Math.abs(s.pnl)), 0.01);
+    $('strats').innerHTML = list.map(s => {
+      const c = s.pnl < 0 ? 'var(--red)' : (STRAT_COLORS[s.key] || 'var(--violet)');
+      const w = Math.max(s.trades ? 3 : 0, Math.abs(s.pnl) / max * 100);
+      return `<div class="strat"><div class="strat-top">
+        <span>${esc(s.name)}${s.enabled ? '' : '<span class="off">aus</span>'}</span>
+        <span class="v" style="color:${s.trades ? c : 'var(--faint)'}">${signed(s.pnl, v => eur.format(v))}</span></div>
+        <div class="bar"><i style="width:${w}%;background:${c}"></i></div></div>`;
+    }).join('');
+  }
+
+  function drawStrategyTable(list) {
+    $('strat-table').innerHTML = list.map(s => `<tr>
+      <td>${esc(s.name)}</td><td>${s.enabled ? '<span class="up">aktiv</span>' : '<span class="flat">aus</span>'}</td>
+      <td class="r">${s.trades}</td><td class="r">${s.win_rate == null ? '–' : pct(s.win_rate, 0)}</td>
+      <td class="r ${tone(s.pnl)}">${signed(s.pnl, v => eur.format(v))}</td></tr>`).join('');
+  }
+
+  // ---------------------------------------------------------------- Risiko
+  function drawRisk(r) {
+    const R = 48, cx = 60, cy = 62, L = Math.PI * R;
+    const c = r.score >= 75 ? 'var(--red)' : r.score >= 50 ? 'var(--amber)' : 'var(--green)';
+    const arc = `M ${cx - R} ${cy} A ${R} ${R} 0 0 1 ${cx + R} ${cy}`;
+    $('gauge').innerHTML = `
+      <path d="${arc}" fill="none" stroke="#26262a" stroke-width="10" stroke-linecap="round"/>
+      <path d="${arc}" fill="none" stroke="${c}" stroke-width="10" stroke-linecap="round"
+        stroke-dasharray="${Math.max(0.01, r.score / 100 * L)} ${L}"/>`;
+    $('risk-score').textContent = r.score;
+    $('risk-label').textContent = r.label;
+    let sub;
+    if (!r.open_positions) sub = `Keine offenen Positionen · Tages-Drawdown ${pct(r.daily_drawdown)} von ${pct(r.daily_drawdown_limit, 0)}`;
+    else if (r.positions_without_sl) sub = `Achtung: ${r.positions_without_sl} von ${r.open_positions} Positionen ohne Stop-Loss`;
+    else sub = `Stop-Loss aktiv auf ${r.open_positions === 1 ? 'der offenen Position' : `allen ${r.open_positions} Positionen`}`;
+    $('risk-sub').textContent = sub;
+  }
+
+  // ---------------------------------------------------------------- Aktivität
+  function rows(list) {
+    return list.map(a => {
+      const cls = a.amount == null ? '' : a.amount > 0 ? 'win' : a.amount < 0 ? 'loss' : '';
+      const amt = a.amount == null ? (a.kind === 'open' ? eur.format(0) : '') : signed(a.amount, v => eur.format(v));
+      const chip = a.coin || (a.kind === 'control' ? '⏻' : '•');
+      return `<li><span class="chip ${cls}">${esc(chip)}</span>
+        <div><div class="t">${esc(a.title)}</div><div class="s">${esc(a.subtitle)}</div></div>
+        <span class="when">${when(a.ts)}</span>
+        <span class="amt ${a.amount == null ? 'flat' : tone(a.amount)}">${amt}</span></li>`;
+    }).join('');
+  }
+
+  // ---------------------------------------------------------------- Einstellungen
+  function drawSettings(s) {
+    const kv = [
+      ['Modus', s.mode === 'live' ? (s.shadow_mode ? 'Live (Shadow)' : 'Live — echtes Geld') : 'Paper'],
+      ['Startkapital', s.start_capital != null ? `${s.start_capital} ${s.base_currency}` : '–'],
+      ['Handelspaare', s.pairs.join(', ') || '–'],
+      ['Max. Risiko pro Trade', pct(s.max_risk_per_trade)],
+      ['Max. Tages-Drawdown', pct(s.max_daily_drawdown, 0)],
+      ['Max. Positionsgröße', s.max_position_size != null ? pct(s.max_position_size, 0) : '–'],
+      ['Handelsart', s.spot_only ? 'Spot — nur Long, ohne Hebel' : `Margin — bis ${s.max_leverage}x Hebel`],
+      ['Gebühr pro Order', s.taker_fee != null ? pct(s.taker_fee, 2) : '–'],
+      ['Mindestorder', Object.entries(s.min_orders || {}).map(([k, v]) => `${k.split('_')[0]} ${eur.format(v)}`).join(', ') || '–'],
+      ['Max. gleichzeitige Positionen', s.max_concurrent_positions],
+    ];
+    $('settings').innerHTML = kv.map(([k, v]) => `<div>${esc(k)}</div><div>${esc(v)}</div>`).join('');
+  }
+
+  // ---------------------------------------------------------------- Bedienung
+  document.querySelectorAll('[data-range]').forEach(b => b.addEventListener('click', () => {
+    range = b.dataset.range;
+    document.querySelectorAll('[data-range]').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+    load();
+  }));
+
+  function show(view) {
+    document.querySelectorAll('.view').forEach(v => v.hidden = v.id !== `view-${view}`);
+    document.querySelectorAll('nav button').forEach(b => b.toggleAttribute('aria-current', b.dataset.view === view));
+    document.querySelectorAll('nav button[aria-current]').forEach(b => b.setAttribute('aria-current', 'page'));
+    if (view === 'overview' && state) drawChart(state.equity.series, tone(state.equity.change));
+    window.scrollTo({ top: 0 });
+  }
+  document.querySelectorAll('[data-view]').forEach(b => b.addEventListener('click', () => show(b.dataset.view)));
+  document.querySelectorAll('[data-goto]').forEach(b => b.addEventListener('click', () => show(b.dataset.goto)));
+
+  $('toggle').addEventListener('click', async () => {
+    if (!state || busy) return;
+    const pause = !state.bot.paused;
+    if (!pause && state.bot.mode === 'live' && !state.bot.shadow &&
+        !confirm('Der Bot handelt mit ECHTEM GELD. Neue Einstiege wirklich wieder erlauben?')) return;
+    busy = true;
+    const t = $('toggle');
+    t.disabled = true;
+    t.setAttribute('aria-checked', String(!pause));
+    try {
+      const res = await fetch('/api/pause', {
+        method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paused: pause }),
+      });
+      if (!res.ok) throw new Error(res.status);
+    } catch (e) {
+      alert('Umschalten hat nicht geklappt — ist der Bot erreichbar?');
+    } finally {
+      busy = false;
+      t.disabled = false;
+      load();
+    }
+  });
+
+  let resizeTimer;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => state && drawChart(state.equity.series, tone(state.equity.change)), 120);
+  });
+
+  load();
+  setInterval(load, 5000);
+})();
+</script>
+</body>
+</html>

@@ -21,6 +21,10 @@ general:
   # tun würde. Erst nach einer erfolgreichen Testphase auf false setzen.
   shadow_mode: true
   start_capital: 100
+  # Woher die Kurse im Paper-Modus kommen:
+  #   bitpanda = Bitpanda Fusion (braucht BITPANDA_API_KEY in secrets.env)
+  #   kraken   = öffentliche Kraken-Kurse (kein Key)
+  data_feed: bitpanda
   # Preise, die älter sind, gelten als unbrauchbar: kein Entry, keine SL/TP-Prüfung.
   # Schützt bei Feed-Ausfall und nach macOS-Sleep vor Handel auf Geisterpreisen.
   max_price_age_seconds: 60
@@ -124,9 +128,20 @@ risk:
   max_concurrent_positions: 2
   cooldown_after_losses: 300     # 5 Min Pause nach 3 Verlusten
 
+# Regeln der Börse, auf der später echt gehandelt wird (Bitpanda Fusion).
+# Gelten auch im Paper-Modus — sonst sieht der Test besser aus als die Realität.
+exchange_rules:
+  spot_only: true        # nur Kaufen/Verkaufen: keine Shorts, kein Hebel
+  # Ersatzwert in EUR. Meldet die Börse beim Start (/v1/pairs, minOrderAmount)
+  # einen eigenen Mindestbetrag pro Paar, gilt der — steht im bot.log als
+  # "BTC_EUR: min. Ordervolumen ... EUR".
+  min_order_eur: 10
+
 fees:
-  crypto_maker: 0.0004  # 0.04%
-  crypto_taker: 0.0006  # 0.06%
+  # Bitpanda Fusion Stufe 1 (siehe docs/BACKTEST_BEFUNDE.md). Der Bot setzt nur
+  # Market-Orders ab, also zählt die Taker-Gebühr; Maker konservativ gleich gesetzt.
+  crypto_maker: 0.0025  # 0.25%
+  crypto_taker: 0.0025  # 0.25%
 
 slippage:
   min: 0.0001  # 0.01%
@@ -144,6 +159,17 @@ notifications:
     report_interval_hours: 5      # Portfolio-Bericht alle 5h (war stündlich)
     signal_messages: false        # "Why did I take this trade?"-Nachrichten aus
     event_alerts: false           # Regime-Wechsel- und Macro-Event-Meldungen aus
+
+# ============================================================
+# DASHBOARD ("Panda Pro") — im Browser: http://127.0.0.1:8080
+# ============================================================
+dashboard:
+  enabled: true
+  host: 127.0.0.1          # 0.0.0.0 = im Heimnetz erreichbar → dann DASHBOARD_TOKEN Pflicht
+  port: 8080
+  bot_name: Panda-9
+  initials: NL             # Kürzel oben rechts
+  snapshot_minutes: 5      # wie oft der Equity-Verlauf gespeichert wird
 
 # ============================================================
 # PHASE 6: MONITORING & ATTRIBUTION (wird in Code gelesen)
