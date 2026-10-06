@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Trading-Bot</title>
+<style>
+  :root {
+    --bg: #f4f4f2;
+    --surface: #fcfcfb;
+    --line: #e4e3df;
+    --grid: #ecebe7;
+    --text: #0b0b0b;
+    --text-2: #52514e;
+    --text-3: #7a7974;
+    --series: #2a78d6;
+    --series-fill: rgba(42, 120, 214, 0.10);
+    --baseline: #9a9993;
+    --good: #0b7d0b;
+    --bad: #c03030;
+    --warn: #a86b00;
+    --good-bg: #e6f4e6;
+    --bad-bg: #fbe9e9;
+    --warn-bg: #fdf3dc;
+    --bar-track: #ecebe7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #111110;
+      --surface: #1a1a19;
+      --line: #2e2e2c;
+      --grid: #262624;
+      --text: #ffffff;
+      --text-2: #c3c2b7;
+      --text-3: #8f8e86;
+      --series: #3987e5;
+      --series-fill: rgba(57, 135, 229, 0.16);
+      --baseline: #6b6a64;
+      --good: #4cc44c;
+      --bad: #ee6b6b;
+      --warn: #e6a832;
+      --good-bg: #16301a;
+      --bad-bg: #3a1c1c;
+      --warn-bg: #3a2e12;
+      --bar-track: #2a2a28;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #111110; --surface: #1a1a19; --line: #2e2e2c; --grid: #262624;
+    --text: #ffffff; --text-2: #c3c2b7; --text-3: #8f8e86;
+    --series: #3987e5; --series-fill: rgba(57, 135, 229, 0.16); --baseline: #6b6a64;
+    --good: #4cc44c; --bad: #ee6b6b; --warn: #e6a832;
+    --good-bg: #16301a; --bad-bg: #3a1c1c; --warn-bg: #3a2e12; --bar-track: #2a2a28;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  main { max-width: 1080px; margin: 0 auto; padding: 20px 16px 48px; }
+  .num { font-variant-numeric: tabular-nums; }
+
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 4px; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 13px; font-weight: 600; padding: 2px 10px; border-radius: 999px;
+  }
+  .pill.ok { color: var(--good); background: var(--good-bg); }
+  .pill.bad { color: var(--bad); background: var(--bad-bg); }
+  .pill.warn { color: var(--warn); background: var(--warn-bg); }
+  .settings { color: var(--text-2); font-size: 13px; margin: 0 0 18px; }
+
+  .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
+  @media (max-width: 760px) { .kpis { grid-template-columns: repeat(2, 1fr); } }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .kpi .label { font-size: 13px; color: var(--text-2); }
+  .kpi .value { font-size: 26px; font-weight: 650; letter-spacing: -0.02em; margin-top: 2px; }
+  .kpi .sub { font-size: 13px; color: var(--text-3); margin-top: 2px; }
+
+  section { margin-bottom: 16px; }
+  h2 { font-size: 15px; margin: 0 0 10px; }
+  .hint { font-size: 13px; color: var(--text-3); font-weight: 400; }
+
+  .up { color: var(--good); }
+  .down { color: var(--bad); }
+
+  /* Equity-Kurve */
+  .chart-wrap { position: relative; }
+  svg.chart { display: block; width: 100%; height: 240px; overflow: visible; }
+  .chart .gridline { stroke: var(--grid); stroke-width: 1; }
+  .chart .axis-label { fill: var(--text-3); font-size: 11px; }
+  .chart .baseline { stroke: var(--baseline); stroke-width: 1; stroke-dasharray: 4 4; }
+  .chart .area { fill: var(--series-fill); }
+  .chart .line { fill: none; stroke: var(--series); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .chart .cross { stroke: var(--text-3); stroke-width: 1; }
+  .chart .dot { fill: var(--series); stroke: var(--surface); stroke-width: 2; }
+  .tooltip {
+    position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 10px; font-size: 13px; box-shadow: 0 4px 16px rgba(0,0,0,.12);
+    white-space: nowrap; display: none;
+  }
+  .tooltip .t { color: var(--text-2); }
+  .empty { color: var(--text-3); font-size: 14px; padding: 24px 0; text-align: center; }
+
+  /* Signal-Nähe */
+  .evals { display: grid; gap: 14px; }
+  .eval-head { display: flex; justify-content: space-between; gap: 12px; font-size: 14px; }
+  .eval-head .sym { font-weight: 600; }
+  .eval-meta { font-size: 13px; color: var(--text-2); margin-top: 2px; }
+  .bar { position: relative; height: 8px; background: var(--bar-track); border-radius: 4px; margin-top: 6px; }
+  .bar .fill { position: absolute; left: 0; top: 0; bottom: 0; background: var(--series); border-radius: 4px; }
+  .bar .mark { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--text); border-radius: 1px; }
+
+  /* Tabellen */
+  .table-scroll { overflow-x: auto; margin: 0 -16px; padding: 0 16px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th { text-align: left; font-weight: 500; color: var(--text-2); font-size: 12px; padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  td { padding: 7px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+  td.r, th.r { text-align: right; }
+  tr:last-child td { border-bottom: none; }
+
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 760px) { .two { grid-template-columns: 1fr; } }
+
+  .log { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--text-2);
+         max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+  .log .err { color: var(--bad); }
+  .log .wrn { color: var(--warn); }
+  footer { color: var(--text-3); font-size: 12px; margin-top: 20px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Trading-Bot · Paper</h1>
+    <span id="pill" class="pill warn">lädt …</span>
+  </header>
+  <p class="settings" id="settings">&nbsp;</p>
+
+  <div class="kpis">
+    <div class="card kpi"><div class="label">Equity</div><div class="value num" id="k-equity">–</div><div class="sub num" id="k-equity-sub">&nbsp;</div></div>
+    <div class="card kpi"><div class="label">Rendite seit Start</div><div class="value num" id="k-return">–</div><div class="sub num" id="k-return-sub">&nbsp;</div></div>
+    <div class="card kpi"><div class="label">Trefferquote</div><div class="value num" id="k-wr">–</div><div class="sub num" id="k-wr-sub">&nbsp;</div></div>
+    <div class="card kpi"><div class="label">Gebühren bezahlt</div><div class="value num" id="k-fees">–</div><div class="sub num" id="k-fees-sub">&nbsp;</div></div>
+  </div>
+
+  <section class="card">
+    <h2>Equity-Verlauf <span class="hint">· gestrichelt: Startkapital</span></h2>
+    <div class="chart-wrap" id="chart-wrap">
+      <svg class="chart" id="chart" role="img" aria-label="Equity-Verlauf"></svg>
+      <div class="tooltip" id="tip"></div>
+    </div>
+  </section>
+
+  <div class="two">
+    <section class="card">
+      <h2>Wie nah am nächsten Signal <span class="hint">· Strich = Schwelle</span></h2>
+      <div class="evals" id="evals"><div class="empty">Noch keine Bewertung</div></div>
+    </section>
+    <section class="card">
+      <h2>Offene Positionen</h2>
+      <div id="positions"><div class="empty">Keine offene Position</div></div>
+    </section>
+  </div>
+
+  <section class="card">
+    <h2>Abgeschlossene Trades <span class="hint" id="trades-hint"></span></h2>
+    <div id="trades"><div class="empty">Noch kein Trade</div></div>
+  </section>
+
+  <div class="two">
+    <section class="card">
+      <h2>Datensammler <span class="hint">· Orderbuch &amp; Orderflow</span></h2>
+      <div id="recorder"><div class="empty">Noch keine Daten</div></div>
+    </section>
+    <section class="card">
+      <h2>Log <span class="hint">· nur Wichtiges, neueste unten; letzte Zeile = jüngster Durchgang</span></h2>
+      <div class="log" id="log"></div>
+    </section>
+  </div>
+
+  <footer id="footer">&nbsp;</footer>
+</main>
+
+<script>
+const eur = new Intl.NumberFormat('de-AT', { style: 'currency', currency: 'EUR' });
+const eur4 = new Intl.NumberFormat('de-AT', { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+const pct = (v, d = 1) => (v >= 0 ? '+' : '−') + Math.abs(v * 100).toLocaleString('de-AT', { minimumFractionDigits: d, maximumFractionDigits: d }) + ' %';
+const signed = v => (v >= 0 ? '+' : '−') + eur.format(Math.abs(v));
+const cls = v => v > 0 ? 'up' : v < 0 ? 'down' : '';
+const arrow = v => v > 0 ? '▲ ' : v < 0 ? '▼ ' : '';
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const $ = id => document.getElementById(id);
+
+function fmtTime(iso, withDate = true) {
+  if (!iso) return '–';
+  const d = new Date(iso);
+  const t = d.toLocaleTimeString('de-AT', { hour: '2-digit', minute: '2-digit' });
+  return withDate ? d.toLocaleDateString('de-AT', { day: '2-digit', month: '2-digit' }) + ' ' + t : t;
+}
+function ago(iso, nowIso) {
+  const s = (new Date(nowIso) - new Date(iso)) / 1000;
+  if (s < 90) return Math.round(s) + ' s';
+  if (s < 5400) return Math.round(s / 60) + ' min';
+  if (s < 172800) return Math.round(s / 3600) + ' h';
+  return Math.round(s / 86400) + ' Tagen';
+}
+function duration(a, b) {
+  const m = Math.round((new Date(b) - new Date(a)) / 60000);
+  if (m < 60) return m + ' min';
+  if (m < 2880) return (m / 60).toFixed(1).replace('.', ',') + ' h';
+  return (m / 1440).toFixed(1).replace('.', ',') + ' d';
+}
+const sym = s => esc(String(s).replace('_EUR', ''));
+
+function render(d) {
+  const st = d.status;
+  // ---- Status-Pille: Bot schreibt alle 15 s, über 90 s still = Problem
+  const pill = $('pill');
+  if (!st) {
+    pill.className = 'pill bad'; pill.textContent = '● Kein Status vom Bot';
+  } else {
+    const silent = (new Date(d.server_time) - new Date(st.updated)) / 1000;
+    if (silent > 90) { pill.className = 'pill bad'; pill.textContent = '● Bot still seit ' + ago(st.updated, d.server_time); }
+    else if (st.prices_stale) { pill.className = 'pill warn'; pill.textContent = '● Preise veraltet, Handel pausiert'; }
+    else { pill.className = 'pill ok'; pill.textContent = '● läuft seit ' + ago(st.started, d.server_time); }
+  }
+
+  if (st) {
+    const s = st.settings;
+    const feed = s.feed === 'FusionFeed' ? 'Bitpanda Fusion' : s.feed === 'KrakenFeed' ? 'Kraken' : s.feed;
+    $('settings').textContent =
+      `Kurse: ${feed} · Gebühr ${(s.taker_fee * 100).toLocaleString('de-AT')} % je Seite · ` +
+      `${s.spot_only ? 'nur Long, ohne Hebel' : 'Long & Short mit Hebel'} · Ziel/Stop ${s.tp_atr}:${s.sl_atr} × ATR · ` +
+      `Schwelle ${s.threshold} · max. ${s.max_positions} Positionen`;
+  }
+
+  // ---- Kennzahlen
+  const trades = d.trades || [];
+  if (st) {
+    const p = st.portfolio, cap = st.settings.start_capital;
+    $('k-equity').textContent = eur.format(p.equity);
+    $('k-equity-sub').textContent = 'Start ' + eur.format(cap);
+    const r = (p.equity - cap) / cap;
+    $('k-return').innerHTML = `<span class="${cls(r)}">${arrow(r)}${pct(r, 2)}</span>`;
+    $('k-return-sub').innerHTML = `realisiert <span class="${cls(p.realized_pnl)}">${signed(p.realized_pnl)}</span>`;
+  }
+  const wins = trades.filter(t => t.pnl > 0).length;
+  if (trades.length) {
+    $('k-wr').textContent = Math.round(wins / trades.length * 100) + ' %';
+    $('k-wr-sub').textContent = `${wins} von ${trades.length} Trades im Plus`;
+  } else {
+    $('k-wr').textContent = '–'; $('k-wr-sub').textContent = 'noch kein Trade';
+  }
+  const fees = trades.reduce((a, t) => a + t.fees, 0) + (st ? st.positions.reduce((a, p) => a + (p.entry_fees || 0), 0) : 0);
+  $('k-fees').textContent = eur.format(fees);
+  const gross = trades.reduce((a, t) => a + t.pnl + t.fees, 0);
+  $('k-fees-sub').textContent = trades.length ? `vor Gebühren ${signed(gross)}` : ' ';
+
+  renderChart(d.equity || [], st ? st.settings.start_capital : null);
+  renderEvals(st);
+  renderPositions(st);
+  renderTrades(trades);
+  renderRecorder(d.recorder, d.server_time);
+  renderLog(d.log || []);
+  $('footer').textContent = 'Aktualisiert ' + fmtTime(d.server_time) + ' · lädt alle 30 s neu · nur lesend, steuert nichts';
+}
+
+// ---------- Equity-Kurve (SVG, eine Serie, Startkapital als Referenz) ----------
+let chartState = null;
+function renderChart(points, cap) {
+  const svg = $('chart');
+  const W = svg.clientWidth || 600, H = 240;
+  const pad = { l: 64, r: 12, t: 10, b: 24 };
+  if (points.length < 2) {
+    svg.innerHTML = `<text x="${W / 2}" y="${H / 2}" text-anchor="middle" class="axis-label">Die Kurve beginnt nach den ersten 10 Minuten</text>`;
+    chartState = null;
+    return;
+  }
+  const xs = points.map(p => new Date(p[0]).getTime());
+  const ys = points.map(p => p[1]);
+  let lo = Math.min(...ys, cap ?? Infinity), hi = Math.max(...ys, cap ?? -Infinity);
+  const span = Math.max(hi - lo, (cap || hi) * 0.004);
+  lo -= span * 0.12; hi += span * 0.12;
+  const x0 = xs[0], x1 = xs[xs.length - 1];
+  const X = t => pad.l + (t - x0) / (x1 - x0 || 1) * (W - pad.l - pad.r);
+  const Y = v => pad.t + (hi - v) / (hi - lo) * (H - pad.t - pad.b);
+
+  // 4 ruhige Gitterlinien
+  let g = '';
+  for (let i = 0; i <= 3; i++) {
+    const v = lo + (hi - lo) * i / 3, y = Y(v);
+    g += `<line class="gridline" x1="${pad.l}" x2="${W - pad.r}" y1="${y}" y2="${y}"/>` +
+         `<text class="axis-label num" x="${pad.l - 8}" y="${y + 4}" text-anchor="end">${eur.format(v)}</text>`;
+  }
+  // Zeitachse: Anfang und Ende
+  g += `<text class="axis-label" x="${pad.l}" y="${H - 4}">${fmtTime(points[0][0])}</text>` +
+       `<text class="axis-label" x="${W - pad.r}" y="${H - 4}" text-anchor="end">${fmtTime(points[points.length - 1][0])}</text>`;
+  if (cap != null) g += `<line class="baseline" x1="${pad.l}" x2="${W - pad.r}" y1="${Y(cap)}" y2="${Y(cap)}"/>`;
+
+  const path = points.map((p, i) => (i ? 'L' : 'M') + X(xs[i]).toFixed(1) + ' ' + Y(ys[i]).toFixed(1)).join('');
+  const area = path + `L${X(x1).toFixed(1)} ${H - pad.b}L${X(x0).toFixed(1)} ${H - pad.b}Z`;
+  svg.innerHTML = g + `<path class="area" d="${area}"/><path class="line" d="${path}"/>` +
+    `<line class="cross" id="cross" y1="${pad.t}" y2="${H - pad.b}" style="display:none"/>` +
+    `<circle class="dot" id="dot" r="5" style="display:none"/>` +
+    `<rect x="${pad.l}" y="0" width="${W - pad.l - pad.r}" height="${H}" fill="transparent" id="hit"/>`;
+  chartState = { points, xs, ys, X, Y, cap };
+}
+
+function onChartMove(ev) {
+  if (!chartState) return;
+  const svg = $('chart'), rect = svg.getBoundingClientRect();
+  const mx = ev.clientX - rect.left;
+  const { points, xs, ys, X, Y, cap } = chartState;
+  let best = 0, bd = Infinity;
+  for (let i = 0; i < xs.length; i++) { const dd = Math.abs(X(xs[i]) - mx); if (dd < bd) { bd = dd; best = i; } }
+  const x = X(xs[best]), y = Y(ys[best]);
+  const cross = $('cross'), dot = $('dot'), tip = $('tip');
+  cross.setAttribute('x1', x); cross.setAttribute('x2', x); cross.style.display = '';
+  dot.setAttribute('cx', x); dot.setAttribute('cy', y); dot.style.display = '';
+  const diff = cap ? (ys[best] - cap) / cap : 0;
+  tip.innerHTML = `<div class="t">${fmtTime(points[best][0])}</div><div class="num"><b>${eur.format(ys[best])}</b> ` +
+                  `<span class="${cls(diff)}">${pct(diff, 2)}</span></div>`;
+  tip.style.display = 'block';
+  const tw = tip.offsetWidth;
+  tip.style.left = Math.min(Math.max(x - tw / 2, 0), rect.width - tw) + 'px';
+  tip.style.top = Math.max(y - 58, 0) + 'px';
+}
+function onChartLeave() {
+  ['cross', 'dot'].forEach(id => { const el = $(id); if (el) el.style.display = 'none'; });
+  $('tip').style.display = 'none';
+}
+$('chart-wrap').addEventListener('pointermove', onChartMove);
+$('chart-wrap').addEventListener('pointerleave', onChartLeave);
+
+// ---------- Signal-Nähe ----------
+function renderEvals(st) {
+  const box = $('evals');
+  if (!st || !Object.keys(st.evals || {}).length) { box.innerHTML = '<div class="empty">Noch keine Bewertung</div>'; return; }
+  const th = st.settings.threshold;
+  // Skala 0,4–1,0: darunter liegt praktisch nie etwas, so bleibt der Abstand zur Schwelle lesbar
+  const lo = 0.4, hi = 1.0, P = v => Math.max(0, Math.min(1, (v - lo) / (hi - lo))) * 100;
+  box.innerHTML = Object.entries(st.evals).sort().map(([s, e]) => {
+    const price = st.prices[s] ? eur4.format(st.prices[s].price) + ' €' : '–';
+    const gap = e.score - th;
+    const blocked = st.loss_blocks && st.loss_blocks[s] ? ` · nach Verlust gesperrt bis ${fmtTime(st.loss_blocks[s], false)}` : '';
+    return `<div>
+      <div class="eval-head"><span class="sym">${sym(s)} <span class="hint num">${price}</span></span>
+        <span class="num">${e.score.toFixed(3).replace('.', ',')} <span class="hint">(${gap >= 0 ? '+' : '−'}${Math.abs(gap).toFixed(3).replace('.', ',')})</span></span></div>
+      <div class="bar" title="Score ${e.score.toFixed(3)} · Schwelle ${th}">
+        <div class="fill" style="width:${P(e.score)}%"></div><div class="mark" style="left:calc(${P(th)}% - 1px)"></div></div>
+      <div class="eval-meta">${esc(e.decision)} · ${esc((e.regime || 'Regime ?').replaceAll('_', ' '))} · ${fmtTime(e.time, false)}${blocked}</div>
+    </div>`;
+  }).join('');
+}
+
+function renderPositions(st) {
+  const box = $('positions');
+  if (!st || !st.positions.length) { box.innerHTML = '<div class="empty">Keine offene Position</div>'; return; }
+  box.innerHTML = '<div class="table-scroll"><table><thead><tr><th>Coin</th><th class="r">Einstieg</th><th class="r">Jetzt</th>' +
+    '<th class="r">Stop / Ziel</th><th class="r">Offen</th></tr></thead><tbody>' +
+    st.positions.map(p => {
+      const r = p.current_price ? (p.current_price - p.entry_price) / p.entry_price * (p.side === 'long' ? 1 : -1) : 0;
+      return `<tr><td><b>${sym(p.symbol)}</b> <span class="hint">${esc(p.side)} · ${eur.format(p.size)} · seit ${fmtTime(p.opened, false)}</span></td>
+        <td class="r num">${eur4.format(p.entry_price)}</td>
+        <td class="r num">${p.current_price ? eur4.format(p.current_price) : '–'}</td>
+        <td class="r num">${p.stop_loss ? eur4.format(p.stop_loss) : '–'} / ${p.take_profit ? eur4.format(p.take_profit) : '–'}</td>
+        <td class="r num ${cls(p.unrealized_pnl)}">${signed(p.unrealized_pnl)}<br><span class="hint">${pct(r, 2)}</span></td></tr>`;
+    }).join('') + '</tbody></table></div>';
+}
+
+function renderTrades(trades) {
+  const box = $('trades');
+  if (!trades.length) { box.innerHTML = '<div class="empty">Noch kein Trade</div>'; $('trades-hint').textContent = ''; return; }
+  const shown = trades.slice(-50).reverse();
+  $('trades-hint').textContent = trades.length > 50 ? `· die letzten 50 von ${trades.length}` : `· ${trades.length}`;
+  box.innerHTML = '<div class="table-scroll"><table><thead><tr><th>Geschlossen</th><th>Coin</th><th class="r">Einstieg → Ausstieg</th>' +
+    '<th class="r">Dauer</th><th class="r">Gebühr</th><th class="r">Ergebnis</th></tr></thead><tbody>' +
+    shown.map(t => {
+      const r = (t.exit_price - t.entry_price) / t.entry_price * (t.side === 'long' ? 1 : -1);
+      return `<tr><td class="num">${fmtTime(t.exit_time)}</td><td><b>${sym(t.symbol)}</b> <span class="hint">${esc(t.side)}</span></td>
+        <td class="r num">${eur4.format(t.entry_price)} → ${eur4.format(t.exit_price)}</td>
+        <td class="r num">${duration(t.entry_time, t.exit_time)}</td>
+        <td class="r num">${eur.format(t.fees)}</td>
+        <td class="r num ${cls(t.pnl)}">${arrow(t.pnl)}${signed(t.pnl)} <span class="hint">${pct(r, 2)}</span></td></tr>`;
+    }).join('') + '</tbody></table></div>';
+}
+
+function renderRecorder(r, now) {
+  const box = $('recorder');
+  if (!r) { box.innerHTML = '<div class="empty">Noch keine Daten</div>'; return; }
+  if (r.error) { box.innerHTML = `<div class="empty down">${esc(r.error)}</div>`; return; }
+  const silent = r.last ? (new Date(now) - new Date(r.last)) / 1000 : Infinity;
+  const state = silent > 900 ? `<span class="pill bad">● still seit ${r.last ? ago(r.last, now) : '–'}</span>`
+                             : `<span class="pill ok">● sammelt</span>`;
+  // Ziel aus docs/BACKTEST_BEFUNDE.md: 30 Tage = Historie, die die API nicht mehr hergibt; 90 = Validierung
+  const goal = r.days < 30 ? 30 : 90;
+  box.innerHTML = `<p style="margin:0 0 10px">${state}</p>
+    <div class="eval-head"><span>Gesammelt</span><span class="num"><b>${r.days.toLocaleString('de-AT')} Tage</b> <span class="hint">von ${goal}</span></span></div>
+    <div class="bar"><div class="fill" style="width:${Math.min(100, r.days / goal * 100)}%"></div></div>
+    <div class="eval-meta num" style="margin-top:10px">${r.orderbook_rows.toLocaleString('de-AT')} Orderbuch- und ${r.flow_rows.toLocaleString('de-AT')} Flow-Zeilen · ${r.size_mb} MB<br>
+      seit ${fmtTime(r.first)} · zuletzt ${fmtTime(r.last)}</div>`;
+}
+
+function renderLog(lines) {
+  const box = $('log');
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 20;
+  box.innerHTML = lines.length ? lines.map(l => {
+    const c = /ERROR|CRITICAL/.test(l) ? 'err' : /WARNING/.test(l) ? 'wrn' : '';
+    return `<div class="${c}">${esc(l)}</div>`;
+  }).join('') : '<div class="empty">Noch nichts</div>';
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+
+let last = null;
+async function load() {
+  try {
+    const res = await fetch('api/data', { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    last = await res.json();
+    render(last);
+  } catch (e) {
+    $('pill').className = 'pill bad';
+    $('pill').textContent = '● Dashboard nicht erreichbar';
+  }
+}
+load();
+setInterval(load, 30000);
+window.addEventListener('resize', () => last && renderChart(last.equity || [], last.status ? last.status.settings.start_capital : null));
+</script>
+</body>
+</html>

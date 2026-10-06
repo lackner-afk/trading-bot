@@ -1,0 +1,15 @@
+# Server-Abhängigkeiten — wie ../../requirements.txt, aber ohne torch (~800 MB),
+# rich-Konsole und Telegram bleiben drin, weil main.py sie importiert.
+# ML ist in settings.yaml aus; ml_predictor lädt torch nur bei Bedarf.
+ccxt>=4.0.0
+pandas>=2.0.0
+numpy>=1.24.0
+ta>=0.10.0
+scikit-learn>=1.3.0
+requests>=2.31.0
+websockets>=11.0
+pyyaml>=6.0
+python-dotenv>=1.0.0
+aiohttp>=3.8.0
+rich>=13.0.0
+python-telegram-bot>=21.4

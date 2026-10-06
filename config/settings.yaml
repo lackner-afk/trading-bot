@@ -20,7 +20,20 @@ general:
   # der Bot rechnet mit echten Marktdaten, protokolliert aber nur, was er
   # tun würde. Erst nach einer erfolgreichen Testphase auf false setzen.
   shadow_mode: true
+  # 100 EUR: 15-25 % davon liegen unter Bitpandas Mindestorder (Fusion: 30 EUR).
+  # main.py hebt eine Order deshalb auf die Mindestgroesse an, solange sie
+  # hoechstens die Haelfte des Kapitals bindet — so wuerde man real handeln.
   start_capital: 100
+
+  # Spot-Realitaet (Bitpanda Fusion): keine Shorts, kein Hebel, Mindestorder.
+  # Short-Signale werden verworfen, jede Position laeuft mit Hebel 1 — wie der
+  # Backtest mit LONG_ONLY=1 (siehe docs/BACKTEST_BEFUNDE.md).
+  spot_only: true
+  min_order_amount: 25           # EUR je Order; Fusion meldet je Paar den echten Wert
+
+  # Marktdaten im Paper-Modus: fusion (braucht BITPANDA_API_KEY) | kraken.
+  # Ohne Key faellt der Bot mit Warnung auf Kraken zurueck.
+  paper_feed: fusion
   # Preise, die älter sind, gelten als unbrauchbar: kein Entry, keine SL/TP-Prüfung.
   # Schützt bei Feed-Ausfall und nach macOS-Sleep vor Handel auf Geisterpreisen.
   max_price_age_seconds: 60
@@ -108,8 +121,12 @@ strategies:
     #   weiter Stop (7xATR). Backtest 30d: 68% WR, +29%, PF 1.88, DD 9.2%.
     #   ACHTUNG: kleine ATR-Multiplikatoren (z.B. 1x) sind auf 5m toedlich —
     #   die Fees (~0.12% Round-Trip) fressen die Mini-Gewinne (Sweep: -50%!).
-    tp_atr_multiplier: 5
-    sl_atr_multiplier: 7
+    # 06.10.2026: Umkehr auf 12:5 — bei echten 0,25 % Gebuehren war 5:7 in
+    # allen drei 90-Tage-Fenstern klar negativ (noetige Trefferquote 72 %).
+    # 12:5 braucht ~41 % und war die beste gemessene Variante, blieb aber
+    # ebenfalls negativ. Der Paper-Lauf zeigt, wie es out-of-sample aussieht.
+    tp_atr_multiplier: 12
+    sl_atr_multiplier: 5
     min_tp_pct: 0.0035       # Floor: TP muss Round-Trip-Fees (~0.12%) klar decken
     min_sl_pct: 0.0030
     align_with_trend: true
@@ -125,8 +142,10 @@ risk:
   cooldown_after_losses: 300     # 5 Min Pause nach 3 Verlusten
 
 fees:
-  crypto_maker: 0.0004  # 0.04%
-  crypto_taker: 0.0006  # 0.06%
+  # Bitpanda Fusion Stufe 1. Der Bot handelt nur mit Market-Orders, also zaehlt
+  # die Taker-Gebuehr; Maker vorsichtshalber gleich hoch angesetzt.
+  crypto_maker: 0.0025  # 0.25%
+  crypto_taker: 0.0025  # 0.25%  (vorher 0.06% — damit war jeder Paper-Lauf geschoent)
 
 slippage:
   min: 0.0001  # 0.01%
@@ -136,7 +155,7 @@ notifications:
   console: true
   webhook_url: null  # Optional: Discord/Slack Webhook
   telegram:
-    enabled: true
+    enabled: false                # 06.10.2026: Verlauf laeuft ueber das Dashboard
     token: ${TELEGRAM_BOT_TOKEN}
     chat_id: ${TELEGRAM_CHAT_ID}
     send_trade_alerts: true       # Trade eröffnet / geschlossen — bleibt an

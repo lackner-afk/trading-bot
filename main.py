@@ -9,6 +9,8 @@ Unterstützt zwei Modi:
 """
 
 import asyncio
+import json
+import os
 import signal
 import logging
 import sys
@@ -27,11 +29,16 @@ from core.live_order_engine import LiveOrderEngine
 from core.reconciliation import run_startup_reconciliation
 from data.kraken_feed import KrakenFeed
 from data.onetrading_ccxt_feed import OneTradingCCXTFeed
+from data.fusion_feed import FusionFeed
 from strategies.crypto_scalper import CryptoScalper, SignalType
 from strategies.momentum import MomentumStrategy
 from strategies.ml_predictor import MLPredictor
 from strategies.confluence_strategy import ConfluenceStrategy  # New 2026 multi-factor system
 from notifications.reporter import Reporter
+
+# Laufzeitdaten (Datenbank, Log, Status fürs Dashboard). Auf dem VPS ein
+# Docker-Volume, lokal wie bisher das Projektverzeichnis.
+STATE_DIR = Path(os.environ.get('BOT_STATE_DIR', '.'))
 
 
 class TradingBot:
@@ -74,7 +81,7 @@ class TradingBot:
             format='%(asctime)s [%(name)s] %(levelname)s: %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S',
             handlers=[
-                logging.FileHandler('bot.log', encoding='utf-8'),
+                logging.FileHandler(STATE_DIR / 'bot.log', encoding='utf-8'),
             ]
         )
 
@@ -126,18 +133,23 @@ class TradingBot:
 
         # Core (Portfolio + Risk immer gleich)
         self.portfolio = Portfolio(
-            start_capital=general.get('start_capital', 10000)
+            start_capital=general.get('start_capital', 10000),
+            db_path=str(STATE_DIR / 'trades.db')
         )
+
+        # Spot-Börse (Bitpanda Fusion): keine Shorts, kein Hebel, Mindestorder
+        self.spot_only = bool(general.get('spot_only', False))
+        self.min_order_amount = float(general.get('min_order_amount', 0) or 0)
         self.risk_manager = RiskManager(config=risk_config)
 
         # Trading-Pairs aus Momentum oder Scalper Config
         momentum_config = strategy_config.get('momentum', {})
         scalper_config = strategy_config.get('scalper', {})
         pairs = momentum_config.get('pairs', scalper_config.get('pairs', []))
+        self._pairs = pairs
 
         if self.is_live:
             # === LIVE MODE ===
-            import os
             api_key = os.getenv('ONETRADING_API_KEY')
             api_secret = os.getenv('ONETRADING_API_SECRET')
 
@@ -180,8 +192,17 @@ class TradingBot:
         else:
             # === PAPER MODE (Standard) ===
             self.order_engine = OrderEngine(config=fees_config)
-            # Kraken als Default für Paper (gute EUR-Paare, kein Key nötig)
-            self.crypto_feed = KrakenFeed(config={'pairs': pairs})
+            # Fusion liefert die Kurse der Börse, auf der real gehandelt würde,
+            # braucht aber auch für Marktdaten einen Key. Ohne Key: Kraken.
+            fusion_key = os.getenv('BITPANDA_API_KEY')
+            if general.get('paper_feed', 'kraken') == 'fusion' and fusion_key:
+                self.crypto_feed = FusionFeed(api_key=fusion_key, config={'pairs': pairs})
+            else:
+                if general.get('paper_feed') == 'fusion':
+                    logging.getLogger('TradingBot').warning(
+                        "paper_feed: fusion, aber BITPANDA_API_KEY fehlt — nehme Kraken."
+                    )
+                self.crypto_feed = KrakenFeed(config={'pairs': pairs})
 
         # Strategien
         self.momentum = MomentumStrategy(config=momentum_config)
@@ -215,6 +236,9 @@ class TradingBot:
 
         # Verlust-Cooldown pro Symbol (Confluence): symbol -> gesperrt bis
         self._confluence_loss_block: Dict[str, datetime] = {}
+
+        # Regime je Symbol aus dem letzten Confluence-Durchlauf (fürs Dashboard)
+        self._symbol_regime: Dict[str, str] = {}
 
         # Reporter
         self.reporter = Reporter(config=self.config.get('notifications', {}))
@@ -272,6 +296,16 @@ class TradingBot:
 
         # Komponenten starten
         await self.crypto_feed.start()
+
+        # Fusion startet auch mit abgelehntem Key "erfolgreich" — nur ohne einen
+        # einzigen Kurs. Dann lieber sichtbar auf Kraken ausweichen als still stehen.
+        if isinstance(self.crypto_feed, FusionFeed) and not self.crypto_feed.get_prices():
+            self.logger.error(
+                "FusionFeed liefert keine Kurse (Key falsch oder ohne Read-Recht?) — nehme Kraken."
+            )
+            await self.crypto_feed.stop()
+            self.crypto_feed = KrakenFeed(config={'pairs': self._pairs})
+            await self.crypto_feed.start()
         await self.reporter.start()
 
         # === Reconciliation im Live-Modus (Phase 3/4) ===
@@ -306,6 +340,7 @@ class TradingBot:
             asyncio.create_task(self._supervise(self._risk_check_loop, 'risk')),
             asyncio.create_task(self._supervise(self._reporting_loop, 'reporting')),
             asyncio.create_task(self._supervise(self._telegram_hourly_loop, 'telegram')),
+            asyncio.create_task(self._supervise(self._status_loop, 'status')),
         ]
 
         if self.use_confluence_strategy:
@@ -649,6 +684,7 @@ class TradingBot:
                     regime = self.confluence_strategy.regime_detector.detect(symbol, candles)
                     if regime and regime.name:
                         regime_name = regime.name
+                        self._symbol_regime[symbol] = regime.name
 
                     signal = self.confluence_strategy.analyze_legacy(symbol, candles, price)
 
@@ -737,6 +773,106 @@ class TradingBot:
                 self.logger.error(f"Fehler im Confluence-Loop: {e}")
                 await asyncio.sleep(30)
 
+    async def _status_loop(self):
+        """
+        Schreibt den Zustand fürs Dashboard: status.json alle 15 s (atomar
+        ersetzt, damit das Dashboard nie eine halbe Datei liest) und alle 5 min
+        eine Zeile Equity-Verlauf nach equity.jsonl — die Trades-Tabelle allein
+        kennt nur realisierte Gewinne.
+        """
+        status_path = STATE_DIR / 'status.json'
+        equity_path = STATE_DIR / 'equity.jsonl'
+        last_equity_write = None
+
+        while self.running:
+            try:
+                now = datetime.now()
+                status = self._build_status(now)
+                tmp = status_path.with_suffix('.json.tmp')
+                tmp.write_text(json.dumps(status, ensure_ascii=False))
+                tmp.replace(status_path)
+
+                if last_equity_write is None or (now - last_equity_write).total_seconds() >= 300:
+                    with open(equity_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({
+                            't': now.isoformat(timespec='seconds'),
+                            'equity': round(status['portfolio']['equity'], 4),
+                            'open': len(status['positions']),
+                        }) + '\n')
+                    last_equity_write = now
+            except Exception as e:
+                self.logger.error(f"Fehler beim Schreiben des Status: {e!r}")
+            await asyncio.sleep(15)
+
+    def _build_status(self, now: datetime) -> dict:
+        general = self.config.get('general', {})
+        confluence_cfg = self.config.get('strategies', {}).get('confluence', {})
+        state = self.portfolio.get_state()
+
+        prices = {}
+        for symbol, price in self.crypto_feed.get_prices().items():
+            age = self.crypto_feed.get_price_age(symbol)
+            prices[symbol] = {
+                'price': price,
+                # inf (nie geliefert) wäre in JSON "Infinity" — das liest kein Browser
+                'age_s': round(age, 1) if age != float('inf') else None,
+            }
+
+        positions = []
+        for symbol, pos in state.positions.items():
+            current = prices.get(symbol, {}).get('price')
+            positions.append({
+                'symbol': symbol,
+                'side': pos.side,
+                'size': pos.size,
+                'entry_price': pos.entry_price,
+                'current_price': current,
+                'stop_loss': pos.stop_loss,
+                'take_profit': pos.take_profit,
+                'opened': pos.timestamp.isoformat(timespec='seconds'),
+                'unrealized_pnl': pos.unrealized_pnl,
+                'entry_fees': pos.entry_fees,
+            })
+
+        evals = {}
+        if self.confluence_strategy is not None:
+            evals = dict(self.confluence_strategy.aggregator.last_eval)
+            for symbol, ev in evals.items():
+                ev['regime'] = self._symbol_regime.get(symbol)
+
+        return {
+            'updated': now.isoformat(timespec='seconds'),
+            'started': self.start_time.isoformat(timespec='seconds') if self.start_time else None,
+            'settings': {
+                'mode': general.get('mode', 'paper'),
+                'feed': type(self.crypto_feed).__name__,
+                'spot_only': self.spot_only,
+                'taker_fee': self.order_engine.fees['crypto_taker'],
+                'tp_atr': confluence_cfg.get('tp_atr_multiplier'),
+                'sl_atr': confluence_cfg.get('sl_atr_multiplier'),
+                'threshold': confluence_cfg.get('min_confluence_score'),
+                'start_capital': self.portfolio.start_capital,
+                'max_positions': self.risk_manager.max_concurrent_positions,
+            },
+            'portfolio': {
+                'equity': state.equity,
+                'balance': state.balance,
+                'realized_pnl': state.realized_pnl,
+                'unrealized_pnl': state.unrealized_pnl,
+                'daily_pnl': state.daily_pnl,
+                'wins': state.win_count,
+                'losses': state.loss_count,
+            },
+            'positions': positions,
+            'prices': prices,
+            'prices_stale': self._prices_stale,
+            'evals': evals,
+            'loss_blocks': {
+                s: t.isoformat(timespec='seconds')
+                for s, t in self._confluence_loss_block.items() if t > now
+            },
+        }
+
     async def _risk_check_loop(self):
         """Risk-Check Loop (alle 5 Minuten)"""
         self.logger.info("Risk-Check-Loop gestartet")
@@ -814,6 +950,15 @@ class TradingBot:
         if signal.symbol in self.portfolio.positions:
             return
 
+        # Spot: Shorts sind nicht ausführbar, Hebel gibt es nicht. Erst hier und
+        # nicht im Aggregator verworfen — genau wie im Backtest mit LONG_ONLY=1.
+        leverage = signal.suggested_leverage
+        if self.spot_only:
+            if signal.signal_type != SignalType.LONG:
+                self.logger.info(f"[SPOT] {signal.symbol} Short-Signal verworfen (Spot-Börse)")
+                return
+            leverage = 1
+
         state = self.portfolio.get_state()
 
         # Positions-Obergrenze aus der Config (der RiskManager prüft sie ohnehin;
@@ -833,7 +978,7 @@ class TradingBot:
         risk_check = self.risk_manager.check_trade(
             portfolio_equity=state.equity,
             position_size=state.equity * 0.1,
-            leverage=signal.suggested_leverage,
+            leverage=leverage,
             current_positions=len(state.positions),
             consecutive_losses=self.portfolio.consecutive_losses,
             daily_drawdown=self.portfolio.get_daily_drawdown(),
@@ -864,7 +1009,28 @@ class TradingBot:
         if margin > state.balance or state.balance < 20:
             return
 
-        position_size = margin * signal.suggested_leverage
+        position_size = margin * leverage
+
+        # Mindestordergröße der Börse — Fusion kennt sie je Paar, sonst die Config
+        min_order = max(
+            self.min_order_amount,
+            getattr(self.crypto_feed, 'min_order_amount', {}).get(signal.symbol, 0.0),
+        )
+        # Kleines Konto: 15–25 % von 100 € liegen unter der Mindestorder (Fusion 30 €).
+        # Dann auf die Mindestorder anheben — solange sie höchstens die Hälfte des
+        # Kapitals bindet, damit zwei Positionen nebeneinander Platz haben.
+        if min_order and position_size < min_order:
+            bumped_margin = min_order / leverage
+            if bumped_margin <= state.balance and bumped_margin <= state.equity * 0.5:
+                self.logger.info(
+                    f"[SPOT] {signal.symbol} Order {position_size:.2f} auf Mindestgröße {min_order:.2f} angehoben"
+                )
+                position_size = min_order
+        if min_order and position_size < min_order:
+            self.logger.info(
+                f"[SPOT] {signal.symbol} Order {position_size:.2f} unter Mindestgröße {min_order:.2f} — verworfen"
+            )
+            return
 
         side = 'buy' if signal.signal_type == SignalType.LONG else 'sell'
 
@@ -873,7 +1039,7 @@ class TradingBot:
             side=side,
             size=position_size,
             current_price=signal.price,
-            leverage=signal.suggested_leverage,
+            leverage=leverage,
             strategy=strategy_name
         )
 
@@ -886,7 +1052,7 @@ class TradingBot:
                 side='long' if signal.signal_type == SignalType.LONG else 'short',
                 size=filled_size,
                 price=result.execution_price,
-                leverage=signal.suggested_leverage,
+                leverage=leverage,
                 strategy=strategy_name,
                 market_type=strategy_name,
                 stop_loss=signal.stop_loss,
@@ -908,7 +1074,7 @@ class TradingBot:
                     f"{emoji} <b>TRADE AUF</b> {direction} {signal.symbol}\n"
                     f"Einstieg: {result.execution_price:.4f}\n"
                     f"TP: {signal.take_profit:.4f} | SL: {signal.stop_loss:.4f}\n"
-                    f"Größe: {filled_size:.2f} (Hebel {signal.suggested_leverage}x) | "
+                    f"Größe: {filled_size:.2f} (Hebel {leverage}x) | "
                     f"Konfidenz {signal.confidence:.0%}"
                 )
                 self._spawn(self.reporter.telegram.send_message(msg))
@@ -1154,7 +1320,9 @@ class TradingBot:
         if not position:
             return
 
-        fees = position.size * 0.0006  # Taker Fee (size ist bereits in USD)
+        # Taker-Gebühr aus der Config (size ist bereits das Notional). Hier stand
+        # fest 0.0006 — bei geänderter Gebühr wäre nur der Einstieg teurer geworden.
+        fees = position.size * self.order_engine.fees['crypto_taker']
 
         trade = self.portfolio.close_position(
             symbol=symbol,
@@ -1274,6 +1442,10 @@ def main():
         # os.kill(pid, 0) statt /proc-Check — /proc existiert auf macOS nicht,
         # wodurch der Lock nie griff und Doppel-Instanzen möglich waren.
         try:
+            # Im Container ist der Bot immer PID 1 — nach einem harten Neustart
+            # stünde dort die eigene Nummer, und er würde sich selbst aussperren.
+            if old_pid == os.getpid():
+                raise ProcessLookupError
             os.kill(old_pid, 0)
             print(f"Bot läuft bereits (PID {old_pid}). Beende.")
             sys.exit(0)
