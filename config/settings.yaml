@@ -108,13 +108,17 @@ strategies:
     # Win-Rate-Umbau 21.08.2026 (Ziel: Trefferquote >= 50%):
     # - MeanReversionFactor (Connors RSI-2): Ruecksetzer im Trend kaufen
     # - align_with_trend: 200-EMA-Filter, keine Counter-Trend-Trades
-    # - TP/SL ATR-verankert im Mean-Reversion-Profil: nahes Ziel (5xATR),
-    #   weiter Stop (7xATR). Backtest 30d: 68% WR, +29%, PF 1.88, DD 9.2%.
+    # TP/SL seit 06.10.2026 auf Bitpanda-Gebühren (0,25 % je Order = 0,50 %
+    # Round-Trip) umgestellt. Vorher Ziel 5xATR / Stop 7xATR mit 0,35 %-Floor:
+    # ein Treffer am Floor brachte nach Gebühren MINUS, und jeder Verlust war
+    # größer als jeder Gewinn. 12:5 war in docs/BACKTEST_BEFUNDE.md über drei
+    # Marktphasen das robusteste Profil (nötige Trefferquote ~41 %), aber auch
+    # dort noch leicht negativ — Paper-Ergebnisse genau beobachten.
     #   ACHTUNG: kleine ATR-Multiplikatoren (z.B. 1x) sind auf 5m toedlich —
-    #   die Fees (~0.12% Round-Trip) fressen die Mini-Gewinne (Sweep: -50%!).
-    tp_atr_multiplier: 5
-    sl_atr_multiplier: 7
-    min_tp_pct: 0.0035       # Floor: TP muss Round-Trip-Fees (~0.12%) klar decken
+    #   die Gebühren fressen die Mini-Gewinne.
+    tp_atr_multiplier: 12
+    sl_atr_multiplier: 5
+    min_tp_pct: 0.010        # Floor: TP muss die 0,50 % Round-Trip-Gebühren klar übertreffen
     min_sl_pct: 0.0030
     align_with_trend: true
     min_signal_confidence: 0.0    # Gate im Loop aus — min_confluence_score im Aggregator ist maßgeblich
