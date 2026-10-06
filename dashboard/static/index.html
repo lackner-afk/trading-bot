@@ -172,6 +172,19 @@
   .rows .when { font-size: 12px; color: var(--muted); }
   .rows .amt { text-align: right; font-family: var(--mono); font-size: 13px; }
 
+  /* ---------- Signal-Nähe & Datensammler ---------- */
+  .row-3 { grid-template-columns: 1fr 1fr; margin-top: 16px; }
+  .sig { margin-bottom: 16px; }
+  .sig:last-child { margin-bottom: 0; }
+  .sig-top { display: flex; justify-content: space-between; align-items: baseline; font-size: 13px; margin-bottom: 7px; }
+  .sig-top .v { font-family: var(--mono); font-size: 12px; }
+  .sig-top .gap { color: var(--muted); margin-left: 4px; }
+  .sig .bar { position: relative; overflow: visible; }
+  .sig .mark { position: absolute; top: -4px; bottom: -4px; width: 2px; border-radius: 1px; background: var(--text); }
+  .sig-meta { font-size: 11px; color: var(--muted); margin-top: 7px; }
+  .rec-big { font-size: 28px; font-weight: 600; letter-spacing: -.02em; margin: 2px 0 10px; }
+  .rec-big .label { font-size: 13px; font-weight: 400; margin-left: 4px; }
+
   /* ---------- Unterseiten ---------- */
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; padding: 0 0 10px; }
@@ -202,6 +215,7 @@
     .card { padding: 18px; }
     .row-2 { grid-template-columns: 1fr; }
     .row-2 .risk { grid-column: auto; }
+    .row-3 { grid-template-columns: 1fr; }
     .equity-head { flex-direction: column; }
     .chart { height: 180px; }
     .rows li { grid-template-columns: 34px 1fr auto; }
@@ -294,6 +308,18 @@
       </div>
     </div>
 
+    <div class="grid row-3">
+      <div class="card">
+        <h2>Wie nah am nächsten Signal</h2>
+        <div id="signals"><div class="empty">Noch keine Bewertung</div></div>
+        <div class="foot" id="signals-foot"></div>
+      </div>
+      <div class="card">
+        <h2>Datensammler</h2>
+        <div id="recorder"><div class="empty">Noch keine Daten</div></div>
+      </div>
+    </div>
+
     <div class="card activity">
       <div class="act-head"><h2>Letzte Aktivität</h2><button class="link" data-goto="history">Alle anzeigen</button></div>
       <ul class="rows" id="activity"></ul>
@@ -375,8 +401,8 @@
     } catch (e) {
       const b = $('banner');
       b.textContent = e.message === 'token'
-        ? 'Zugang verweigert — die Adresse braucht ?token=… (DASHBOARD_TOKEN aus config/secrets.env).'
-        : 'Keine Verbindung zum Bot. Läuft python main.py? Neuer Versuch alle 5 Sekunden.';
+        ? 'Zugang verweigert — Seite neu laden und anmelden (bzw. ?token=… bei DASHBOARD_TOKEN).'
+        : 'Keine Verbindung zum Bot. Neuer Versuch alle 5 Sekunden.';
       b.classList.add('show');
     }
   }
@@ -392,7 +418,7 @@
 
     // Gesamtwert
     const [whole, dec] = num2.format(s.equity.value).split(',');
-    $('equity').innerHTML = `[${esc(whole)},<span class="dec">${esc(dec)} €</span>]`;
+    $('equity').innerHTML = `${esc(whole)},<span class="dec">${esc(dec)} €</span>`;
     const t = tone(s.equity.change);
     $('delta').innerHTML = `<span class="${t}">${signed(s.equity.change, v => eur.format(v))} (${signed(s.equity.change_pct, v => pct(v))})</span><span class="label">${RANGE_TEXT[s.equity.range] || ''}</span>`;
     drawChart(s.equity.series, t);
@@ -416,6 +442,63 @@
     $('history').innerHTML = rows(s.activity) || '<li><span></span><span class="s">Noch keine Aktivität.</span></li>';
     drawStrategyTable(s.strategies);
     drawSettings(s.settings);
+    if (s.signals) drawSignals(s.signals, s.generated_at);
+    drawRecorder(s.recorder, s.generated_at);
+  }
+
+  // ---------------------------------------------------------------- Signal-Nähe
+  function ago(iso, nowIso) {
+    const sec = (new Date(nowIso) - new Date(iso)) / 1000;
+    if (sec < 90) return `${Math.max(0, Math.round(sec))} s`;
+    if (sec < 5400) return `${Math.round(sec / 60)} min`;
+    if (sec < 172800) return `${Math.round(sec / 3600)} h`;
+    return `${Math.round(sec / 86400)} Tagen`;
+  }
+  const clock = (iso) => new Date(iso).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+  const score3 = (x) => x.toLocaleString('de-DE', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
+
+  function drawSignals(sig, nowIso) {
+    const box = $('signals');
+    const th = sig.threshold;
+    if (!sig.coins.length) {
+      box.innerHTML = '<div class="empty" style="height:80px">Noch keine Bewertung</div>';
+    } else {
+      // Skala 0,4–1,0: darunter liegt praktisch nichts, so bleibt der Abstand zur Schwelle lesbar
+      const P = (v) => Math.max(0, Math.min(1, (v - 0.4) / 0.6)) * 100;
+      box.innerHTML = sig.coins.map((c, i) => {
+        const gap = c.score - th;
+        const blocked = c.blocked_until ? ` · nach Verlust gesperrt bis ${clock(c.blocked_until)}` : '';
+        const price = c.price ? ` <span class="label">${num2.format(c.price)} €</span>` : '';
+        return `<div class="sig">
+          <div class="sig-top"><span>${esc(c.coin)}${price}</span>
+            <span class="v">${score3(c.score)}<span class="gap">${gap >= 0 ? '+' : '−'}${score3(Math.abs(gap))}</span></span></div>
+          <div class="bar" title="Score ${score3(c.score)} · Schwelle ${th}">
+            <i style="width:${P(c.score)}%;background:${colorFor(c.coin, i)}"></i>
+            <span class="mark" style="left:calc(${P(th)}% - 1px)"></span></div>
+          <div class="sig-meta">${esc(c.decision)} · ${esc((c.regime || 'Regime ?').replaceAll('_', ' '))}${blocked}</div>
+        </div>`;
+      }).join('');
+    }
+    const feed = sig.feed === 'FusionFeed' ? 'Bitpanda Fusion' : sig.feed === 'KrakenFeed' ? 'Kraken' : sig.feed;
+    const beat = sig.last_cycle ? `letzter Durchgang vor ${ago(sig.last_cycle, nowIso)}` : 'noch kein Durchgang';
+    $('signals-foot').textContent = `Strich = Schwelle ${th} · Ziel/Stop ${sig.tp_atr}:${sig.sl_atr} × ATR · Kurse ${feed} · ${beat}`;
+  }
+
+  // ---------------------------------------------------------------- Datensammler
+  function drawRecorder(r, nowIso) {
+    const box = $('recorder');
+    if (!r) { box.innerHTML = '<div class="empty" style="height:80px">Noch keine Daten</div>'; return; }
+    if (r.error) { box.innerHTML = `<div class="sig-meta down">${esc(r.error)}</div>`; return; }
+    const silent = r.last ? (new Date(nowIso) - new Date(r.last)) / 1000 : Infinity;
+    // Ziel aus docs/BACKTEST_BEFUNDE.md: 30 Tage = Historie, die Binance nicht mehr hergibt; 90 = Validierung
+    const goal = r.days < 30 ? 30 : 90;
+    const ok = silent <= 900;
+    box.innerHTML = `
+      <div class="status"><span class="dot${ok ? '' : ' warn'}"></span>${ok ? 'sammelt alle 5 Minuten' : `still seit ${r.last ? ago(r.last, nowIso) : '–'}`}</div>
+      <div class="rec-big num">${r.days.toLocaleString('de-DE', { maximumFractionDigits: 1 })}<span class="label">von ${goal} Tagen</span></div>
+      <div class="bar"><i style="width:${Math.min(100, r.days / goal * 100)}%;background:var(--violet)"></i></div>
+      <div class="foot">${r.orderbook_rows.toLocaleString('de-DE')} Orderbuch- und ${r.flow_rows.toLocaleString('de-DE')} Flow-Zeilen · ${r.size_mb} MB · seit ${when(r.first)}</div>
+      <p class="hint" style="margin-top:12px">Orderbuch und Orderflow sind die einzige noch ungeprüfte Signalquelle. Binance gibt sie nur 30 Tage rückwirkend her — ab 90 Tagen lässt sie sich so prüfen wie die anderen Faktoren.</p>`;
   }
 
   function uptime(iso) {

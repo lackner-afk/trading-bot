@@ -1,0 +1,45 @@
+# Auf dem VPS unter /home/deploy/trading-bot/deploy/vps/ — siehe deploy.sh.
+# Beide Dienste teilen sich das Volume /state:
+#   bot        schreibt trades.db (inkl. Dashboard-Tabellen) und bot.log und
+#              liefert das Panda-Pro-Dashboard aus (Basic-Auth aus dashboard.env)
+#   recorder   schreibt market_data.db, das Dashboard liest sie nur
+services:
+  bot:
+    build: { context: ../.., dockerfile: deploy/vps/Dockerfile }
+    image: trading-bot:latest
+    container_name: trading-bot
+    restart: unless-stopped
+    env_file:
+      - ../../config/secrets.env
+      - ../../config/dashboard.env
+    environment:
+      TZ: Europe/Vienna
+      DASHBOARD_HOST: 0.0.0.0
+    volumes:
+      - state:/state
+    # Nur lokal: nach außen geht es ausschließlich über nginx mit TLS.
+    ports:
+      - "127.0.0.1:3400:8080"
+    mem_limit: 768m
+    logging: &logging
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  recorder:
+    image: trading-bot:latest
+    container_name: trading-recorder
+    restart: unless-stopped
+    command: ["python3", "-u", "tools/data_recorder.py"]
+    environment:
+      TZ: Europe/Vienna
+      DB: /state/market_data.db
+      RECORDER_LOG: /state/recorder.log
+      INTERVAL_S: "300"
+    volumes:
+      - state:/state
+    depends_on: [bot]
+    mem_limit: 512m  # ccxt lädt beim Start alle Binance-Märkte (~200 MB)
+    logging: *logging
+
+volumes:
+  state:

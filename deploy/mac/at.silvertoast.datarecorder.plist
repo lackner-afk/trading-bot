@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>at.silvertoast.datarecorder</string>
+
+    <!-- caffeinate auch hier: ein schlafender Mac hinterlaesst Luecken in der
+         Datenreihe, und genau die Luecken kann man spaeter nicht nachfuellen —
+         Orderbuchdaten gibt es historisch nirgends zu kaufen. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-i</string>
+        <string>/usr/bin/python3</string>
+        <string>tools/data_recorder.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/nici/Projects/trading-bot</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/nici/Projects/trading-bot/recorder_console.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/nici/Projects/trading-bot/recorder_console.log</string>
+</dict>
+</plist>

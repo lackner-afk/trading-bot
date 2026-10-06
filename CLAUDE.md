@@ -335,6 +335,16 @@ Exchange-side safety net, independent of `core/risk_manager.py`:
 - Open/close/pause events are recorded via `TradingBot._record_event()` — failures there must never block trading
 - Binding to a non-loopback host requires `DASHBOARD_TOKEN`; POSTs check Origin + JSON content type
 - On first start the store backfills equity curve + activity from the existing `trades` table
+- With `DASHBOARD_PASSWORD` set, the whole site (not only `/api/`) requires Basic-Auth (`DASHBOARD_USER`, default `nici`); `/health` stays open
+- Extra panels: signal proximity per coin (`SignalAggregator.last_eval` — also rejected scores), heartbeat (`TradingBot._last_cycle_at`), data recorder progress (`market_data.db`, read-only)
+
+## VPS deployment (deploy/vps/)
+
+- `./deploy/vps/deploy.sh` rsyncs to `deploy@91.98.234.212:/home/deploy/trading-bot` and runs `docker compose up -d --build --remove-orphans`
+- Containers: `trading-bot` (bot + dashboard on 127.0.0.1:3400, `DASHBOARD_HOST=0.0.0.0` inside) and `trading-recorder`; shared volume `/state` (`BOT_STATE_DIR`)
+- nginx + Let's Encrypt in front: https://bot.silvertoast.at
+- Secrets only on the server: `config/secrets.env` (BITPANDA_API_KEY — a Fusion key, not a Bitpanda app key) and `config/dashboard.env`
+- If Fusion delivers no prices at startup (rejected key still "starts"), the bot falls back to Kraken and logs an ERROR
 
 ## Notifications (notifications/reporter.py)
 

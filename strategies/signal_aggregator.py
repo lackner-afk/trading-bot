@@ -67,6 +67,20 @@ class SignalAggregator:
         })
         self.weights = self.base_weights.copy()
 
+        # Letzte Bewertung je Symbol, auch abgelehnte — fürs Dashboard, damit
+        # sichtbar ist, wie weit der Score unter der Schwelle lag.
+        self.last_eval: Dict[str, Dict] = {}
+
+    def _note(self, symbol: str, total: float, long_vote: float, short_vote: float,
+              decision: str):
+        self.last_eval[symbol] = {
+            "score": round(total, 4),
+            "long_vote": round(long_vote, 3),
+            "short_vote": round(short_vote, 3),
+            "decision": decision,
+            "time": datetime.now().isoformat(timespec="seconds"),
+        }
+
     def aggregate(self,
                   symbol: str,
                   current_price: float,
@@ -106,6 +120,7 @@ class SignalAggregator:
                 print(f"[AGGREGATOR REJECT] {symbol} | total={total_score:.2f} (min {self.min_confluence}) | "
                       f"tech={tech_score:.2f} sent={sent_score:.2f} macro={macro_score:.2f} | "
                       f"long_vote={long_score:.2f} short_vote={short_score:.2f} | tech_factors={len(tech_results)}")
+                self._note(symbol, total_score, long_score, short_score, "unter Schwelle")
                 return None
         else:
             direction = "long"
@@ -113,6 +128,7 @@ class SignalAggregator:
         # Require at least X technical factors to have decent conviction
         if len(tech_results) < self.min_technical_factors:
             print(f"[AGGREGATOR REJECT] {symbol} | Not enough technical factors: {len(tech_results)} < {self.min_technical_factors}")
+            self._note(symbol, total_score, long_score, short_score, "zu wenig Faktoren")
             return None
 
         # Trend-Alignment-Veto: keine Counter-Trend-Trades gegen die lange EMA
@@ -121,6 +137,7 @@ class SignalAggregator:
         trend_bias = (regime_characteristics or {}).get("trend_bias")
         if self.align_with_trend and trend_bias and direction != trend_bias:
             print(f"[AGGREGATOR REJECT] {symbol} | {direction} gegen Trend-Bias {trend_bias} (200-EMA-Filter)")
+            self._note(symbol, total_score, long_score, short_score, f"{direction} gegen Trend")
             return None
 
         # total_score liegt bereits auf der 0-1-Skala (gewichtetes Mittel der Faktoren)
@@ -151,6 +168,8 @@ class SignalAggregator:
         else:
             take_profit = current_price * (1 - tp_pct)
             stop_loss = current_price * (1 + sl_pct)
+
+        self._note(symbol, total_score, long_score, short_score, f"Signal {direction}")
 
         reason = (
             f"Confluence {total_score:.2f}/1.0 | "

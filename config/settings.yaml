@@ -20,9 +20,13 @@ general:
   # der Bot rechnet mit echten Marktdaten, protokolliert aber nur, was er
   # tun würde. Erst nach einer erfolgreichen Testphase auf false setzen.
   shadow_mode: true
+  # 100 EUR: 15-25 % davon liegen unter Bitpandas Mindestorder (Fusion: 30 EUR).
+  # main.py hebt eine Order deshalb auf die Mindestgroesse an, solange sie
+  # hoechstens die Haelfte des Kapitals bindet — so wuerde man real handeln.
   start_capital: 100
   # Woher die Kurse im Paper-Modus kommen:
-  #   bitpanda = Bitpanda Fusion (braucht BITPANDA_API_KEY in secrets.env)
+  #   bitpanda = Bitpanda Fusion (braucht BITPANDA_API_KEY in secrets.env;
+  #              fehlt der Key oder liefert Fusion keine Kurse: Kraken mit Warnung)
   #   kraken   = öffentliche Kraken-Kurse (kein Key)
   data_feed: bitpanda
   # Preise, die älter sind, gelten als unbrauchbar: kein Entry, keine SL/TP-Prüfung.
@@ -112,8 +116,12 @@ strategies:
     #   weiter Stop (7xATR). Backtest 30d: 68% WR, +29%, PF 1.88, DD 9.2%.
     #   ACHTUNG: kleine ATR-Multiplikatoren (z.B. 1x) sind auf 5m toedlich —
     #   die Fees (~0.12% Round-Trip) fressen die Mini-Gewinne (Sweep: -50%!).
-    tp_atr_multiplier: 5
-    sl_atr_multiplier: 7
+    # 06.10.2026: Umkehr auf 12:5 — bei echten 0,25 % Gebuehren war 5:7 in
+    # allen drei 90-Tage-Fenstern klar negativ (noetige Trefferquote 72 %).
+    # 12:5 braucht ~41 % und war die beste gemessene Variante, blieb aber
+    # ebenfalls negativ. Der Paper-Lauf zeigt, wie es out-of-sample aussieht.
+    tp_atr_multiplier: 12
+    sl_atr_multiplier: 5
     min_tp_pct: 0.0035       # Floor: TP muss Round-Trip-Fees (~0.12%) klar decken
     min_sl_pct: 0.0030
     align_with_trend: true
@@ -134,8 +142,8 @@ exchange_rules:
   spot_only: true        # nur Kaufen/Verkaufen: keine Shorts, kein Hebel
   # Ersatzwert in EUR. Meldet die Börse beim Start (/v1/pairs, minOrderAmount)
   # einen eigenen Mindestbetrag pro Paar, gilt der — steht im bot.log als
-  # "BTC_EUR: min. Ordervolumen ... EUR".
-  min_order_eur: 10
+  # "BTC_EUR: min. Ordervolumen ... EUR" (Fusion: 30 EUR je Paar, Stand 06.10.2026).
+  min_order_eur: 30
 
 fees:
   # Bitpanda Fusion Stufe 1 (siehe docs/BACKTEST_BEFUNDE.md). Der Bot setzt nur
@@ -151,7 +159,7 @@ notifications:
   console: true
   webhook_url: null  # Optional: Discord/Slack Webhook
   telegram:
-    enabled: true
+    enabled: false                # 06.10.2026: Verlauf laeuft ueber das Dashboard
     token: ${TELEGRAM_BOT_TOKEN}
     chat_id: ${TELEGRAM_CHAT_ID}
     send_trade_alerts: true       # Trade eröffnet / geschlossen — bleibt an

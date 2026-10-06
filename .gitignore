@@ -55,3 +55,6 @@ models/
 dist/
 build/
 *.egg-info/
+
+# Dashboard-Zugang (nur auf dem VPS)
+config/dashboard.env

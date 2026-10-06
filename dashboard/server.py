@@ -10,13 +10,19 @@ Endpoints:
     POST /api/pause      {"paused": true|false} — neue Einstiege an/aus
 
 Sicherheit: Standardmäßig nur auf 127.0.0.1. Wer den Server im Netz öffnet
-(host: 0.0.0.0), MUSS DASHBOARD_TOKEN setzen, sonst startet er nicht.
+(host: 0.0.0.0), MUSS DASHBOARD_PASSWORD oder DASHBOARD_TOKEN setzen, sonst
+startet er nicht. Mit DASHBOARD_PASSWORD fragt der Browser per Basic-Auth nach
+Benutzer und Passwort — das schützt auch die Seite selbst, nicht nur /api/.
+Auf dem VPS (Docker) setzt DASHBOARD_HOST=0.0.0.0 die Adresse; nach außen geht
+es nur über nginx mit TLS.
 """
 
 import asyncio
+import base64
 import hmac
 import logging
 import os
+import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
@@ -31,6 +37,7 @@ if TYPE_CHECKING:
     from main import TradingBot
 
 STATIC_DIR = Path(__file__).parent / 'static'
+STATE_DIR = Path(os.environ.get('BOT_STATE_DIR', '.'))
 LOOPBACK_HOSTS = {'127.0.0.1', 'localhost', '::1'}
 MAX_CHART_POINTS = 240
 
@@ -92,6 +99,29 @@ def downsample(points: List[Tuple[datetime, float]], limit: int = MAX_CHART_POIN
     return [points[round(i * step)] for i in range(limit)]
 
 
+def recorder_stats(path: Path) -> Optional[Dict]:
+    """Stand des Datensammlers (tools/data_recorder.py) — nur lesend geöffnet."""
+    if not path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=2)
+        try:
+            n, lo, hi = conn.execute('SELECT COUNT(*), MIN(ts), MAX(ts) FROM orderbook').fetchone()
+            flow = conn.execute('SELECT COUNT(*) FROM flow').fetchone()[0]
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        return {'error': str(e)}
+    return {
+        'orderbook_rows': n,
+        'flow_rows': flow,
+        'first': datetime.fromtimestamp(lo).isoformat(timespec='seconds') if lo else None,
+        'last': datetime.fromtimestamp(hi).isoformat(timespec='seconds') if hi else None,
+        'days': round((hi - lo) / 86400, 2) if lo and hi else 0.0,
+        'size_mb': round(path.stat().st_size / 1e6, 1),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Server
 # ---------------------------------------------------------------------------
@@ -105,22 +135,27 @@ class DashboardServer:
         self.config = config
         self.logger = logging.getLogger('Dashboard')
 
-        self.host: str = config.get('host', '127.0.0.1')
+        self.host: str = os.getenv('DASHBOARD_HOST') or config.get('host', '127.0.0.1')
         self.port: int = int(config.get('port', 8080))
         self.bot_name: str = config.get('bot_name', 'Panda-9')
         self.initials: str = config.get('initials', '')
         self.snapshot_seconds: int = int(config.get('snapshot_minutes', 5)) * 60
         self.token: str = os.getenv('DASHBOARD_TOKEN', '')
+        self.user: str = os.getenv('DASHBOARD_USER', 'nici')
+        self.password: str = os.getenv('DASHBOARD_PASSWORD', '')
 
     # ----------------------------------------------------------------- Ablauf
 
     async def run(self):
         """Startet den Server und schreibt regelmäßig Equity-Snapshots."""
-        if self.host not in LOOPBACK_HOSTS and not self.token:
+        if self.password and len(self.password) < 12:
+            self.logger.error("DASHBOARD_PASSWORD ist kürzer als 12 Zeichen — Dashboard NICHT gestartet.")
+            return
+        if self.host not in LOOPBACK_HOSTS and not (self.token or self.password):
             self.logger.error(
-                f"Dashboard soll auf {self.host} lauschen, aber DASHBOARD_TOKEN fehlt — "
-                "aus Sicherheitsgründen NICHT gestartet. Token in config/secrets.env setzen "
-                "oder host: 127.0.0.1 verwenden."
+                f"Dashboard soll auf {self.host} lauschen, aber weder DASHBOARD_PASSWORD noch "
+                "DASHBOARD_TOKEN ist gesetzt — aus Sicherheitsgründen NICHT gestartet. "
+                "Zugang setzen oder host: 127.0.0.1 verwenden."
             )
             return
 
@@ -128,6 +163,7 @@ class DashboardServer:
         app.router.add_get('/', self._handle_index)
         app.router.add_get('/api/state', self._handle_state)
         app.router.add_post('/api/pause', self._handle_pause)
+        app.router.add_get('/health', self._handle_health)
 
         runner = web.AppRunner(app, access_log=None)
         await runner.setup()
@@ -156,8 +192,14 @@ class DashboardServer:
 
     @web.middleware
     async def _auth_middleware(self, request: web.Request, handler):
+        if request.path == '/health':
+            return await handler(request)
+        if self.password and not self._basic_auth_ok(request):
+            await asyncio.sleep(1)  # Bremse gegen Durchprobieren
+            return web.Response(status=401, text='Anmeldung nötig', headers={
+                'WWW-Authenticate': 'Basic realm="Panda Pro", charset="UTF-8"'})
         if request.path.startswith('/api/'):
-            if self.token:
+            if self.token and not self.password:
                 given = request.headers.get('X-Dashboard-Token') or request.query.get('token', '')
                 if not hmac.compare_digest(given, self.token):
                     return web.json_response({'error': 'Token fehlt oder falsch'}, status=401)
@@ -170,7 +212,23 @@ class DashboardServer:
                     return web.json_response({'error': 'JSON erwartet'}, status=415)
         return await handler(request)
 
+    def _basic_auth_ok(self, request: web.Request) -> bool:
+        header = request.headers.get('Authorization', '')
+        if not header.startswith('Basic '):
+            return False
+        try:
+            user, _, pw = base64.b64decode(header[6:]).decode('utf-8').partition(':')
+        except Exception:
+            return False
+        # Beide Teile zeitkonstant prüfen, damit die Laufzeit nichts verrät
+        ok_user = hmac.compare_digest(user.encode(), self.user.encode())
+        ok_pw = hmac.compare_digest(pw.encode(), self.password.encode())
+        return ok_user and ok_pw
+
     # --------------------------------------------------------------- Handler
+
+    async def _handle_health(self, request: web.Request) -> web.Response:
+        return web.Response(text='ok')
 
     async def _handle_index(self, request: web.Request) -> web.StreamResponse:
         return web.FileResponse(STATIC_DIR / 'index.html')
@@ -217,6 +275,7 @@ class DashboardServer:
         trades_today = await asyncio.to_thread(self.store.count_trades_since, today)
         strat_stats = await asyncio.to_thread(self.store.get_trade_stats, now - timedelta(days=30))
         events = await asyncio.to_thread(self.store.get_events, 50)
+        recorder = await asyncio.to_thread(recorder_stats, STATE_DIR / 'market_data.db')
 
         start_value = series[0][1] if series else p.equity
         change = p.equity - start_value
@@ -276,6 +335,38 @@ class DashboardServer:
                 for e in events
             ],
             'settings': self._settings(),
+            'signals': self._signals(),
+            'recorder': recorder,
+        }
+
+    def _signals(self) -> Dict:
+        """Wie nah jeder Coin am nächsten Signal ist — auch abgelehnte Scores."""
+        bot = self.bot
+        cfg = bot.config.get('strategies', {}).get('confluence', {})
+        strategy = getattr(bot, 'confluence_strategy', None)
+        evals = dict(strategy.aggregator.last_eval) if strategy is not None else {}
+        now = datetime.now()
+        coins = []
+        for symbol, ev in sorted(evals.items()):
+            blocked = bot._confluence_loss_block.get(symbol)
+            coins.append({
+                'symbol': symbol,
+                'coin': coin_of(symbol),
+                'price': bot.crypto_feed.get_price(symbol),
+                'score': ev['score'],
+                'decision': ev['decision'],
+                'time': ev['time'],
+                'regime': bot._symbol_regime.get(symbol),
+                'blocked_until': blocked.isoformat(timespec='seconds') if blocked and blocked > now else None,
+            })
+        last_cycle = getattr(bot, '_last_cycle_at', None)
+        return {
+            'threshold': cfg.get('min_confluence_score'),
+            'tp_atr': cfg.get('tp_atr_multiplier'),
+            'sl_atr': cfg.get('sl_atr_multiplier'),
+            'feed': type(bot.crypto_feed).__name__,
+            'last_cycle': last_cycle.isoformat(timespec='seconds') if last_cycle else None,
+            'coins': coins,
         }
 
     def _status_text(self) -> str:

@@ -86,13 +86,148 @@ Jetzt ATR-normalisiert (`spread / atr_pct`), Median 0,483 statt 0,008. Die
 Backtest-Performance verbessert das allerdings **nicht** — der Faktor ist nur
 nicht mehr kaputt.
 
+## Faktor-Analyse (25.08.2026): es fehlt das Signal, nicht die Kalibrierung
+
+Gemessen mit `tools/factor_analysis.py`: Für jedes Signal wird der reine Ausgang
+bestimmt (läuft der Kurs zuerst ins TP oder ins SL, ohne Portfolio-Effekte), dann
+je Faktor die Rangkorrelation zwischen Score und Ausgang — der Information
+Coefficient. Über dieselben drei 90-Tage-Fenster, je ~46.000 auswertbare Signale.
+
+### Einzelfaktoren: keiner ist über Marktphasen stabil
+
+| Faktor | Mai–Aug | Feb–Mai | Nov–Feb | stabil? |
+|---|---|---|---|---|
+| multi_timeframe_trend | −0,053 | −0,004 | −0,008 | nein |
+| momentum | −0,023 | +0,003 | −0,001 | nein |
+| sentiment | +0,022 | +0,032 | **−0,063** | Vorzeichen dreht |
+| mean_reversion | +0,021 | +0,010 | +0,008 | ja, aber ≈ 0 |
+| volatility_filter | −0,012 | −0,052 | −0,042 | nein |
+| volume_confirmation | −0,002 | −0,004 | +0,022 | nein |
+| macro_news_filter | konstant | konstant | konstant | reiner Ballast |
+
+Wechselnde Vorzeichen zwischen Marktphasen heißt: kein Signal, sondern
+angepasstes Rauschen.
+
+### Der Gesamtscore hat ebenfalls keine Vorhersagekraft
+
+| Fenster | IC | Trefferquote Q1→Q5 |
+|---|---|---|
+| Mai–Aug 2026 | −0,009 | 27 % 26 % 26 % 25 % 26 % |
+| Feb–Mai 2026 | +0,016 | 29 % 25 % 29 % 30 % 29 % |
+| Nov 2025–Feb 2026 | **−0,055** | 29 % 29 % 24 % 24 % 23 % |
+
+In zwei Fenstern ist die Trefferquote über alle Quintile praktisch identisch, im
+dritten fällt sie monoton. **`min_confluence_score` filtert damit nicht nach
+Qualität, sondern nur nach Menge** — die gesamte Kalibrierhistorie an dieser
+Schwelle (0,66 → 0,647 → Perzentil-Sweeps) optimierte einen Parameter, der nichts
+sortiert.
+
+### Größenordnung
+
+Trefferquote über alle Signale: 30,6 % / 28,6 % / 25,7 %. Nötig bei TP 12× / SL 5×
+sind ~39 %. Für die fehlenden ~10 Punkte bräuchte es einen IC um 0,15; vorhanden
+sind 0,01–0,06 mit wechselndem Vorzeichen. Das ist keine Lücke, die Gewichtung,
+Schwellen oder das Aussortieren einzelner Faktoren schließen können.
+
+**Konsequenz: Nicht weiter an Gewichten, Schwellen oder TP/SL drehen.** Die sieben
+Faktoren sind OHLCV-Ableitungen auf 5m-Kerzen plus ein täglicher Stimmungsindex —
+auf diesem Zeitraster ist kein verwertbarer Vorsprung in den Daten.
+
+### Methodischer Merkposten
+
+Ein erster Lauf über nur 10 Tage zeigte scheinbar starke Werte (sentiment
+IC −0,375, volatility_filter +0,260). Beides war ein Artefakt: Langsam variierende
+Faktoren — Fear & Greed liefert einen Wert pro Tag — haben über kurze Strecken zu
+wenige Ausprägungen, die Quintile trennen dann nach Kalendertagen statt nach
+Signalstärke. Erkennbar am nicht-monotonen Verlauf (Einbruch im obersten
+Quintil). Faktor-Analysen deshalb nie unter 90 Tagen.
+
+## Zeitrahmen 1h statt 5m (Schritt 2 des Datenquellen-Plans): negativ
+
+Dieselben Faktoren, dieselben drei Fenster, 1h-Kerzen, Horizont 120 Bars = 5 Tage:
+
+| Fenster | Trefferquote 5m | Trefferquote 1h |
+|---|---|---|
+| Mai–Aug 2026 | 30,6 % | **19,3 %** |
+| Feb–Mai 2026 | 28,6 % | **20,3 %** |
+| Nov 2025–Feb 2026 | 25,7 % | **33,8 %** |
+
+In zwei von drei Fenstern deutlich schlechter. Die ICs sind betragsmäßig größer
+(bis ±0,14), wechseln aber weiter die Vorzeichen, und die Quintil-Verläufe werden
+erratisch — bei ~2.400 statt 46.000 Signalen ist das grösstenteils Rauschen.
+**Der Zeitrahmen ist nicht die Ursache.**
+
+## Null-Modell: der Vorsprung gegenüber Zufall
+
+`tools/null_model.py` vergleicht dieselben Kerzen, TP/SL-Regeln, Horizonte und
+die ATR-Verteilung — nur Einstiegszeitpunkt und Richtung werden gewürfelt.
+
+| Fenster | Confluence | Zufall | Differenz | |
+|---|---|---|---|---|
+| Mai–Aug 2026 | 26,1 % | 25,6 % | +0,6 % (1,9 σ) | nicht unterscheidbar |
+| Feb–Mai 2026 | 28,6 % | 26,9 % | +1,7 % (5,5 σ) | besser als Zufall |
+| Nov 2025–Feb 2026 | 25,7 % | 26,8 % | −1,0 % (−3,4 σ) | schlechter als Zufall |
+
+Im Mittel **+0,4 Prozentpunkte** gegenüber Münzwurf-Einstiegen. Der Vorsprung ist
+im mittleren Fenster mit 5,5 Standardfehlern real, aber nicht stabil — im dritten
+kehrt er sich signifikant um. Und er ist um eine Größenordnung zu klein: bis zum
+Break-even fehlen ~11 Punkte, geliefert wird im besten Fall 1,7.
+
+Auf beiden Zeitrastern landen die Trefferquoten also fast genau dort, wo ein
+Zufallsprozess mit diesem Chance-Risiko-Verhältnis landet. Merke: Eine
+Trefferquote ist ohne diesen Vergleich nicht interpretierbar — 30 % klingt
+schlecht, 60 % gut; was zählt, ist der Abstand zum Zufall bei gleichem TP/SL.
+
+## Funding Rate (Schritt 1 des Datenquellen-Plans): negativ
+
+Getestet mit `tools/funding_factor_test.py`. These: Hohe positive Funding Rates
+zeigen überhitzte Long-Positionierung und gehen Rücksetzern voraus — dann müsste
+ein Long-Einstieg bei hoher Rate schlechter laufen, also ein negativer IC.
+
+Methodik: Funding wird alle 8 h fixiert, über 90 Tage sind das 270 Werte je
+Symbol. Ein Test pro 5m-Kerze hätte 45.000 stark autokorrelierte Beobachtungen
+und viel zu optimistische p-Werte ergeben — deshalb genau **eine Beobachtung je
+Funding-Periode**.
+
+| Fenster | IC | p | Beobachtungen |
+|---|---|---|---|
+| Mai–Aug 2026 | +0,025 | 0,52 | 670 |
+| Feb–Mai 2026 | −0,042 | 0,27 | 696 |
+| Nov 2025–Feb 2026 | +0,021 | 0,59 | 635 |
+
+Nichts davon ist signifikant, die Vorzeichen wechseln, kein Quintil-Gradient.
+
+**Einschränkung, fairerweise:** Die Raten lagen durchgehend zwischen −0,009 % und
++0,010 % pro 8 h, also um den Binance-Normalwert. Extreme Positionierung, bei der
+dieser Faktor erst aussagekräftig wird, kam in den 270 Tagen nicht vor. Der Test
+schliesst nicht aus, dass Funding in einer Euphorie- oder Panikphase etwas taugt —
+für den Alltagsbetrieb liefert es nichts. Mit ~670 Beobachtungen liessen sich zudem
+nur Effekte ab etwa |IC| 0,08 nachweisen; ein kleinerer echter Effekt wäre
+untergegangen, würde aber ohnehin nicht reichen (nötig wären ~0,15).
+
+## Abbruchkriterium erreicht (26.08.2026)
+
+Der Plan legte vorab fest: Zeigt nach Schritt 1 und 2 kein Faktor über drei
+Fenster einen stabilen IC ≥ 0,03, ist die Strategie-Idee auf diesem Zeitraster
+erschöpft. Schritt 2 (Zeitrahmen 1h): negativ. Schritt 1 (Funding Rate): negativ.
+
+**Konsequenz: keine weitere Optimierung an Gewichten, Schwellen, TP/SL oder
+weiteren Faktoren aus Kerzendaten.** Offen bleibt allein Schritt 0 — Orderbuch-
+und Orderflow-Daten selbst sammeln, weil sie historisch nicht beschaffbar sind
+und als einzige Quelle noch ungeprüft ist.
+
 ## Nächste Schritte, falls weiterverfolgt
 
-1. Die Confluence-Faktoren selbst prüfen — bei ~35 % Trefferquote gegen ~41 %
-   nötige liegt das Problem in der Signalqualität.
-2. Handelsfrequenz senken (100–500 Trades je Fenster; die Gebühr skaliert mit der
-   Anzahl). Größere Zeitrahmen als 5m prüfen.
-3. Erst wenn ein Profil über alle Fenster positiv ist, über Kapitaleinsatz reden.
+1. **Andere Datenquellen.** Der Bot sieht nur Kerzen. Orderbuchtiefe und
+   -ungleichgewicht, Funding Rates, Open Interest, Liquidationen bleiben
+   ungenutzt — daher kommen kurzfristige Krypto-Signale üblicherweise. Der
+   Fusion-Feed liefert bereits Orderbuchdaten.
+2. **Größerer Zeitrahmen.** 5m ist für Kerzen-Indikatoren stark verrauscht; auf
+   1h/1d ist mehr Struktur vorhanden, und die Gebühr fällt seltener an.
+3. **Jeden neuen Faktor zuerst durch `tools/factor_analysis.py` schicken.** Ein
+   IC unter 0,03 oder ein Vorzeichenwechsel zwischen Fenstern heißt: nicht
+   einbauen. Das kostet Minuten statt Wochen Papierbetrieb.
+4. Erst wenn ein Profil über alle Fenster positiv ist, über Kapitaleinsatz reden.
 
 ## Werkzeug
 

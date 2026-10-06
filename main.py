@@ -9,6 +9,7 @@ Unterstützt zwei Modi:
 """
 
 import asyncio
+import os
 import signal
 import logging
 import sys
@@ -28,6 +29,7 @@ from core.reconciliation import run_startup_reconciliation
 from data.kraken_feed import KrakenFeed
 from data.fusion_feed import FusionFeed
 from data.onetrading_ccxt_feed import OneTradingCCXTFeed
+from data.fusion_feed import FusionFeed
 from strategies.crypto_scalper import CryptoScalper, SignalType
 from strategies.momentum import MomentumStrategy
 from strategies.ml_predictor import MLPredictor
@@ -35,6 +37,10 @@ from strategies.confluence_strategy import ConfluenceStrategy  # New 2026 multi-
 from notifications.reporter import Reporter
 from dashboard.store import DashboardStore, open_event, close_event, control_event
 from dashboard.server import DashboardServer
+
+# Laufzeitdaten (Datenbank, Log, Status fürs Dashboard). Auf dem VPS ein
+# Docker-Volume, lokal wie bisher das Projektverzeichnis.
+STATE_DIR = Path(os.environ.get('BOT_STATE_DIR', '.'))
 
 
 class TradingBot:
@@ -77,7 +83,7 @@ class TradingBot:
             format='%(asctime)s [%(name)s] %(levelname)s: %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S',
             handlers=[
-                logging.FileHandler('bot.log', encoding='utf-8'),
+                logging.FileHandler(STATE_DIR / 'bot.log', encoding='utf-8'),
             ]
         )
 
@@ -129,18 +135,20 @@ class TradingBot:
 
         # Core (Portfolio + Risk immer gleich)
         self.portfolio = Portfolio(
-            start_capital=general.get('start_capital', 10000)
+            start_capital=general.get('start_capital', 10000),
+            db_path=str(STATE_DIR / 'trades.db')
         )
+
         self.risk_manager = RiskManager(config=risk_config)
 
         # Trading-Pairs aus Momentum oder Scalper Config
         momentum_config = strategy_config.get('momentum', {})
         scalper_config = strategy_config.get('scalper', {})
         pairs = momentum_config.get('pairs', scalper_config.get('pairs', []))
+        self._pairs = pairs
 
         if self.is_live:
             # === LIVE MODE ===
-            import os
             api_key = os.getenv('ONETRADING_API_KEY')
             api_secret = os.getenv('ONETRADING_API_SECRET')
 
@@ -184,19 +192,16 @@ class TradingBot:
             # === PAPER MODE (Standard) ===
             self.order_engine = OrderEngine(config=fees_config)
             data_feed = general.get('data_feed', 'bitpanda')
-            if data_feed == 'bitpanda':
+            bitpanda_key = os.getenv('BITPANDA_API_KEY')
+            if data_feed == 'bitpanda' and bitpanda_key:
                 # Bitpanda Fusion: echte Kurse und Orderbuch der Börse, auf der
                 # später gehandelt werden soll. Braucht auch für Marktdaten einen Key.
-                import os
-                bitpanda_key = os.getenv('BITPANDA_API_KEY')
-                if not bitpanda_key:
-                    raise RuntimeError(
-                        "data_feed: bitpanda, aber BITPANDA_API_KEY fehlt in config/secrets.env! "
-                        "(Alternativ in settings.yaml data_feed: kraken setzen.)"
-                    )
                 self.crypto_feed = FusionFeed(api_key=bitpanda_key, config={'pairs': pairs})
                 self.logger.info("Datenfeed: Bitpanda Fusion")
-            elif data_feed == 'kraken':
+            elif data_feed in ('bitpanda', 'kraken'):
+                if data_feed == 'bitpanda':
+                    # Lieber mit Kraken-Kursen weiterlaufen als gar nicht — laut im Log
+                    self.logger.warning("data_feed: bitpanda, aber BITPANDA_API_KEY fehlt — nehme Kraken.")
                 # Öffentliche Kraken-Kurse, kein Key nötig
                 self.crypto_feed = KrakenFeed(config={'pairs': pairs})
                 self.logger.info("Datenfeed: Kraken")
@@ -235,6 +240,10 @@ class TradingBot:
 
         # Verlust-Cooldown pro Symbol (Confluence): symbol -> gesperrt bis
         self._confluence_loss_block: Dict[str, datetime] = {}
+
+        # Regime je Symbol aus dem letzten Confluence-Durchlauf (fürs Dashboard)
+        self._symbol_regime: Dict[str, str] = {}
+        self._last_cycle_at: Optional[datetime] = None
 
         # Reporter
         self.reporter = Reporter(config=self.config.get('notifications', {}))
@@ -315,6 +324,16 @@ class TradingBot:
 
         # Komponenten starten
         await self.crypto_feed.start()
+
+        # Fusion startet auch mit abgelehntem Key "erfolgreich" — nur ohne einen
+        # einzigen Kurs. Dann lieber sichtbar auf Kraken ausweichen als still stehen.
+        if isinstance(self.crypto_feed, FusionFeed) and not self.crypto_feed.get_prices():
+            self.logger.error(
+                "FusionFeed liefert keine Kurse (Key falsch oder ohne Read-Recht?) — nehme Kraken."
+            )
+            await self.crypto_feed.stop()
+            self.crypto_feed = KrakenFeed(config={'pairs': self._pairs})
+            await self.crypto_feed.start()
         await self.reporter.start()
 
         # === Reconciliation im Live-Modus (Phase 3/4) ===
@@ -737,6 +756,7 @@ class TradingBot:
                     regime = self.confluence_strategy.regime_detector.detect(symbol, candles)
                     if regime and regime.name:
                         regime_name = regime.name
+                        self._symbol_regime[symbol] = regime.name
 
                     signal = self.confluence_strategy.analyze_legacy(symbol, candles, price)
 
@@ -809,6 +829,7 @@ class TradingBot:
                         await self._execute_confluence_signal(signal)
 
                 # Phase 6 Improvement: Cycle summary for visibility (even when no trade)
+                self._last_cycle_at = datetime.now()   # Herzschlag fürs Dashboard
                 if analyzed > 0:
                     self.logger.info(
                         f"[CONFLUENCE CYCLE] Analyzed {analyzed} symbols | "
@@ -967,17 +988,19 @@ class TradingBot:
 
         position_size = margin * leverage
 
-        # Mindestordergröße der Börse: knapp darunter auf das Minimum anheben,
-        # solange die bisherigen Obergrenzen halten — sonst lieber gar nicht handeln.
+        # Mindestordergröße der Börse (Fusion: 30 €). Ein kleines Konto liegt mit
+        # 15–25 % darunter — dann auf das Minimum anheben, solange es höchstens die
+        # Hälfte des Kapitals bindet, damit zwei Positionen nebeneinander Platz haben.
         min_order = self._min_order_amount(signal.symbol)
         if position_size < min_order:
-            if min_order <= max_margin * leverage and min_order / leverage <= state.balance:
+            bumped_margin = min_order / leverage
+            if bumped_margin <= state.balance and bumped_margin <= state.equity * 0.5:
                 position_size = min_order
             else:
                 self._log_throttled(
                     f"minorder:{signal.symbol}",
                     f"[MINDESTORDER] {signal.symbol}: {position_size:.2f} € unter Börsen-Minimum "
-                    f"{min_order:.2f} € und Anheben würde die Positionsgrenze sprengen — kein Trade."
+                    f"{min_order:.2f} € und Anheben würde mehr als das halbe Kapital binden — kein Trade."
                 )
                 return
 
@@ -1395,6 +1418,10 @@ def main():
         # os.kill(pid, 0) statt /proc-Check — /proc existiert auf macOS nicht,
         # wodurch der Lock nie griff und Doppel-Instanzen möglich waren.
         try:
+            # Im Container ist der Bot immer PID 1 — nach einem harten Neustart
+            # stünde dort die eigene Nummer, und er würde sich selbst aussperren.
+            if old_pid == os.getpid():
+                raise ProcessLookupError
             os.kill(old_pid, 0)
             print(f"Bot läuft bereits (PID {old_pid}). Beende.")
             sys.exit(0)
