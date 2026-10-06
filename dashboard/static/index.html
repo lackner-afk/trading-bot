@@ -457,6 +457,17 @@
   const clock = (iso) => new Date(iso).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
   const score3 = (x) => x.toLocaleString('de-DE', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 
+  // Ehrliche Marktlage (MarketConditions). Das Bot-interne Etikett steht fast
+  // immer auf „low vol chop“ und wird hier bewusst nicht mehr angezeigt.
+  const REGIME_TEXT = { ranging: 'Spanne', low_vol_chop: 'ruhig, seitwärts', trending: 'Trend', high_vol_event: 'hohe Volatilität' };
+  function marketText(m) {
+    if (!m) return '–';
+    let t = REGIME_TEXT[m.regime] || m.regime;
+    if (m.regime === 'trending' && m.direction) t += m.direction === 'bullish' ? ' aufwärts' : ' abwärts';
+    if (m.vol_level != null) t += ` · Schwankung ${Math.round(m.vol_level * 100)}. Perzentil`;
+    return esc(t);
+  }
+
   function drawSignals(sig, nowIso) {
     const box = $('signals');
     const th = sig.threshold;
@@ -475,7 +486,7 @@
           <div class="bar" title="Score ${score3(c.score)} · Schwelle ${th}">
             <i style="width:${P(c.score)}%;background:${colorFor(c.coin, i)}"></i>
             <span class="mark" style="left:calc(${P(th)}% - 1px)"></span></div>
-          <div class="sig-meta">${esc(c.decision)} · ${esc((c.regime || 'Regime ?').replaceAll('_', ' '))}${blocked}</div>
+          <div class="sig-meta">${esc(c.decision)} · Markt: ${marketText(c.market)}${blocked}</div>
         </div>`;
       }).join('');
     }

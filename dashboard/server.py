@@ -357,6 +357,7 @@ class DashboardServer:
                 'decision': ev['decision'],
                 'time': ev['time'],
                 'regime': bot._symbol_regime.get(symbol),
+                'market': self._market_info(symbol),
                 'blocked_until': blocked.isoformat(timespec='seconds') if blocked and blocked > now else None,
             })
         last_cycle = getattr(bot, '_last_cycle_at', None)
@@ -367,6 +368,19 @@ class DashboardServer:
             'feed': type(bot.crypto_feed).__name__,
             'last_cycle': last_cycle.isoformat(timespec='seconds') if last_cycle else None,
             'coins': coins,
+        }
+
+    def _market_info(self, symbol: str) -> Optional[Dict]:
+        m = getattr(self.bot, '_market_conditions', {}).get(symbol)
+        if m is None:
+            return None
+        c = m.characteristics or {}
+        return {
+            'regime': m.name,
+            'vol_level': c.get('volatility_level'),
+            'vol_ratio': c.get('vol_ratio'),
+            'efficiency': c.get('efficiency'),
+            'direction': c.get('direction'),
         }
 
     def _status_text(self) -> str:
@@ -396,7 +410,10 @@ class DashboardServer:
         if cooldown and datetime.now() < cooldown:
             return f"Nach mehreren Verlusten in Folge macht {self.bot_name} bis {cooldown:%H:%M} Pause."
 
-        regime = getattr(bot, '_last_regime_name', None)
+        # Ehrliche Marktlage aus MarketConditions (häufigstes Regime über die Coins),
+        # nicht das Bot-interne Etikett — das steht fast immer auf low_vol_chop.
+        market = [m.name for m in getattr(bot, '_market_conditions', {}).values()]
+        regime = max(set(market), key=market.count) if market else None
         regime_texts = {
             'high_vol_event': "Sehr hohe Volatilität erkannt. Die Positionsgrößen werden automatisch reduziert.",
             'event_driven': "Ein Makro-Event steht an (z. B. Zinsentscheid). Der Bot handelt mit weniger Risiko.",

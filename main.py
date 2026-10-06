@@ -34,6 +34,7 @@ from strategies.crypto_scalper import CryptoScalper, SignalType
 from strategies.momentum import MomentumStrategy
 from strategies.ml_predictor import MLPredictor
 from strategies.confluence_strategy import ConfluenceStrategy  # New 2026 multi-factor system
+from strategies.regime_detector import MarketConditions
 from notifications.reporter import Reporter
 from dashboard.store import DashboardStore, open_event, close_event, control_event
 from dashboard.server import DashboardServer
@@ -244,6 +245,10 @@ class TradingBot:
         # Regime je Symbol aus dem letzten Confluence-Durchlauf (fürs Dashboard)
         self._symbol_regime: Dict[str, str] = {}
         self._last_cycle_at: Optional[datetime] = None
+        # Wie der Markt WIRKLICH ist (korrekte Messung) — nur fürs Dashboard.
+        # Die Handelsentscheidungen nutzen weiter RegimeDetector, siehe dessen Docstring.
+        self._market_meter = MarketConditions()
+        self._market_conditions: Dict[str, object] = {}
 
         # Reporter
         self.reporter = Reporter(config=self.config.get('notifications', {}))
@@ -757,6 +762,10 @@ class TradingBot:
                     if regime and regime.name:
                         regime_name = regime.name
                         self._symbol_regime[symbol] = regime.name
+                    try:
+                        self._market_conditions[symbol] = self._market_meter.detect(symbol, candles)
+                    except Exception as e:  # reine Anzeige — darf den Handel nie stören
+                        self.logger.debug(f"Marktmessung {symbol} fehlgeschlagen: {e!r}")
 
                     signal = self.confluence_strategy.analyze_legacy(symbol, candles, price)
 

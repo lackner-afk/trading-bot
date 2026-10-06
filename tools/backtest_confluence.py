@@ -243,9 +243,15 @@ def simulate(threshold, tp_mult, sl_mult, cooldown, candles, grid, n):
             margin = max(max(10.0, equity * 0.15), min(equity * 0.25, margin))
             if margin > balance or balance < 20:
                 continue
-            # Notional muss die Mindestordergroesse der Boerse erreichen
+            # Notional muss die Mindestordergroesse der Boerse erreichen. Wie live
+            # (main.py _execute_signal): auf das Minimum anheben, solange es
+            # hoechstens das halbe Kapital bindet — sonst kein Trade.
             if MIN_ORDER_AMOUNT and margin * sig['lev'] < MIN_ORDER_AMOUNT:
-                continue
+                bumped = MIN_ORDER_AMOUNT / sig['lev']
+                if bumped <= balance and bumped <= equity * 0.5:
+                    margin = bumped
+                else:
+                    continue
             balance -= margin
             positions[sym] = {'side': sig['dir'], 'entry': price, 'margin': margin,
                               'lev': sig['lev'], 'tp': tp, 'sl': sl}
@@ -320,6 +326,8 @@ def main():
 
     # Schwellen aus der beobachteten Verteilung (Perzentile) statt fixer Liste
     ths = sorted({round(float(scores.quantile(q)), 3) for q in (0.8, 0.9, 0.95, 0.97)})
+    # Feste Schwellen zusaetzlich, z. B. die der Live-Config: THRESHOLDS="0.647"
+    ths = sorted(set(ths) | {float(x) for x in os.environ.get('THRESHOLDS', '').split(',') if x})
     print(f"Getestete Schwellen (Perzentile der Verteilung): {ths}", flush=True)
     results = [simulate(th, tp, sl, cd, candles, grid, n)
                for th in ths for (tp, sl) in TPSL_PROFILES for cd in COOLDOWNS]

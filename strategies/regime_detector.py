@@ -36,6 +36,15 @@ class RegimeDetector:
     - high_vol_event (news, liquidation cascades, macro events)
     - low_vol_chop (very quiet, dangerous for momentum)
     - event_driven (around major releases like CPI)
+
+    ACHTUNG (geprüft 06.10.2026): Diese Erkennung misst den Markt NICHT richtig.
+    Ihre Schwellen (0,16 / 0,85) liegen 45–60× über der berechneten Stunden-Vola,
+    und vol_ratio enthält den Faktor √(12/30) = 0,63 — Ergebnis: 91–94 %
+    low_vol_chop, nie trending/high_vol_event. Sie bleibt trotzdem die Grundlage
+    der Handelsentscheidungen, weil die Strategie auf dieses Etikett eingestellt
+    ist: Mit der korrekten Erkennung (MarketConditions unten) war der Backtest in
+    allen vier 90-Tage-Fenstern schlechter. Was der Markt tatsächlich tut, zeigt
+    MarketConditions — nur im Dashboard, ohne Einfluss auf Trades.
     """
 
     def __init__(self, config: Dict = None):
@@ -134,3 +143,89 @@ class RegimeDetector:
             return ["avoid_momentum", "mean_reversion", "wait_for_setup"]
         else:
             return ["balanced"]
+
+
+class MarketConditions:
+    """
+    Korrekte Marktmessung — NUR zur Anzeige (Dashboard), ohne Einfluss auf Trades.
+
+    Vergleicht die Schwankung der letzten Stunde mit der des eigenen Fensters
+    (ohne Wurzel-Versatz) und misst die Richtung über die Kaufman-Effizienz.
+    Liefert dieselben Regime-Namen wie RegimeDetector, damit beide vergleichbar sind.
+    """
+
+    # Schwellen aus der Verteilung über 90 Tage BTC/ETH/SOL-EUR auf 5m (Stand
+    # 06.10.2026, siehe docs/BACKTEST_BEFUNDE.md „Regime-Erkennung“):
+    #   vol_ratio  = Std. der letzten 12 Renditen / Std. des ganzen Fensters
+    #                p5 0,36 · p20 0,56 · p50 0,81 · p95 1,89
+    #   efficiency = |Kursänderung| / Summe der Einzelbewegungen über 48 Kerzen
+    #                p50 0,12 · p80 0,21 · p90 0,28
+    # Vorher: absolute Schwellen (0,16 / 0,85) auf einer Stunden-Vola von ~0,003
+    # und ein Verhältnis mit eingebautem Faktor √(12/30) = 0,63 — ergab in 30
+    # Tagen 91–94 % low_vol_chop und nie trending/high_vol_event.
+    HIGH_VOL_RATIO = 1.9
+    LOW_VOL_RATIO = 0.56
+    TREND_EFFICIENCY = 0.28
+    CHOP_EFFICIENCY = 0.21
+
+    def __init__(self, config: Dict = None):
+        self.config = config or {}
+        self.short_window = self.config.get("short_window", 12)        # 1 h auf 5m
+        self.efficiency_window = self.config.get("efficiency_window", 48)  # 4 h auf 5m
+        self.high_vol_ratio = self.config.get("high_vol_ratio", self.HIGH_VOL_RATIO)
+        self.low_vol_ratio = self.config.get("low_vol_ratio", self.LOW_VOL_RATIO)
+        self.trend_efficiency = self.config.get("trend_efficiency", self.TREND_EFFICIENCY)
+        self.chop_efficiency = self.config.get("chop_efficiency", self.CHOP_EFFICIENCY)
+
+    def detect(self, symbol: str, candles: pd.DataFrame) -> MarketRegime:
+        if candles is None or len(candles) < max(60, self.efficiency_window + 2):
+            return MarketRegime("unknown", 0.0, "Insufficient data")
+
+        close = candles['close']
+        returns = close.pct_change().dropna()
+
+        # 1. Volatilität relativ zum eigenen Fenster — beide Seiten als Standardabweichung
+        #    pro Kerze, also ohne Wurzel-Faktoren, die das Verhältnis verschieben.
+        short_std = returns.tail(self.short_window).std()
+        base_std = returns.std()
+        vol_ratio = short_std / base_std if base_std > 0 else 1.0
+        # Wie hoch die aktuelle Schwankung im Fenster liegt (0 = ruhigste, 1 = wildeste
+        # Stunde). Der Aggregator erwartet volatility_level auf dieser 0–1-Skala.
+        rolling_std = returns.rolling(self.short_window).std().dropna()
+        vol_level = float((rolling_std <= short_std).mean()) if len(rolling_std) else 0.5
+
+        # 2. Richtungs-Effizienz (Kaufman): 1 = gerade Linie, ~0 = reines Hin und Her
+        recent = close.tail(self.efficiency_window + 1)
+        path = recent.diff().abs().sum()
+        efficiency = float(abs(recent.iloc[-1] - recent.iloc[0]) / path) if path > 0 else 0.0
+
+        # 3. Trendrichtung über die Durchschnitte
+        ema20 = close.ewm(span=20, adjust=False).mean().iloc[-1]
+        ema50 = close.ewm(span=50, adjust=False).mean().iloc[-1]
+        price = close.iloc[-1]
+        aligned_up = ema20 > ema50 and price > ema20
+        aligned_down = ema20 < ema50 and price < ema20
+        trend_strength = min(efficiency / 0.4, 1.0)
+
+        chars = {
+            "volatility_level": round(vol_level, 3),
+            "vol_ratio": round(float(vol_ratio), 2),
+            "efficiency": round(efficiency, 3),
+            "trend_strength": round(trend_strength, 2),
+        }
+
+        # === Klassifikation (Reihenfolge = Vorrang) ===
+        if vol_ratio >= self.high_vol_ratio:
+            return MarketRegime("high_vol_event", 0.85,
+                                "Schwankung deutlich über dem Normalwert", chars)
+
+        if efficiency >= self.trend_efficiency and (aligned_up or aligned_down):
+            direction = "bullish" if aligned_up else "bearish"
+            chars["direction"] = direction
+            return MarketRegime("trending", 0.8, f"Klarer {direction} Trend", chars)
+
+        if vol_ratio <= self.low_vol_ratio and efficiency < self.chop_efficiency:
+            return MarketRegime("low_vol_chop", 0.75,
+                                "Ungewöhnlich ruhig, ohne Richtung", chars)
+
+        return MarketRegime("ranging", 0.65, "Normale Schwankung in einer Spanne", chars)

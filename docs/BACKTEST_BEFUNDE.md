@@ -216,6 +216,43 @@ weiteren Faktoren aus Kerzendaten.** Offen bleibt allein Schritt 0 — Orderbuch
 und Orderflow-Daten selbst sammeln, weil sie historisch nicht beschaffbar sind
 und als einzige Quelle noch ungeprüft ist.
 
+## Regime-Erkennung (06.10.2026): misst nicht, was sie behauptet
+
+Der Bot meldete praktisch immer `low_vol_chop`. Über 30 Tage BTC/ETH/SOL-EUR auf
+5m: 91–94 % `low_vol_chop`, Rest `ranging`, **nie** `trending` oder
+`high_vol_event`. Zwei Rechenfehler in `RegimeDetector`:
+
+1. `short_vol = std(12 Renditen) · √12` ist eine Stunden-Vola (Median 0,3–0,5 %,
+   Maximum 1,9–3,6 %). Die Schwellen 0,16 und 0,85 liegen 45–60× darüber — die
+   Bedingung für „ruhig“ ist immer wahr, „hohe Volatilität“ unerreichbar.
+2. `vol_ratio = (std12 · √12) / (std30 · √30)` enthält den Faktor √(12/30) = 0,63.
+   Bei gleicher Schwankung ergibt sich 0,63 < 0,85 → „ruhig“.
+
+Folgen: Gewichte stehen immer im chop-Profil, das Sentiment deutet Gier als
+**Short**-Signal (auf Spot verworfen), `volatility_level < 0.2` ist immer wahr.
+
+Korrekte Messung (`MarketConditions`: Schwankung relativ zum eigenen Fenster,
+Kaufman-Effizienz, Schwellen aus 90-Tage-Perzentilen) ergibt ~70 % Spanne,
+16–20 % ruhig, 7 % Trend, 4–6 % hohe Volatilität. **Im Handel getestet war sie
+schlechter** — real: 0,25 %, nur Long, 12:5, 30 € Mindestorder, 100 € Kapital,
+Schwelle 0,647, Cooldown 6 Kerzen:
+
+| 90-Tage-Fenster bis | alte Erkennung | korrekte Erkennung | Buy & Hold |
+|---|---|---|---|
+| 20.02.2026 | −65,7 % | −80,6 % | −28,0 % |
+| 20.05.2026 | −43,7 % | −71,2 % | +8,5 % |
+| 20.08.2026 | −43,5 % | −72,7 % | +0,3 % |
+| 06.10.2026 | +5,7 % | −47,0 % | +48,0 % |
+
+Die Strategie ist auf das falsche Etikett eingestellt; die Profile für Trend und
+hohe Volatilität waren toter Code und nie kalibriert. **Entscheidung:** Handel
+weiter mit `RegimeDetector`, `MarketConditions` nur im Dashboard.
+
+Zweiter Befund aus derselben Messreihe: Mit **100 €** Kapital und 30 €
+Mindestorder (jede Position ~30 % des Kapitals) verliert die Live-Konfiguration
+44–66 % in drei von vier Fenstern. Die milderen Zahlen oben (−7 bis −19 % bei
+12:5) galten für 10.000 € Kapital. Trefferquote 28–35 %, nötig ~41 %.
+
 ## Nächste Schritte, falls weiterverfolgt
 
 1. **Andere Datenquellen.** Der Bot sieht nur Kerzen. Orderbuchtiefe und
@@ -238,7 +275,9 @@ und als einzige Quelle noch ungeprüft ist.
     BACKTEST_END=2026-05-20   # Fensterende (leer = bis jetzt)
     TPSL="12:5,16:6"      # TP/SL als ATR-Vielfache
     LONG_ONLY=1           # Spot-Börse ohne Shorts
-    MIN_ORDER_AMOUNT=25   # Mindestordergröße der Börse
+    MIN_ORDER_AMOUNT=30   # Mindestordergröße der Börse (Fusion: 30 €); wie live
+                          # angehoben, solange ≤ 50 % des Kapitals
+    THRESHOLDS=0.647      # feste Schwellen zusätzlich zu den Perzentilen
     MIN_TP_PCT=0.010      # TP-Floor über den Round-Trip-Kosten
     START_CAPITAL=100     # reales Kapital statt 10.000
     GRID_CACHE=1 GRID_CACHE_PATH=/tmp/grid_w1.pkl   # Pass 1 überspringen
