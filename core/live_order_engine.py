@@ -53,8 +53,9 @@ class LiveOrderEngine:
 
         # Fee-Struktur
         self.fees = {
-            'crypto_maker': self.config.get('crypto_maker', 0.0004),
-            'crypto_taker': self.config.get('crypto_taker', 0.0006),
+            # Ohne Config lieber zu teuer als zu billig rechnen (Fusion Stufe 1: 0,25 %)
+            'crypto_maker': self.config.get('crypto_maker', 0.0025),
+            'crypto_taker': self.config.get('crypto_taker', 0.0025),
         }
 
         # Callbacks
@@ -326,7 +327,7 @@ class LiveOrderEngine:
             return []
 
     def _estimate_fees(self, notional: float, fee_type: str = 'taker') -> float:
-        rate = self.fees.get(f'crypto_{fee_type}', 0.0006)
+        rate = self.fees.get(f'crypto_{fee_type}', 0.0025)
         return notional * rate
 
     async def _call_on_fill(self, result: ExecutionResult):

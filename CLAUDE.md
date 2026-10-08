@@ -302,7 +302,7 @@ Copy `config/secrets.env.example` to `config/secrets.env` and set:
 ## Backtesting (data/backtester.py + backtest.py)
 
 - Loads 90 days of hourly OHLCV from Binance via CCXT
-- Simulates positions with leverage, realistic fees (0.04%/0.06%)
+- Simulates positions with leverage, fees default to 0.25% (Bitpanda Fusion tier 1) unless configured
 - Hard stops: 0.8% SL, 1.5% TP
 - Max 3 concurrent positions, 10% max per position, 5-period cooldown
 - Generates: Return%, Sharpe, Max DD, Win rate, Profit factor, Alpha vs. Buy&Hold

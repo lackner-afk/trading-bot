@@ -44,7 +44,7 @@ WINDOW = 250          # wie live: n=250 fuer 200er-EMA
 TIMEFRAME = os.environ.get('TIMEFRAME', '5m')
 # Ueber die Umgebung setzbar, um echte Boersen-Gebuehren durchzurechnen:
 #   Bitpanda Fusion Stufe 1 = 0.0025, One Trading = 0.0015, Annahme bisher = 0.0006
-TAKER_FEE = float(os.environ.get('TAKER_FEE', 0.0006))
+TAKER_FEE = float(os.environ.get('TAKER_FEE', 0.0025))   # Standard: Fusion Stufe 1
 START_CAPITAL = float(os.environ.get('START_CAPITAL', 10_000.0))
 # Spot-Boersen koennen nicht shorten (Bitpanda Fusion: nur Buy/Sell, kein Hebel).
 LONG_ONLY = os.environ.get('LONG_ONLY') == '1'

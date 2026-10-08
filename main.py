@@ -1306,7 +1306,7 @@ class TradingBot:
             return
 
         # Taker-Gebühr aus der Config (Bitpanda Fusion: 0,25 %) — war fest 0,06 %
-        fees = position.size * self.order_engine.fees.get('crypto_taker', 0.0006)
+        fees = position.size * self.order_engine.fees.get('crypto_taker', 0.0025)
 
         trade = self.portfolio.close_position(
             symbol=symbol,

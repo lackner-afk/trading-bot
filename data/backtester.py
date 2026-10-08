@@ -84,8 +84,10 @@ class Backtester:
         self.data_exchange = self.config.get('data_exchange', 'binance')  # binance | kraken | onetrading
 
         # Fee-Struktur
-        self.maker_fee = self.config.get('maker_fee', 0.0004)
-        self.taker_fee = self.config.get('taker_fee', 0.0006)
+        # Standard = Bitpanda Fusion Stufe 1 (0,25 %) — die alten 0,04/0,06 % ließen
+        # jeden Backtest ohne Config viel zu gut aussehen.
+        self.maker_fee = self.config.get('maker_fee', 0.0025)
+        self.taker_fee = self.config.get('taker_fee', 0.0025)
 
         # Risk-Limits
         self.max_positions = self.config.get('max_positions', 3)

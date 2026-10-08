@@ -79,8 +79,8 @@ class OrderEngine:
 
         # Fee-Struktur
         self.fees = {
-            'crypto_maker': self.config.get('crypto_maker', 0.0004),  # 0.04%
-            'crypto_taker': self.config.get('crypto_taker', 0.0006),  # 0.06%
+            'crypto_maker': self.config.get('crypto_maker', 0.0025),  # 0.25% (Fusion Stufe 1)
+            'crypto_taker': self.config.get('crypto_taker', 0.0025),  # 0.25%
         }
 
         # Slippage-Parameter

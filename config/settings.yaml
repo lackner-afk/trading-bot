@@ -120,9 +120,10 @@ strategies:
     #   die Gebuehren fressen die Mini-Gewinne.
     tp_atr_multiplier: 12
     sl_atr_multiplier: 5
-    # Floor 1 %: bei 0,35 % brachte ein Treffer am Ziel nach 0,50 % Round-Trip-
-    # Gebuehren MINUS. Laut docs/KRYPTO_BOTS_IM_VERGLEICH.md besser >= 2 %.
-    min_tp_pct: 0.010
+    # Floor 2 % (= 4x die 0,50 % Round-Trip-Gebuehren, siehe
+    # docs/KRYPTO_BOTS_IM_VERGLEICH.md). Bei 0,35 % brachte ein Treffer am Ziel
+    # nach Gebuehren MINUS, bei 1 % ging noch die Haelfte an die Gebuehr.
+    min_tp_pct: 0.020
     min_sl_pct: 0.0030
     align_with_trend: true
     min_signal_confidence: 0.0    # Gate im Loop aus — min_confluence_score im Aggregator ist maßgeblich
