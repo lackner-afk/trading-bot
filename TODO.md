@@ -3,7 +3,7 @@
 ## Offen
 
 - [ ] **Auf den VPS deployen** — `main` enthält Änderungen, die auf dem Server noch nicht laufen:
-  - Gewinnziel-Boden 2 % (`min_tp_pct: 0.020`), TP 12×ATR / SL 5×ATR
+  - ~~Gewinnziel-Boden 2 %~~ → am 12.10.2026 auf 0,8 % festgelegt (läuft schon seit 11.10. auf dem VPS, siehe Kommentar in `config/settings.yaml`)
   - Gebühren-Standard 0,25 % überall im Code (vorher 0,06 % ohne Config)
 
   Am Mac im Repo-Ordner:

@@ -213,7 +213,7 @@ class OneTradingFeed:
                                     existing = self.candle_history.get(symbol, {}).get(timeframe)
                                     if existing is not None:
                                         df_new = pd.concat([existing, df_new]) \
-                                            .drop_duplicates(subset='timestamp') \
+                                            .drop_duplicates(subset='timestamp', keep='last') \
                                             .sort_values('timestamp') \
                                             .tail(100)
                                     df_new = self._calculate_indicators(df_new)

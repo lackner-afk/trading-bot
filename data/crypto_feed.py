@@ -240,7 +240,7 @@ class CryptoFeed:
                         # Mit bestehenden Daten mergen
                         if symbol in self.candle_history and timeframe in self.candle_history[symbol]:
                             df = self.candle_history[symbol][timeframe]
-                            df = pd.concat([df, new_df]).drop_duplicates(subset='timestamp').tail(100)
+                            df = pd.concat([df, new_df]).drop_duplicates(subset='timestamp', keep='last').sort_values('timestamp').tail(100)
                             df = self._calculate_indicators(df)
                             self.candle_history[symbol][timeframe] = df
 

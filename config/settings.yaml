@@ -120,10 +120,12 @@ strategies:
     #   die Gebuehren fressen die Mini-Gewinne.
     tp_atr_multiplier: 12
     sl_atr_multiplier: 5
-    # Floor 2 % (= 4x die 0,50 % Round-Trip-Gebuehren, siehe
-    # docs/KRYPTO_BOTS_IM_VERGLEICH.md). Bei 0,35 % brachte ein Treffer am Ziel
-    # nach Gebuehren MINUS, bei 1 % ging noch die Haelfte an die Gebuehr.
-    min_tp_pct: 0.020
+    # Floor: TP muss die Round-Trip-Fees (2 x 0,25 % = 0,5 %) klar decken.
+    # Mit 0,35 % war jeder Take-Profit nach Gebuehren ein Verlust — aber nur,
+    # weil der Kerzen-Bug (bis 11.10.2026) die ATR einfror und der Floor immer
+    # griff. Mit korrekter ATR ergibt 12xATR schon 1,1-2,5 %; der Floor ist nur
+    # noch Netz. 2 % (08.10.) haette BTC/ETH faktisch auf ~20:5 gehoben — ungetestet.
+    min_tp_pct: 0.008
     min_sl_pct: 0.0030
     align_with_trend: true
     min_signal_confidence: 0.0    # Gate im Loop aus — min_confluence_score im Aggregator ist maßgeblich

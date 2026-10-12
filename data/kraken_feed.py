@@ -194,7 +194,7 @@ class KrakenFeed:
                             existing = self.candle_history.get(symbol, {}).get(tf)
                             if existing is not None and len(existing) > 0:
                                 df_new = pd.concat([existing, df_new]) \
-                                    .drop_duplicates(subset='timestamp') \
+                                    .drop_duplicates(subset='timestamp', keep='last') \
                                     .sort_values('timestamp') \
                                     .tail(self.CANDLE_HISTORY)
                             df_new = self._calculate_indicators(df_new)

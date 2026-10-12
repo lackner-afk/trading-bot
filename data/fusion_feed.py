@@ -259,8 +259,12 @@ class FusionFeed:
                             continue
                         existing = self.candle_history.get(symbol, {}).get(tf)
                         if existing is not None and len(existing) > 0:
+                            # keep='last': die frisch geladene Fassung einer Kerze gewinnt.
+                            # Mit keep='first' blieb jede Kerze auf dem Stand ihrer ersten
+                            # Minute eingefroren (High≈Low, kaum Volumen) — Live-ATR lag
+                            # dadurch bei 0,002–0,01 % statt ~0,1 % (Befund 11.10.2026).
                             df_new = pd.concat([existing, df_new]) \
-                                .drop_duplicates(subset='timestamp') \
+                                .drop_duplicates(subset='timestamp', keep='last') \
                                 .sort_values('timestamp') \
                                 .tail(self.CANDLE_HISTORY)
                         self.candle_history.setdefault(symbol, {})[tf] = \
