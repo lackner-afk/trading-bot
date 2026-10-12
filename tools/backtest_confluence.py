@@ -53,6 +53,15 @@ MIN_ORDER_AMOUNT = float(os.environ.get('MIN_ORDER_AMOUNT', 0.0))
 # TP/SL-Floors wie min_tp_pct/min_sl_pct in der settings.yaml
 MIN_TP_PCT = float(os.environ.get('MIN_TP_PCT', 0.0035))
 MIN_SL_PCT = float(os.environ.get('MIN_SL_PCT', 0.0030))
+# Fester Hebel statt des Signal-Vorschlags (Aggregator: base_leverage 6 → ~4–7x).
+# Live im Spot-Modus handelt der Bot immer mit 1x — fuer Paritaet LEVERAGE=1.
+# Ohne Angabe bleibt das alte Verhalten (Signal-Hebel); Ergebnisse von vor dem
+# 12.10.2026 liefen so und uebertreiben Gewinne wie Verluste entsprechend.
+LEVERAGE = float(os.environ['LEVERAGE']) if os.environ.get('LEVERAGE') else None
+# Funding je 8 h als Anteil des Notional (Perpetuals). Positiv: Longs zahlen,
+# Shorts bekommen. Baseline der grossen Boersen ~0.0001 (0,01 % / 8 h).
+FUNDING_8H = float(os.environ.get('FUNDING_8H', 0.0))
+_TF_MIN = {'1m': 1, '5m': 5, '15m': 15, '30m': 30, '1h': 60, '4h': 240, '1d': 1440}
 MAX_CONCURRENT = 2
 MARGIN_PCT = 0.20
 MAX_DAILY_DD = 0.10
@@ -168,6 +177,15 @@ def build_signal_grid(base_cfg, candles, fng_hist, n):
     return grid, regimes
 
 
+def _funding(pos, i, notional):
+    """Funding-Kosten seit Einstieg (negativ = Gutschrift fuer Shorts)."""
+    if not FUNDING_8H:
+        return 0.0
+    hours = (i - pos['i']) * _TF_MIN[TIMEFRAME] / 60
+    sign = 1 if pos['side'] == 'long' else -1
+    return sign * notional * FUNDING_8H * hours / 8
+
+
 def simulate(threshold, tp_mult, sl_mult, cooldown, candles, grid, n):
     """Pass 2: Portfolio-Simulation über das Signal-Raster."""
     balance = START_CAPITAL
@@ -211,9 +229,10 @@ def simulate(threshold, tp_mult, sl_mult, cooldown, candles, grid, n):
             if hit:
                 chg = (exit_price - pos['entry']) / pos['entry'] * (1 if pos['side'] == 'long' else -1)
                 notional = pos['margin'] * pos['lev']
-                pnl = notional * chg - notional * TAKER_FEE * 2
+                pnl = notional * chg - notional * TAKER_FEE * 2 - _funding(pos, i, notional)
                 balance += pos['margin'] + pnl
-                trades.append({'symbol': sym, 'side': pos['side'], 'pnl': pnl, 'exit': hit})
+                trades.append({'symbol': sym, 'side': pos['side'], 'pnl': pnl, 'exit': hit,
+                               'fees': notional * TAKER_FEE * 2})
                 del positions[sym]
                 if pnl < 0 and cooldown > 0:
                     blocked_until[sym] = i + cooldown
@@ -246,23 +265,25 @@ def simulate(threshold, tp_mult, sl_mult, cooldown, candles, grid, n):
             # Notional muss die Mindestordergroesse der Boerse erreichen. Wie live
             # (main.py _execute_signal): auf das Minimum anheben, solange es
             # hoechstens das halbe Kapital bindet — sonst kein Trade.
-            if MIN_ORDER_AMOUNT and margin * sig['lev'] < MIN_ORDER_AMOUNT:
-                bumped = MIN_ORDER_AMOUNT / sig['lev']
+            lev = LEVERAGE if LEVERAGE is not None else sig['lev']
+            if MIN_ORDER_AMOUNT and margin * lev < MIN_ORDER_AMOUNT:
+                bumped = MIN_ORDER_AMOUNT / lev
                 if bumped <= balance and bumped <= equity * 0.5:
                     margin = bumped
                 else:
                     continue
             balance -= margin
             positions[sym] = {'side': sig['dir'], 'entry': price, 'margin': margin,
-                              'lev': sig['lev'], 'tp': tp, 'sl': sl}
+                              'lev': lev, 'tp': tp, 'sl': sl, 'i': i}
 
     for sym, pos in positions.items():
         price = candles[sym]['close'].iloc[n - 1]
         chg = (price - pos['entry']) / pos['entry'] * (1 if pos['side'] == 'long' else -1)
         notional = pos['margin'] * pos['lev']
-        pnl = notional * chg - notional * TAKER_FEE * 2
+        pnl = notional * chg - notional * TAKER_FEE * 2 - _funding(pos, n - 1, notional)
         balance += pos['margin'] + pnl
-        trades.append({'symbol': sym, 'side': pos['side'], 'pnl': pnl, 'exit': 'EOD'})
+        trades.append({'symbol': sym, 'side': pos['side'], 'pnl': pnl, 'exit': 'EOD',
+                       'fees': notional * TAKER_FEE * 2})
 
     eq = pd.Series(equity_curve)
     returns = eq.pct_change().dropna()
@@ -287,6 +308,11 @@ def simulate(threshold, tp_mult, sl_mult, cooldown, candles, grid, n):
         'by_symbol': dict(Counter(t['symbol'] for t in trades)),
         'longs': sum(1 for t in trades if t['side'] == 'long'),
         'shorts': sum(1 for t in trades if t['side'] == 'short'),
+        # Ergebnis je Seite (nach Gebuehren und Funding) — zeigt, ob Shorts etwas beitragen
+        'long_pnl': sum(t['pnl'] for t in trades if t['side'] == 'long'),
+        'short_pnl': sum(t['pnl'] for t in trades if t['side'] == 'short'),
+        'short_wins': sum(1 for t in trades if t['side'] == 'short' and t['pnl'] > 0),
+        'fees': sum(t['fees'] for t in trades),
     }
 
 

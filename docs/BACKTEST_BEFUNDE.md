@@ -253,6 +253,54 @@ Mindestorder (jede Position ~30 % des Kapitals) verliert die Live-Konfiguration
 44–66 % in drei von vier Fenstern. Die milderen Zahlen oben (−7 bis −19 % bei
 12:5) galten für 10.000 € Kapital. Trefferquote 28–35 %, nötig ~41 %.
 
+> **Korrektur 12.10.2026:** Diese Messreihe lief mit dem Signal-Hebel (~6×),
+> nicht mit dem Hebel 1 des Spot-Betriebs — siehe nächster Abschnitt. Die
+> Beträge sind dadurch etwa doppelt so groß; die Rangfolge alt/neu bleibt.
+
+## Shorts und Perpetuals (12.10.2026): die Gebühr zählt, nicht die Short-Seite
+
+Frage: Würde der Bot mit Shorts (über Perpetual Futures) besser abschneiden?
+Gemessen in denselben vier 90-Tage-Fenstern, 100 € Kapital, 30 € Mindestorder,
+TP/SL 12:5, Floor `min_tp_pct` 0,8 %, Verlust-Sperre 6 Kerzen.
+
+**Werkzeug-Fehler vorab:** `tools/backtest_confluence.py` nahm bisher immer den
+Hebel aus dem Signal (`base_leverage: 6` → ~4–7×), auch mit `LONG_ONLY=1`. Live
+handelt der Bot im Spot-Modus mit 1×. Alle Spot-Zahlen vor dem 12.10. sind
+deshalb etwa doppelt so schlecht wie die Wirklichkeit (Zeile „Signal-Hebel“
+unten). Neu: `LEVERAGE=1` erzwingt den Hebel.
+
+Annahmen für Perps: 0,05 % Taker, Funding 0,01 % je 8 h (Longs zahlen, Shorts
+bekommen) — Werte aus `docs/KRYPTO_BOTS_IM_VERGLEICH.md`, nicht an einer
+konkreten Börse geprüft.
+
+Rendite je Fenster bei der Live-Schwelle 0,647:
+
+| Variante | bis 20.02. | bis 20.05. | bis 20.08. | bis 12.10. |
+|---|---|---|---|---|
+| Buy & Hold | −28,0 % | +8,5 % | +0,3 % | +31,2 % |
+| **Spot nur Long, 0,25 %, 1× (live)** | −31,9 % | −24,7 % | −26,3 % | −13,9 % |
+| Spot Long + Short, 0,25 %, 1× (gibt es nicht) | −24,4 % | −29,3 % | −27,8 % | −14,6 % |
+| Perp nur Long, 0,05 %, 1× | −14,2 % | −3,1 % | −6,6 % | +8,0 % |
+| Perp Long + Short, 0,05 %, 1× | −4,6 % | −1,9 % | −1,8 % | +2,5 % |
+| Perp Long + Short, 0,05 %, 2× | −7,8 % | −4,1 % | −3,9 % | +2,4 % |
+| Spot nur Long, Signal-Hebel (alte Rechnung) | −68,3 % | −43,9 % | −44,6 % | −12,1 % |
+
+Ergebnis der Short-Trades allein (Perp, 1×): +7,7 / −2,4 / +2,6 / −5,3 € —
+summiert **+2,6 € über 360 Tage**. Mit Spot-Gebühren −43,5 €.
+
+- **Die Gebühr ist der größte Hebel:** 0,25 % → 0,05 % bringt 10–22
+  Prozentpunkte je Fenster. Bei 0,25 % kostet ein Fenster 24–29 € Gebühren auf
+  100 € Kapital.
+- **Shorts glätten, bringen aber keinen Ertrag:** Gewinn im Bärenfenster, Verlust
+  im Bullenfenster. Passt zur Literatur (Short-Seite in Krypto-Trendfolge schwach).
+- **Hebel 2× ist schlechter als 1×.**
+- Keine Variante schlägt Buy & Hold über alle Fenster (summiert −5,8 % gegen +12 %).
+
+Nicht belastbar: Bei Schwelle 0,85 sah Long + Short besser aus (+13,7 / −7,7 /
++6,7 / −1,0 %). Das ist eine von 18 gerechneten Varianten, nachträglich
+gewählt — kein Beleg. **Entscheidung:** kein Konto für Shorts eröffnen; der Bot
+bleibt Spot-only.
+
 ## Nächste Schritte, falls weiterverfolgt
 
 1. **Andere Datenquellen.** Der Bot sieht nur Kerzen. Orderbuchtiefe und
@@ -281,3 +329,8 @@ Mindestorder (jede Position ~30 % des Kapitals) verliert die Live-Konfiguration
     MIN_TP_PCT=0.010      # TP-Floor über den Round-Trip-Kosten
     START_CAPITAL=100     # reales Kapital statt 10.000
     GRID_CACHE=1 GRID_CACHE_PATH=/tmp/grid_w1.pkl   # Pass 1 überspringen
+    LEVERAGE=1            # fester Hebel (Spot live: 1); ohne Angabe Signal-Hebel ~6x
+    FUNDING_8H=0.0001     # Perp-Funding je 8 h; Longs zahlen, Shorts bekommen
+
+Je Lauf stehen im JSON-Ergebnis zusätzlich `long_pnl`, `short_pnl`,
+`short_wins` und `fees` (Summe der Gebühren).
