@@ -6,7 +6,7 @@ Console-Output mit Rich + optionaler Webhook-Support
 import asyncio
 import logging
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 import aiohttp
 
@@ -461,7 +461,7 @@ class Reporter:
                     "title": title,
                     "description": message,
                     "color": 5814783,  # Cyan
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": datetime.now(timezone.utc).isoformat()
                 }]
             }
 

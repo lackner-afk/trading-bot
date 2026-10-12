@@ -13,7 +13,7 @@ import os
 import signal
 import logging
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -681,7 +681,7 @@ class TradingBot:
                 last_ts = last_ts.to_pydatetime()
             if last_ts.tzinfo is not None:
                 last_ts = last_ts.replace(tzinfo=None)
-            if datetime.utcnow() < last_ts + timedelta(minutes=timeframe_minutes):
+            if datetime.now(timezone.utc).replace(tzinfo=None) < last_ts + timedelta(minutes=timeframe_minutes):
                 return candles.iloc[:-1]
         except Exception:
             pass
