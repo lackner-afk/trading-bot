@@ -301,6 +301,43 @@ Nicht belastbar: Bei Schwelle 0,85 sah Long + Short besser aus (+13,7 / −7,7 /
 gewählt — kein Beleg. **Entscheidung:** kein Konto für Shorts eröffnen; der Bot
 bleibt Spot-only.
 
+## Tageskerzen-Trendfilter (12.10.2026): der erste Ansatz mit positivem Ergebnis
+
+Test T1 aus `docs/KRYPTO_BOTS_IM_VERGLEICH.md`, Werkzeug `tools/backtest_daily.py`.
+Sechs vorab festgelegte Varianten, alle berichtet: Halten (je Coin gleicher
+Anteil), Trendfilter (halten, solange Schlusskurs > gleitender Durchschnitt 50 /
+100 / 200 Tage), Momentum (halten, solange die Coin über 30 / 90 Tage gestiegen
+ist). Entscheidung am Tagesschluss, Ausführung zum Eröffnungskurs des
+Folgetags, 0,25 % je Order, Mindestorder 30 € mit Anhebung wie live.
+
+Gesamtrendite (größter Rückgang in Klammern):
+
+| Variante | BTC+ETH+SOL ab 02/2021, 100 € | BTC ab 03/2018, 100 € | BTC+ETH ab 03/2018, 1000 € |
+|---|---|---|---|
+| Halten | +299 % (92 %) | +629 % (77 %) | +414 % (81 %) |
+| SMA 50 | +1147 % (56 %) | +1857 % (59 %) | +2424 % (58 %) |
+| SMA 100 | +380 % (64 %) | +1797 % (39 %) | +1386 % (60 %) |
+| SMA 200 | +1483 % (50 %) | +615 % (65 %) | +977 % (64 %) |
+| Momentum 30 | +1307 % (43 %) | +748 % (66 %) | +1907 % (58 %) |
+| Momentum 90 | +358 % (64 %) | +647 % (67 %) | +516 % (72 %) |
+
+In den vier 90-Tage-Fenstern des Confluence-Backtests (BTC/ETH/SOL): SMA 100
+−1 / −7 / +10 / +32 %, SMA 200 ±0 / ±0 / +4 / +21 % gegen Confluence live
+−32 / −25 / −26 / −14 %.
+
+- **Der Wert ist Crash-Schutz:** 2022 verlor Halten 65–76 %, die Trendfilter
+  9–40 %; 2018 ähnlich.
+- Risikobereinigt (Sharpe 0,8–1,2 gegen 0,6–0,7) fast überall besser als Halten;
+  nur bei BTC allein liegen SMA 200 und Momentum etwa gleichauf.
+- **Keine Variante ist überall die beste** — robust ist die Kombination mehrerer
+  Rückblick-Längen, nicht die Auswahl der besten.
+- 15–85 Trades pro Jahr statt ~190 in 90 Tagen; die Gebühr verliert ihr Gewicht.
+- **100-€-Falle:** BTC+ETH mit 100 € friert nach 2018 ein — unter 60 € Kapital
+  ist eine 30-€-Order mehr als die Hälfte, die meisten Varianten kaufen nie
+  wieder (Endstand ~−42 %). Mit 1000 € tritt das nicht auf.
+- Vorbehalte: USDT- statt EUR-Kurse, kein Slippage, keine Steuer; SOL ist im
+  Nachhinein gewählt (Gegenprobe ohne SOL bestätigt das Bild).
+
 ## Nächste Schritte, falls weiterverfolgt
 
 1. **Andere Datenquellen.** Der Bot sieht nur Kerzen. Orderbuchtiefe und
