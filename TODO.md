@@ -2,8 +2,9 @@
 
 ## Offen
 
-- [ ] **Tages-Trendfilter auf den VPS** (Container `trading-trend`): `./deploy/vps/deploy.sh`.
-  Danach auf https://bot.silvertoast.at oben rechts zwischen Panda-9 und Trend-1 umschalten.
+- [ ] Tages-Trendfilter beobachten (läuft seit 14.10.2026 als Trend-1, 1000 €; auf
+  https://bot.silvertoast.at oben rechts umschalten). Erwartung laut Backtest: wenige Trades,
+  Wert zeigt sich erst über Monate bzw. im nächsten Einbruch.
 
 - [ ] Alten Branch `claude/kraken-pro-dashboard` auf GitHub löschen (Branches → Mülleimer)
 
