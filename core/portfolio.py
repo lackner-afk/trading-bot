@@ -175,6 +175,11 @@ class Portfolio:
 
         conn.close()
         self._update_equity()
+        # Tagesstart nach einem Neustart: die geladene Equity, nicht start_capital.
+        # Sonst schloss der erste Risiko-Check alles, sobald das Konto 10 % unter
+        # dem Startkapital lag — bei jedem Neustart. Ein Verlust vor dem Neustart
+        # am selben Tag geht dabei verloren (Tagesstart wird nicht gespeichert).
+        self.daily_start_balance = self.equity
 
     def _save_state(self):
         """Speichert Portfolio-Zustand in DB"""
@@ -209,7 +214,9 @@ class Portfolio:
 
         # Prüfe ob neuer Tag
         if datetime.now().date() != self.day_start:
-            self.daily_start_balance = self.balance
+            # Equity statt Cash: mit offenen Positionen lag das Cash weit unter dem
+            # Kontowert, der Tagesverlust wurde stark negativ — der 10-%-Schutz war aus.
+            self.daily_start_balance = self.equity
             self.day_start = datetime.now().date()
             self.daily_pnl = 0.0
 
@@ -416,6 +423,7 @@ class Portfolio:
         """Setzt Portfolio auf Startwerte zurück"""
         self.balance = self.start_capital
         self.equity = self.start_capital
+        self.daily_start_balance = self.start_capital
         self.positions.clear()
         self.trades.clear()
         self.realized_pnl = 0.0
