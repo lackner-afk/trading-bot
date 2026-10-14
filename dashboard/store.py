@@ -235,7 +235,7 @@ COIN_NAMES = {
 
 STRATEGY_NAMES = {
     'confluence': 'Confluence', 'momentum': 'Momentum', 'scalper': 'Scalper',
-    'ml': 'ML-Prognose', 'crypto': 'Manuell',
+    'ml': 'ML-Prognose', 'crypto': 'Manuell', 'daily_trend': 'Tagestrend',
 }
 
 

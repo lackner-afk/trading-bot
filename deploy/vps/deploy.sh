@@ -15,7 +15,7 @@ APP_DIR="/home/deploy/trading-bot"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
 echo "==> Prüfen …"
-python3 -c "import ast; [ast.parse(open(f).read(), f) for f in ['$ROOT/main.py', '$ROOT/dashboard/server.py', '$ROOT/tools/data_recorder.py']]"
+python3 -c "import ast; [ast.parse(open(f).read(), f) for f in ['$ROOT/main.py', '$ROOT/dashboard/server.py', '$ROOT/tools/data_recorder.py', '$ROOT/strategies/daily_trend.py']]"
 grep -q "^  mode: paper" "$ROOT/config/settings.yaml" || { echo "FEHLER: settings.yaml steht nicht auf mode: paper — Abbruch."; exit 1; }
 
 echo "==> Dateien übertragen …"
@@ -46,14 +46,15 @@ docker compose up -d --build --remove-orphans
 # Nur verwaiste Images dieses Baus — andere Projekte bleiben unberührt.
 docker image prune -f > /dev/null
 for i in $(seq 1 30); do
-  if curl -fsS --max-time 3 http://127.0.0.1:3400/health > /dev/null; then
-    echo "==> Dashboard antwortet auf 127.0.0.1:3400"
+  if curl -fsS --max-time 3 http://127.0.0.1:3400/health > /dev/null \
+     && curl -fsS --max-time 3 http://127.0.0.1:3401/health > /dev/null; then
+    echo "==> Dashboards antworten auf 127.0.0.1:3400 (Confluence) und :3401 (Tagestrend)"
     docker compose ps --format 'table {{.Name}}\t{{.Status}}'
     exit 0
   fi
   sleep 1
 done
-echo "FEHLER: Das Dashboard antwortet nicht."
+echo "FEHLER: Ein Dashboard antwortet nicht."
 docker compose logs --tail=40
 exit 1
 REMOTE

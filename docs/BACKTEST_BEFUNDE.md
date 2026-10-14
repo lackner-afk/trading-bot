@@ -338,6 +338,35 @@ In den vier 90-Tage-Fenstern des Confluence-Backtests (BTC/ETH/SOL): SMA 100
 - Vorbehalte: USDT- statt EUR-Kurse, kein Slippage, keine Steuer; SOL ist im
   Nachhinein gewählt (Gegenprobe ohne SOL bestätigt das Bild).
 
+### Mehrheitsregel und Live-Größe (14.10.2026)
+
+Nachträglich ergänzt, darum ausdrücklich als solche markiert: **vote3** hält
+eine Coin, solange mindestens 3 der 5 Regeln oben halten wollen. Gewählt, weil
+keine Einzelregel überall die beste war — nicht, weil vote3 irgendwo gewann.
+1000 € Start, 0,25 %:
+
+| Korb | je Coin | Halten | vote3 | größter Rückgang Halten → vote3 |
+|---|---|---|---|---|
+| BTC+ETH+SOL ab 02/2021 | ⅓ | +286 % | +502 % | 92 → 59 % |
+| BTC ab 03/2018 | alles | +624 % | +1311 % | 77 → 47 % |
+| BTC+ETH ab 03/2018 | ½ | +409 % | +1752 % | 81 → 54 % |
+| BTC+ETH+SOL ab 02/2021 | **20 %** | +172 % | +313 % | 85 → 47 % |
+| BTC+ETH ab 03/2018 | **20 %** | +163 % | +439 % | 61 → 37 % |
+
+vote3 ist nie die beste und nie die schlechteste Einzelregel, schlägt Halten
+aber überall. 2022: −13 bis −37 % statt −27 bis −76 %.
+
+**20 % je Coin** ist die Live-Größe: Der RiskManager begrenzt jede Position
+hart auf 20 % des Kapitals, höchstens 60 % sind investiert. Nicht simuliert:
+das Tageslimit (10 % Verlust an einem Tag → alles schließen) — bei 60 %
+Investitionsgrad bräuchte es dafür einen Tagesrutsch aller Coins um ~17 %.
+
+Live läuft vote3 als zweiter Paper-Bot (`strategies/daily_trend.py`,
+Container `trading-trend`, Overlay `config/daily_trend.yaml`). Der Backtest
+lädt die Regeln aus derselben Datei. Unterschiede zum Backtest: Kraken-EUR-
+Tageskerzen statt Binance-USDT, Ausführung zum Fusion-Kurs beim nächsten
+Abgleich (alle 15 min) statt exakt zum Tageseröffnungskurs.
+
 ## Nächste Schritte, falls weiterverfolgt
 
 1. **Andere Datenquellen.** Der Bot sieht nur Kerzen. Orderbuchtiefe und

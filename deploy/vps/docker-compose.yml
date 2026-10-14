@@ -3,6 +3,10 @@
 #   bot        schreibt trades.db (inkl. Dashboard-Tabellen) und bot.log und
 #              liefert das Panda-Pro-Dashboard aus (Basic-Auth aus dashboard.env)
 #   recorder   schreibt market_data.db, das Dashboard liest sie nur
+# trend ist ein zweiter, unabhängiger Paper-Bot (Tages-Trendfilter) mit eigenem
+# Volume. Sein Dashboard erscheint auf bot.silvertoast.at über den Umschalter
+# oben rechts (bot reicht ?bot=trend intern weiter); 127.0.0.1:3401 nur für
+# den Health-Check beim Deploy.
 services:
   bot:
     build: { context: ../.., dockerfile: deploy/vps/Dockerfile }
@@ -15,6 +19,8 @@ services:
     environment:
       TZ: Europe/Vienna
       DASHBOARD_HOST: 0.0.0.0
+      # Umschalter auf bot.silvertoast.at: der Trend-Bot über das interne Netz
+      DASHBOARD_PEERS: "trend|Trend-1|http://trend:8080"
     volumes:
       - state:/state
     # Nur lokal: nach außen geht es ausschließlich über nginx mit TLS.
@@ -41,5 +47,25 @@ services:
     mem_limit: 512m  # ccxt lädt beim Start alle Binance-Märkte (~200 MB)
     logging: *logging
 
+  trend:
+    image: trading-bot:latest
+    container_name: trading-trend
+    restart: unless-stopped
+    env_file:
+      - ../../config/secrets.env
+      - ../../config/dashboard.env
+    environment:
+      TZ: Europe/Vienna
+      DASHBOARD_HOST: 0.0.0.0
+      BOT_CONFIG_OVERLAY: config/daily_trend.yaml
+    volumes:
+      - trend_state:/state
+    ports:
+      - "127.0.0.1:3401:8080"
+    depends_on: [bot]
+    mem_limit: 512m
+    logging: *logging
+
 volumes:
   state:
+  trend_state:

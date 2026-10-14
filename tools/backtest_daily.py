@@ -11,13 +11,20 @@ beste heraussuchen:
   hold        Drittel je Coin kaufen und halten
   sma50/100/200   halten, solange Schlusskurs > gleitender Durchschnitt
   mom30/90    halten, solange die Coin über 30/90 Tage gestiegen ist
+  vote3       halten, solange mindestens 3 der 5 Regeln oben halten wollen
+              (am 14.10.2026 nachträglich ergänzt, nach T1 — Kandidat für den
+              Live-Betrieb, weil keine Einzelregel überall die beste war)
 
 Umgebung:
   TAKER_FEE=0.0025  START_CAPITAL=100  MIN_ORDER_AMOUNT=30
+  POSITION_FRACTION=0.2  (Anteil des Kapitals je Coin; leer = gleichmäßig
+                          aufteilen. Live gilt die harte 20-%-Grenze des
+                          RiskManagers.)
   SYMBOLS=BTC/USDT,ETH/USDT,SOL/USDT
   SINCE=2018-01-01  (Startdatum der Datenabfrage; Bewertung beginnt, sobald
                      alle Coins 200 Tage Vorlauf haben)
 """
+import importlib.util
 import os
 import sys
 from datetime import datetime, timezone
@@ -26,6 +33,15 @@ import ccxt
 import numpy as np
 import pandas as pd
 
+# Dieselben Regeln wie der Live-Bot — sonst prüft der Backtest etwas anderes.
+# Direkt aus der Datei laden: `import strategies.daily_trend` zöge über
+# strategies/__init__.py das ganze Paket samt ML-Teil mit.
+_spec = importlib.util.spec_from_file_location(
+    'daily_trend', os.path.join(os.path.dirname(__file__), '..', 'strategies', 'daily_trend.py'))
+_daily_trend = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_daily_trend)
+MIN_VOTES, rule_signal, vote_count = _daily_trend.MIN_VOTES, _daily_trend.rule_signal, _daily_trend.vote_count
+
 # Über die Umgebung änderbar, z. B. SYMBOLS=BTC/USDT,ETH/USDT — wichtig gegen
 # Auswahl-Verzerrung: SOL stieg 2021 auf das ~18-Fache und trägt viel vom Ergebnis.
 SYMBOLS = os.environ.get('SYMBOLS', 'BTC/USDT,ETH/USDT,SOL/USDT').split(',')
@@ -33,9 +49,10 @@ TAKER_FEE = float(os.environ.get('TAKER_FEE', 0.0025))
 START_CAPITAL = float(os.environ.get('START_CAPITAL', 100.0))
 MIN_ORDER_AMOUNT = float(os.environ.get('MIN_ORDER_AMOUNT', 30.0))
 SINCE = os.environ.get('SINCE', '2018-01-01')
+POSITION_FRACTION = float(os.environ.get('POSITION_FRACTION') or 1 / len(SYMBOLS))
 WARMUP = 200
 
-VARIANTS = ['hold', 'sma50', 'sma100', 'sma200', 'mom30', 'mom90']
+VARIANTS = ['hold', 'sma50', 'sma100', 'sma200', 'mom30', 'mom90', 'vote3']
 
 
 def fetch_daily(exchange, symbol):
@@ -61,13 +78,9 @@ def signals(close: pd.Series, variant: str) -> pd.Series:
     """True = am Tagesschluss halten wollen."""
     if variant == 'hold':
         return pd.Series(True, index=close.index)
-    if variant.startswith('sma'):
-        n = int(variant[3:])
-        return close > close.rolling(n).mean()
-    if variant.startswith('mom'):
-        n = int(variant[3:])
-        return close > close.shift(n)
-    raise ValueError(variant)
+    if variant == 'vote3':
+        return vote_count(close) >= MIN_VOTES
+    return rule_signal(close, variant)
 
 
 def simulate(data: dict, variant: str, start, end):
@@ -95,7 +108,7 @@ def simulate(data: dict, variant: str, start, end):
                     trades += 1
                     units[s] = 0.0
                 elif want and units[s] == 0:
-                    budget = equity_open / len(SYMBOLS)
+                    budget = equity_open * POSITION_FRACTION
                     # Wie live (main.py _execute_signal): zu kleine Order auf die
                     # Mindestgröße anheben, solange sie höchstens das halbe Kapital
                     # bindet — sonst bliebe ein geschrumpftes Konto für immer in Cash.
@@ -137,7 +150,8 @@ def main():
     data = {s: df.loc[common] for s, df in data.items()}
     start, end = common[WARMUP], common[-1]
     print(f"Bewertung {start.date()} bis {end.date()} ({len(common) - WARMUP} Tage), "
-          f"Gebühr {TAKER_FEE:.2%}, Start {START_CAPITAL:.0f} €, Mindestorder {MIN_ORDER_AMOUNT:.0f} €\n")
+          f"Gebühr {TAKER_FEE:.2%}, Start {START_CAPITAL:.0f} €, Mindestorder {MIN_ORDER_AMOUNT:.0f} €, "
+          f"je Coin {POSITION_FRACTION:.0%}\n")
 
     full = {v: simulate(data, v, start, end) for v in VARIANTS}
     print(f"{'Variante':9s} {'Ende €':>9s} {'gesamt':>9s} {'p.a.':>7s} {'MaxDD':>6s} {'Sharpe':>6s} {'Trades':>6s} {'Gebühr €':>9s}")

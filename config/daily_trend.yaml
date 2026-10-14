@@ -1,0 +1,27 @@
+# Overlay für den zweiten Paper-Bot: Tages-Trendfilter (strategies/daily_trend.py).
+# Wird über settings.yaml gelegt (BOT_CONFIG_OVERLAY=config/daily_trend.yaml);
+# hier stehen nur die Abweichungen — Gebühren, Börsenregeln und Feed kommen
+# aus settings.yaml, damit beide Bots unter denselben Bedingungen rechnen.
+# Backtest und Begründung: docs/BACKTEST_BEFUNDE.md, „Tages-Trendfilter".
+
+general:
+  # Mit 100 € friert das Konto nach Verlusten an der 30-€-Mindestorder ein
+  # (Backtest ~−42 %); mit 1000 € tritt das nicht auf.
+  start_capital: 1000
+
+strategies:
+  confluence:
+    enabled: false
+  daily_trend:
+    enabled: true
+    min_votes: 3              # von 5 Regeln (SMA 50/100/200, Momentum 30/90)
+    check_interval_s: 900     # Soll/Ist-Abgleich alle 15 Minuten
+    # Positionsgröße: 20 % des Kapitals je Coin (Grenze des RiskManagers,
+    # nicht überschreibbar) — höchstens 60 % investiert. Backtest mit 20 %:
+    # BTC+ETH+SOL ab 2021 +313 % (Halten +172 %), größter Rückgang 47 % (85 %).
+
+risk:
+  max_concurrent_positions: 3   # eine je Coin
+
+dashboard:
+  bot_name: Trend-1

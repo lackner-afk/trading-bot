@@ -53,6 +53,8 @@
   .head-right { display: flex; justify-content: flex-end; align-items: center; gap: 10px; }
   .mode-pill { font-size: 11px; padding: 4px 9px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
   .mode-pill.live { color: var(--red); border-color: rgba(248,113,113,.4); }
+  .bots[hidden] { display: none; }
+  .bots button { white-space: nowrap; }
   .avatar {
     width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center;
     background: #2a2a2f; font-size: 11px; font-weight: 600; letter-spacing: .02em;
@@ -208,6 +210,9 @@
     .row-2 { grid-template-columns: 1fr 1fr; }
     .row-2 .risk { grid-column: span 2; }
   }
+  @media (max-width: 420px) {
+    .avatar, .brand .pro { display: none !important; }  /* Platz für den Bot-Umschalter */
+  }
   @media (max-width: 640px) {
     header { grid-template-columns: 1fr auto; padding: 12px 16px; }
     nav { grid-column: 1 / -1; grid-row: 2; overflow-x: auto; margin-top: 10px; }
@@ -234,6 +239,7 @@
     <button data-view="settings">Einstellungen</button>
   </nav>
   <div class="head-right">
+    <div class="ranges bots" id="bots" role="group" aria-label="Bot wählen" hidden></div>
     <span class="mode-pill" id="mode-pill">Paper</span>
     <span class="avatar" id="avatar" aria-hidden="true"></span>
   </div>
@@ -364,10 +370,13 @@
   const $ = (id) => document.getElementById(id);
   const COLORS = { BTC: '#f4f4f5', ETH: '#34d399', SOL: '#8b8cf6', XRP: '#38bdf8', EUR: '#4b4b52' };
   const EXTRA = ['#fbbf24', '#f472b6', '#22d3ee', '#a3e635', '#fb923c'];
-  const STRAT_COLORS = { confluence: '#34d399', momentum: '#8b8cf6', scalper: '#fbbf24', ml: '#38bdf8' };
+  const STRAT_COLORS = { confluence: '#34d399', daily_trend: '#fbbf24', momentum: '#8b8cf6', scalper: '#fbbf24', ml: '#38bdf8' };
   const RANGE_TEXT = { '1T': 'in 24 Stunden', '1W': 'diese Woche', '1M': 'in 30 Tagen', '1J': 'in einem Jahr', 'Max': 'seit Start' };
 
   let range = '1W';
+  // Welcher Bot angezeigt wird ('' = der Bot, der dieses Dashboard ausliefert)
+  let botKey = new URLSearchParams(location.search).get('bot') || '';
+  const botQuery = (sep) => botKey ? `${sep}bot=${encodeURIComponent(botKey)}` : '';
   let state = null;
   let busy = false;
 
@@ -392,7 +401,7 @@
   // ---------------------------------------------------------------- Laden
   async function load() {
     try {
-      const res = await fetch(`/api/state?range=${encodeURIComponent(range)}`, { headers, cache: 'no-store' });
+      const res = await fetch(`/api/state?range=${encodeURIComponent(range)}${botQuery('&')}`, { headers, cache: 'no-store' });
       if (res.status === 401) throw new Error('token');
       if (!res.ok) throw new Error(res.status);
       state = await res.json();
@@ -425,6 +434,7 @@
 
     // Bot
     $('bot-name').textContent = s.bot.name;
+    drawBots(s.bots || [], s.current_bot || '');
     $('status-text').textContent = s.bot.status;
     const warn = /Kurse|Cooldown/.test(s.bot.status);
     $('status-dot').className = 'dot' + (s.bot.paused ? ' paused' : warn ? ' warn' : '');
@@ -468,6 +478,26 @@
     return esc(t);
   }
 
+  function drawBots(bots, current) {
+    const box = $('bots');
+    box.hidden = bots.length < 2;
+    if (box.hidden) return;
+    const html = bots.map(b => `<button data-bot="${esc(b.key)}" aria-pressed="${b.key === current}">${esc(b.name)}</button>`).join('');
+    if (box.innerHTML !== html) box.innerHTML = html;
+  }
+
+  $('bots').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-bot]');
+    if (!b || b.dataset.bot === botKey) return;
+    botKey = b.dataset.bot;
+    const url = new URL(location.href);
+    if (botKey) url.searchParams.set('bot', botKey); else url.searchParams.delete('bot');
+    history.replaceState(null, '', url);
+    $('bots').querySelectorAll('[data-bot]').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+    state = null;
+    load();
+  });
+
   function drawSignals(sig, nowIso) {
     const box = $('signals');
     const th = sig.threshold;
@@ -475,14 +505,17 @@
       box.innerHTML = '<div class="empty" style="height:80px">Noch keine Bewertung</div>';
     } else {
       // Skala 0,4–1,0: darunter liegt praktisch nichts, so bleibt der Abstand zur Schwelle lesbar
-      const P = (v) => Math.max(0, Math.min(1, (v - 0.4) / 0.6)) * 100;
+      const lo = sig.scale_min ?? 0.4;
+      const P = (v) => Math.max(0, Math.min(1, (v - lo) / (1 - lo))) * 100;
       box.innerHTML = sig.coins.map((c, i) => {
         const gap = c.score - th;
         const blocked = c.blocked_until ? ` · nach Verlust gesperrt bis ${clock(c.blocked_until)}` : '';
         const price = c.price ? ` <span class="label">${num2.format(c.price)} €</span>` : '';
         return `<div class="sig">
           <div class="sig-top"><span>${esc(c.coin)}${price}</span>
-            <span class="v">${score3(c.score)}<span class="gap">${gap >= 0 ? '+' : '−'}${score3(Math.abs(gap))}</span></span></div>
+            <span class="v">${sig.kind === 'daily_trend'
+              ? `${Math.round(c.score * 5)}/5`
+              : `${score3(c.score)}<span class="gap">${gap >= 0 ? '+' : '−'}${score3(Math.abs(gap))}</span>`}</span></div>
           <div class="bar" title="Score ${score3(c.score)} · Schwelle ${th}">
             <i style="width:${P(c.score)}%;background:${colorFor(c.coin, i)}"></i>
             <span class="mark" style="left:calc(${P(th)}% - 1px)"></span></div>
@@ -492,7 +525,9 @@
     }
     const feed = sig.feed === 'FusionFeed' ? 'Bitpanda Fusion' : sig.feed === 'KrakenFeed' ? 'Kraken' : sig.feed;
     const beat = sig.last_cycle ? `letzter Durchgang vor ${ago(sig.last_cycle, nowIso)}` : 'noch kein Durchgang';
-    $('signals-foot').textContent = `Strich = Schwelle ${th} · Ziel/Stop ${sig.tp_atr}:${sig.sl_atr} × ATR · Kurse ${feed} · ${beat}`;
+    $('signals-foot').textContent = sig.kind === 'daily_trend'
+      ? `Strich = ${Math.round(th * 5)} von 5 Trendregeln auf Tageskerzen · kein Ziel/Stop, Ausstieg wenn der Trend kippt · Kurse ${feed} · ${beat}`
+      : `Strich = Schwelle ${th} · Ziel/Stop ${sig.tp_atr}:${sig.sl_atr} × ATR · Kurse ${feed} · ${beat}`;
   }
 
   // ---------------------------------------------------------------- Datensammler
@@ -698,7 +733,7 @@
     t.disabled = true;
     t.setAttribute('aria-checked', String(!pause));
     try {
-      const res = await fetch('/api/pause', {
+      const res = await fetch(`/api/pause${botQuery('?')}`, {
         method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
         body: JSON.stringify({ paused: pause }),
       });

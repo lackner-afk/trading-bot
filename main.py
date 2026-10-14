@@ -30,10 +30,11 @@ from data.kraken_feed import KrakenFeed
 from data.fusion_feed import FusionFeed
 from data.onetrading_ccxt_feed import OneTradingCCXTFeed
 from data.fusion_feed import FusionFeed
-from strategies.crypto_scalper import CryptoScalper, SignalType
+from strategies.crypto_scalper import CryptoScalper, ScalperSignal, SignalType
 from strategies.momentum import MomentumStrategy
 from strategies.ml_predictor import MLPredictor
 from strategies.confluence_strategy import ConfluenceStrategy  # New 2026 multi-factor system
+from strategies.daily_trend import DailyTrendStrategy
 from strategies.regime_detector import MarketConditions
 from notifications.reporter import Reporter
 from dashboard.store import DashboardStore, open_event, close_event, control_event
@@ -42,6 +43,17 @@ from dashboard.server import DashboardServer
 # Laufzeitdaten (Datenbank, Log, Status fürs Dashboard). Auf dem VPS ein
 # Docker-Volume, lokal wie bisher das Projektverzeichnis.
 STATE_DIR = Path(os.environ.get('BOT_STATE_DIR', '.'))
+
+
+def _deep_merge(base: Dict, overlay: Dict) -> Dict:
+    """overlay über base legen; verschachtelte Abschnitte werden zusammengeführt."""
+    out = dict(base)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
 
 
 class TradingBot:
@@ -97,6 +109,14 @@ class TradingBot:
 
         with open(path, 'r') as f:
             config = yaml.safe_load(f)
+
+        # Zweiter Bot aus demselben Code (z. B. der Tages-Trendfilter auf dem VPS):
+        # nur die Abweichungen stehen in der Overlay-Datei, der Rest kommt aus
+        # settings.yaml — so laufen Gebühren und Börsenregeln nie auseinander.
+        overlay_path = os.environ.get('BOT_CONFIG_OVERLAY')
+        if overlay_path:
+            with open(overlay_path, 'r') as f:
+                config = _deep_merge(config, yaml.safe_load(f) or {})
 
         # Environment-Variablen laden
         load_dotenv('config/secrets.env')
@@ -223,6 +243,12 @@ class TradingBot:
             self.logger.info("ConfluenceStrategy (neues Multi-Factor System) aktiviert")
         else:
             self.confluence_strategy = None
+
+        # Tages-Trendfilter (Mehrheit aus 5 Trendregeln auf Tageskerzen)
+        daily_cfg = self.config.get('strategies', {}).get('daily_trend', {})
+        self.daily_trend = DailyTrendStrategy(daily_cfg) if daily_cfg.get('enabled') else None
+        if self.daily_trend:
+            self.logger.info("Tages-Trendfilter aktiviert")
 
         # Phase 6: Regime tracking for change alerting
         self._last_regime_name: Optional[str] = None
@@ -375,7 +401,10 @@ class TradingBot:
             asyncio.create_task(self._supervise(self._telegram_hourly_loop, 'telegram')),
         ]
 
-        if self.use_confluence_strategy:
+        if self.daily_trend:
+            # Tages-Trendfilter allein — Confluence und Alt-Strategien laufen nicht mit
+            tasks.append(asyncio.create_task(self._supervise(self._daily_trend_loop, 'daily_trend')))
+        elif self.use_confluence_strategy:
             # Nur das neue Multi-Factor Confluence System (Phase 1-6)
             tasks.append(asyncio.create_task(self._supervise(self._confluence_loop, 'confluence')))
         else:
@@ -414,6 +443,8 @@ class TradingBot:
         self.logger.info("Stoppe Bot-Komponenten...")
 
         await self.crypto_feed.stop()
+        if self.daily_trend:
+            await self.daily_trend.close()
         await self.reporter.stop()
 
         # Final Report
@@ -855,6 +886,74 @@ class TradingBot:
                 self.logger.error(f"Fehler im Confluence-Loop: {e}")
                 await asyncio.sleep(30)
 
+    async def _daily_trend_loop(self):
+        """
+        Tages-Trendfilter: gleicht alle paar Minuten den Soll-Zustand (halten
+        oder nicht, aus der letzten abgeschlossenen Tageskerze) mit den offenen
+        Positionen ab. Abgleich statt einmal täglich handeln — so holt der Bot
+        einen Einstieg nach, der wegen Cooldown, Pause oder Neustart ausfiel.
+        """
+        cfg = self.config.get('strategies', {}).get('daily_trend', {})
+        interval = float(cfg.get('check_interval_s', 900))
+        logged: Dict[str, tuple] = {}
+        self.logger.info(f"Tages-Trendfilter gestartet (alle {interval:.0f} s, "
+                         f"mindestens {self.daily_trend.min_votes} von 5 Regeln)")
+
+        while self.running:
+            prices = self.crypto_feed.get_prices(max_age_seconds=self._max_price_age)
+            for symbol in self._pairs:
+                try:
+                    closes = await self.daily_trend.fetch_daily_closes(symbol)
+                except Exception as e:
+                    self._log_throttled(f"daily:{symbol}",
+                                        f"[TAGESTREND] {symbol}: Tageskerzen nicht ladbar: {e!r}")
+                    continue
+                vote = self.daily_trend.evaluate(symbol, closes)
+                if vote is None:
+                    continue
+                self._last_cycle_at = datetime.now()
+
+                # Einmal je neuer Tageskerze ins Log — nicht alle 15 Minuten
+                key = (vote.candle_date, vote.votes)
+                if logged.get(symbol) != key:
+                    logged[symbol] = key
+                    ja = ', '.join(r for r, ok in vote.rules.items() if ok) or '–'
+                    self.logger.info(
+                        f"[TAGESTREND] {symbol} Kerze {vote.candle_date:%d.%m.} Schluss {vote.close:.2f}: "
+                        f"{vote.votes}/5 ({ja}) → {'halten' if vote.hold else 'draußen'}"
+                    )
+
+                price = prices.get(symbol)
+                if price is None:
+                    continue
+                position = self.portfolio.positions.get(symbol)
+
+                if vote.hold and position is None:
+                    # Nach dem Tageslimit schließt der Risk-Loop alles — nicht gleich wieder kaufen
+                    if self.portfolio.get_daily_drawdown() >= self.risk_manager.max_daily_drawdown:
+                        self._log_throttled(f"daily-dd:{symbol}",
+                                            f"[TAGESTREND] {symbol}: Tageslimit erreicht — Einstieg morgen.")
+                        continue
+                    signal = ScalperSignal(
+                        signal_type=SignalType.LONG,
+                        symbol=symbol,
+                        price=price,
+                        confidence=vote.votes / 5,
+                        reason=f"Tagestrend {vote.votes}/5",
+                        # Kein TP/SL: raus geht es nur, wenn der Tagestrend kippt
+                        take_profit=0.0,
+                        stop_loss=0.0,
+                        suggested_leverage=1,
+                    )
+                    await self._execute_signal(signal, strategy_name='daily_trend')
+
+                elif not vote.hold and position is not None and position.market_type == 'daily_trend':
+                    await self._close_position(
+                        symbol, price, f"Tagestrend gekippt: nur {vote.votes}/5 Regeln"
+                    )
+
+            await asyncio.sleep(interval)
+
     async def _risk_check_loop(self):
         """Risk-Check Loop (alle 5 Minuten)"""
         self.logger.info("Risk-Check-Loop gestartet")
@@ -1256,6 +1355,10 @@ class TradingBot:
                 continue
 
             current_price = prices[symbol]
+
+            # Tages-Trendfilter: kein TP/SL — der Ausstieg kommt aus _daily_trend_loop
+            if position.market_type == 'daily_trend':
+                continue
 
             # Richtige Strategie für Exit-Check wählen (Phase 5)
             if position.market_type == 'confluence':

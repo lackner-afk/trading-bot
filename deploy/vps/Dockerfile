@@ -14,6 +14,7 @@ COPY deploy/vps/requirements.txt /tmp/requirements.txt
 RUN pip install -r /tmp/requirements.txt
 
 COPY config/settings.yaml config/settings.yaml
+COPY config/daily_trend.yaml config/daily_trend.yaml
 COPY core core
 COPY data data
 COPY strategies strategies

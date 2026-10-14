@@ -9,6 +9,11 @@ Endpoints:
     GET  /api/state      Kompletter Zustand als JSON (?range=1T|1W|1M|1J|Max)
     POST /api/pause      {"paused": true|false} — neue Einstiege an/aus
 
+Weitere Bots (DASHBOARD_PEERS, z. B. "trend|Trend-1|http://trend:8080") zeigt
+dieses Dashboard über ?bot=<key> mit an: /api/state und /api/pause werden dann
+an das Dashboard des anderen Bots weitergereicht, mit derselben Anmeldung.
+So reicht eine Adresse (bot.silvertoast.at) für alle Bots.
+
 Sicherheit: Standardmäßig nur auf 127.0.0.1. Wer den Server im Netz öffnet
 (host: 0.0.0.0), MUSS DASHBOARD_PASSWORD oder DASHBOARD_TOKEN setzen, sonst
 startet er nicht. Mit DASHBOARD_PASSWORD fragt der Browser per Basic-Auth nach
@@ -28,7 +33,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
-from aiohttp import web
+from aiohttp import ClientSession, ClientTimeout, web
 
 from dashboard.store import (DashboardStore, coin_name, coin_of, strategy_name,
                              window_start)
@@ -99,6 +104,20 @@ def downsample(points: List[Tuple[datetime, float]], limit: int = MAX_CHART_POIN
     return [points[round(i * step)] for i in range(limit)]
 
 
+def parse_peers(raw: str) -> Dict[str, Dict[str, str]]:
+    """'trend|Trend-1|http://trend:8080,…' → {'trend': {'name': …, 'url': …}}"""
+    peers = {}
+    for item in filter(None, (x.strip() for x in raw.split(','))):
+        parts = [x.strip() for x in item.split('|')]
+        if len(parts) != 3 or not all(parts):
+            logging.getLogger('Dashboard').warning(f"DASHBOARD_PEERS: Eintrag '{item}' ignoriert "
+                                                   "(erwartet key|Name|URL)")
+            continue
+        key, name, url = parts
+        peers[key] = {'name': name, 'url': url.rstrip('/')}
+    return peers
+
+
 def recorder_stats(path: Path) -> Optional[Dict]:
     """Stand des Datensammlers (tools/data_recorder.py) — nur lesend geöffnet."""
     if not path.exists():
@@ -143,6 +162,8 @@ class DashboardServer:
         self.token: str = os.getenv('DASHBOARD_TOKEN', '')
         self.user: str = os.getenv('DASHBOARD_USER', 'nici')
         self.password: str = os.getenv('DASHBOARD_PASSWORD', '')
+        self.peers: Dict[str, Dict[str, str]] = parse_peers(os.getenv('DASHBOARD_PEERS', ''))
+        self._peer_session: Optional[ClientSession] = None
 
     # ----------------------------------------------------------------- Ablauf
 
@@ -182,6 +203,8 @@ class DashboardServer:
                 await asyncio.sleep(self.snapshot_seconds)
         finally:
             await runner.cleanup()
+            if self._peer_session is not None:
+                await self._peer_session.close()
             self.logger.info("Dashboard gestoppt.")
 
     async def _snapshot(self):
@@ -235,7 +258,18 @@ class DashboardServer:
 
     async def _handle_state(self, request: web.Request) -> web.Response:
         range_key = request.query.get('range', '1W')
-        state = await self.build_state(range_key)
+        key = request.query.get('bot', '')
+        if key:
+            if key not in self.peers:
+                return web.json_response({'error': f"Unbekannter Bot '{key}'"}, status=404)
+            status, state = await self._peer_call(key, request, 'GET', '/api/state',
+                                                  params={'range': range_key})
+            if status != 200:
+                return web.json_response(state, status=status)
+        else:
+            state = await self.build_state(range_key)
+        state['bots'] = self._bot_list()
+        state['current_bot'] = key
         return web.json_response(state)
 
     async def _handle_pause(self, request: web.Request) -> web.Response:
@@ -246,8 +280,41 @@ class DashboardServer:
         paused = body.get('paused')
         if not isinstance(paused, bool):
             return web.json_response({'error': "'paused' muss true oder false sein"}, status=400)
+        key = request.query.get('bot', '')
+        if key:
+            if key not in self.peers:
+                return web.json_response({'error': f"Unbekannter Bot '{key}'"}, status=404)
+            status, result = await self._peer_call(key, request, 'POST', '/api/pause',
+                                                   json={'paused': paused})
+            return web.json_response(result, status=status)
         await self.bot.set_trading_paused(paused, source='Dashboard')
         return web.json_response({'paused': self.bot.trading_paused})
+
+    # ------------------------------------------------------------ Andere Bots
+
+    def _bot_list(self) -> List[Dict[str, str]]:
+        return [{'key': '', 'name': self.bot_name}] + \
+               [{'key': k, 'name': p['name']} for k, p in self.peers.items()]
+
+    async def _peer_call(self, key: str, request: web.Request, method: str, path: str,
+                         **kwargs) -> Tuple[int, Dict]:
+        """Anfrage an das Dashboard eines anderen Bots weiterreichen.
+
+        Die eigene Anmeldung ist schon geprüft; weitergegeben wird derselbe
+        Authorization-Header — beide Bots lesen dieselbe dashboard.env.
+        """
+        if self._peer_session is None:
+            self._peer_session = ClientSession(timeout=ClientTimeout(total=10))
+        headers = {}
+        if 'Authorization' in request.headers:
+            headers['Authorization'] = request.headers['Authorization']
+        try:
+            async with self._peer_session.request(method, self.peers[key]['url'] + path,
+                                                  headers=headers, **kwargs) as resp:
+                return resp.status, await resp.json(content_type=None)
+        except Exception as e:
+            self.logger.warning(f"Bot '{key}' nicht erreichbar: {e!r}")
+            return 502, {'error': f"{self.peers[key]['name']} ist nicht erreichbar"}
 
     # ----------------------------------------------------------------- Zustand
 
@@ -342,6 +409,8 @@ class DashboardServer:
     def _signals(self) -> Dict:
         """Wie nah jeder Coin am nächsten Signal ist — auch abgelehnte Scores."""
         bot = self.bot
+        if getattr(bot, 'daily_trend', None) is not None:
+            return self._daily_signals()
         cfg = bot.config.get('strategies', {}).get('confluence', {})
         strategy = getattr(bot, 'confluence_strategy', None)
         evals = dict(strategy.aggregator.last_eval) if strategy is not None else {}
@@ -365,6 +434,34 @@ class DashboardServer:
             'threshold': cfg.get('min_confluence_score'),
             'tp_atr': cfg.get('tp_atr_multiplier'),
             'sl_atr': cfg.get('sl_atr_multiplier'),
+            'feed': type(bot.crypto_feed).__name__,
+            'last_cycle': last_cycle.isoformat(timespec='seconds') if last_cycle else None,
+            'coins': coins,
+        }
+
+    def _daily_signals(self) -> Dict:
+        """Tages-Trendfilter: Stimmen je Coin (x von 5 Regeln) statt Confluence-Score."""
+        bot = self.bot
+        strategy = bot.daily_trend
+        coins = []
+        for symbol, v in sorted(strategy.last_votes.items()):
+            ja = ', '.join(r for r, ok in v.rules.items() if ok) or 'keine'
+            coins.append({
+                'symbol': symbol,
+                'coin': coin_of(symbol),
+                'price': bot.crypto_feed.get_price(symbol),
+                'score': v.votes / 5,
+                'decision': f"{v.votes}/5 Regeln ({ja}) → {'halten' if v.hold else 'draußen'}",
+                'time': v.candle_date.isoformat(timespec='seconds'),
+                'regime': None,
+                'market': self._market_info(symbol),
+                'blocked_until': None,
+            })
+        last_cycle = getattr(bot, '_last_cycle_at', None)
+        return {
+            'threshold': strategy.min_votes / 5,
+            'scale_min': 0.0,
+            'kind': 'daily_trend',
             'feed': type(bot.crypto_feed).__name__,
             'last_cycle': last_cycle.isoformat(timespec='seconds') if last_cycle else None,
             'coins': coins,
@@ -456,7 +553,8 @@ class DashboardServer:
     def _strategies(self, stats: List[Tuple[str, int, int, float]]) -> List[Dict]:
         cfg = self.bot.config.get('strategies', {})
         by_key = {s: (n, w, pnl) for s, n, w, pnl in stats}
-        keys = [k for k in ('confluence', 'momentum', 'scalper', 'ml') if cfg.get(k, {}).get('enabled')]
+        keys = [k for k in ('confluence', 'daily_trend', 'momentum', 'scalper', 'ml')
+                if cfg.get(k, {}).get('enabled')]
         keys += [k for k in by_key if k not in keys]
         out = []
         for k in keys:
