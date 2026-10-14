@@ -2,17 +2,6 @@
 
 ## Offen
 
-- [ ] **Auf den VPS deployen** — `main` enthält Änderungen, die auf dem Server noch nicht laufen:
-  - ~~Gewinnziel-Boden 2 %~~ → am 12.10.2026 auf 0,8 % festgelegt (läuft schon seit 11.10. auf dem VPS, siehe Kommentar in `config/settings.yaml`)
-  - Gebühren-Standard 0,25 % überall im Code (vorher 0,06 % ohne Config)
-
-  Am Mac im Repo-Ordner:
-  ```
-  git pull
-  ./deploy/vps/deploy.sh
-  ```
-  Danach im Dashboard → Einstellungen prüfen: „Gebühr pro Order 0,25 %“.
-
 - [ ] Alten Branch `claude/kraken-pro-dashboard` auf GitHub löschen (Branches → Mülleimer)
 
 ## Später (aus `docs/KRYPTO_BOTS_IM_VERGLEICH.md`)
