@@ -48,7 +48,7 @@ docker image prune -f > /dev/null
 for i in $(seq 1 30); do
   if curl -fsS --max-time 3 http://127.0.0.1:3400/health > /dev/null \
      && curl -fsS --max-time 3 http://127.0.0.1:3401/health > /dev/null; then
-    echo "==> Dashboards antworten auf 127.0.0.1:3400 (Confluence) und :3401 (Tagestrend)"
+    echo "==> Dashboards antworten auf 127.0.0.1:3400 (Panda-9, Donchian) und :3401 (Trend-1, Mehrheitsregel)"
     docker compose ps --format 'table {{.Name}}\t{{.Status}}'
     exit 0
   fi
