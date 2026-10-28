@@ -896,19 +896,18 @@ class TradingBot:
         cfg = self.config.get('strategies', {}).get('daily_trend', {})
         interval = float(cfg.get('check_interval_s', 900))
         logged: Dict[str, tuple] = {}
-        self.logger.info(f"Tages-Trendfilter gestartet (alle {interval:.0f} s, "
-                         f"mindestens {self.daily_trend.min_votes} von 5 Regeln)")
+        self.logger.info(f"Tages-Trendfilter gestartet (alle {interval:.0f} s, {self.daily_trend.label})")
 
         while self.running:
             prices = self.crypto_feed.get_prices(max_age_seconds=self._max_price_age)
             for symbol in self._pairs:
                 try:
-                    closes = await self.daily_trend.fetch_daily_closes(symbol)
+                    daily = await self.daily_trend.fetch_daily(symbol)
                 except Exception as e:
                     self._log_throttled(f"daily:{symbol}",
                                         f"[TAGESTREND] {symbol}: Tageskerzen nicht ladbar: {e!r}")
                     continue
-                vote = self.daily_trend.evaluate(symbol, closes)
+                vote = self.daily_trend.evaluate(symbol, daily)
                 if vote is None:
                     continue
                 self._last_cycle_at = datetime.now()
@@ -917,11 +916,7 @@ class TradingBot:
                 key = (vote.candle_date, vote.votes)
                 if logged.get(symbol) != key:
                     logged[symbol] = key
-                    ja = ', '.join(r for r, ok in vote.rules.items() if ok) or '–'
-                    self.logger.info(
-                        f"[TAGESTREND] {symbol} Kerze {vote.candle_date:%d.%m.} Schluss {vote.close:.2f}: "
-                        f"{vote.votes}/5 ({ja}) → {'halten' if vote.hold else 'draußen'}"
-                    )
+                    self.logger.info(f"[TAGESTREND] {symbol} Kerze {vote.candle_date:%d.%m.}: {vote.describe()}")
 
                 price = prices.get(symbol)
                 if price is None:
@@ -938,8 +933,8 @@ class TradingBot:
                         signal_type=SignalType.LONG,
                         symbol=symbol,
                         price=price,
-                        confidence=vote.votes / 5,
-                        reason=f"Tagestrend {vote.votes}/5",
+                        confidence=1.0 if vote.upper is not None else vote.votes / 5,
+                        reason=f"Tagestrend: {vote.describe()}",
                         # Kein TP/SL: raus geht es nur, wenn der Tagestrend kippt
                         take_profit=0.0,
                         stop_loss=0.0,
@@ -949,7 +944,7 @@ class TradingBot:
 
                 elif not vote.hold and position is not None and position.market_type == 'daily_trend':
                     await self._close_position(
-                        symbol, price, f"Tagestrend gekippt: nur {vote.votes}/5 Regeln"
+                        symbol, price, f"Tagestrend gekippt: {vote.describe()}"
                     )
 
             await asyncio.sleep(interval)

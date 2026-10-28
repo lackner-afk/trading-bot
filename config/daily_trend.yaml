@@ -14,6 +14,7 @@ strategies:
     enabled: false
   daily_trend:
     enabled: true
+    rule: vote                # settings.yaml steht für Panda-9 auf donchian
     min_votes: 3              # von 5 Regeln (SMA 50/100/200, Momentum 30/90)
     check_interval_s: 900     # Soll/Ist-Abgleich alle 15 Minuten
     # Positionsgröße: 20 % des Kapitals je Coin (Grenze des RiskManagers,

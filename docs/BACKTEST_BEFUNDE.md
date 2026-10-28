@@ -367,6 +367,49 @@ lädt die Regeln aus derselben Datei. Unterschiede zum Backtest: Kraken-EUR-
 Tageskerzen statt Binance-USDT, Ausführung zum Fusion-Kurs beim nächsten
 Abgleich (alle 15 min) statt exakt zum Tageseröffnungskurs.
 
+## Donchian-Ausbruch für Panda-9 (28.10.2026)
+
+Anlass: Panda-9 (Confluence) lag live vom 11. bis 28.10. bei 16 Trades, einem
+Gewinner und −6,6 %, wie von der Faktor-Analyse vorhergesagt. Statt weiter am
+Score zu drehen, bekommt der 100-€-Bot eine zweite Trendfamilie, damit die
+beiden Paper-Bots Verschiedenes testen: **Donchian-Ausbruch** auf Tageskerzen,
+Kauf über dem Hoch der vorigen N Tage, Verkauf unter dem Tief der vorigen M
+Tage. Vor dem Lauf festgelegt: don20 = 20/10 (Turtle-System 1), don55 = 55/20
+(System 2); dazu `MAX_POSITIONS` im Backtest (wollen mehr Coins rein, gewinnt
+die Reihenfolge BTC → ETH → SOL).
+
+100 € Start, 0,25 %, je Coin 20 % (wie live auf die 30-€-Mindestorder
+angehoben), Gesamtrendite (größter Rückgang):
+
+| Korb, höchstens | Halten | vote3 | don20 | don55 |
+|---|---|---|---|---|
+| BTC+ETH+SOL ab 02/2021, 1 | +23 % (30 %) | +157 % (36 %) | +98 % (22 %) | +55 % (31 %) |
+| BTC+ETH+SOL ab 02/2021, **2** | +41 % (60 %) | +190 % (49 %) | **+107 % (28 %)** | +97 % (39 %) |
+| BTC+ETH+SOL ab 02/2021, 3 | +241 % (91 %) | +377 % (48 %) | +221 % (38 %) | +292 % (38 %) |
+| BTC+ETH ab 07/2018, 1 | +300 % (61 %) | +211 % (32 %) | +179 % (16 %) | +87 % (34 %) |
+| BTC+ETH ab 07/2018, 2 | +427 % (72 %) | +594 % (37 %) | +335 % (22 %) | +318 % (39 %) |
+
+- **Positiv in jeder Variante**, mit dem kleinsten Rückgang aller Regeln
+  (don20 16–38 %). 2022: −9 bis −33 % statt bis −68 % beim Halten.
+- **Nicht besser als vote3:** Die Mehrheitsregel bringt fast überall mehr
+  Rendite; don20 ist die vorsichtigere Variante, nicht die stärkere. In den
+  letzten 90-Tage-Fenstern liegt don20 sogar meist hinter vote3
+  (z. B. −8,5 / −9,1 / +2,5 / +4,9 % gegen −0,9 / −5,0 / +9,6 / +15,9 %).
+- 2025 und 2026 bisher leicht negativ (−5 bis −10 %) — Seitwärtsmärkte sind
+  für Ausbruchsregeln das schlechteste Umfeld.
+- Mit 1 Position steckt bei 100 € nur die 30-€-Mindestorder im Markt; die
+  Equity bewegt sich dann kaum. Darum live **2 Positionen**
+  (`max_concurrent_positions` bleibt 2).
+- Gewählt wurde don20 (bessere Sharpe und kleinerer Rückgang als don55 in
+  allen fünf Läufen) — nachträglich zwischen zwei vorab festgelegten Varianten,
+  also kein Beleg, dass 20/10 die richtige Länge ist.
+
+Live: `strategies/daily_trend.py` mit `rule: donchian` (settings.yaml), selber
+Abgleich-Loop wie Trend-1, dieselbe Funktion `donchian_hold` im Backtest. Weil
+der Zustand vom Verlauf abhängt, kauft der Bot nach einem Neustart auch einen
+Ausbruch, der schon Tage zurückliegt — im Backtest wäre er dort schon drin.
+Neustart am 28.10. mit 100 €, alte Datenbank gesichert.
+
 ## Nächste Schritte, falls weiterverfolgt
 
 1. **Andere Datenquellen.** Der Bot sieht nur Kerzen. Orderbuchtiefe und

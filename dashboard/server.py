@@ -440,18 +440,26 @@ class DashboardServer:
         }
 
     def _daily_signals(self) -> Dict:
-        """Tages-Trendfilter: Stimmen je Coin (x von 5 Regeln) statt Confluence-Score."""
+        """Tages-Trendfilter: Stimmen je Coin (x von 5 Regeln) statt Confluence-Score.
+        Donchian: Lage des Schlusskurses im Kanal (0 = Tief, 1 = Ausbruchs-Hoch)."""
         bot = self.bot
         strategy = bot.daily_trend
+        donchian = strategy.rule == 'donchian'
         coins = []
         for symbol, v in sorted(strategy.last_votes.items()):
-            ja = ', '.join(r for r, ok in v.rules.items() if ok) or 'keine'
+            if donchian:
+                span = (v.upper - v.lower) or 1.0
+                score = min(1.0, max(0.0, (v.close - v.lower) / span))
+            else:
+                score = v.votes / 5
             coins.append({
                 'symbol': symbol,
                 'coin': coin_of(symbol),
                 'price': bot.crypto_feed.get_price(symbol),
-                'score': v.votes / 5,
-                'decision': f"{v.votes}/5 Regeln ({ja}) → {'halten' if v.hold else 'draußen'}",
+                'score': score,
+                'decision': v.describe(),
+                'hold': v.hold,
+                'upper': v.upper,
                 'time': v.candle_date.isoformat(timespec='seconds'),
                 'regime': None,
                 'market': self._market_info(symbol),
@@ -459,9 +467,11 @@ class DashboardServer:
             })
         last_cycle = getattr(bot, '_last_cycle_at', None)
         return {
-            'threshold': strategy.min_votes / 5,
+            'threshold': 1.0 if donchian else strategy.min_votes / 5,
             'scale_min': 0.0,
-            'kind': 'daily_trend',
+            'kind': 'donchian' if donchian else 'daily_trend',
+            'entry_days': strategy.entry_days,
+            'exit_days': strategy.exit_days,
             'feed': type(bot.crypto_feed).__name__,
             'last_cycle': last_cycle.isoformat(timespec='seconds') if last_cycle else None,
             'coins': coins,
@@ -561,7 +571,8 @@ class DashboardServer:
             n, w, pnl = by_key.get(k, (0, 0, 0.0))
             out.append({
                 'key': k,
-                'name': strategy_name(k),
+                'name': ('Donchian-Ausbruch' if k == 'daily_trend' and cfg.get(k, {}).get('rule') == 'donchian'
+                         else strategy_name(k)),
                 'enabled': bool(cfg.get(k, {}).get('enabled')),
                 'trades': n,
                 'win_rate': (w / n) if n else None,

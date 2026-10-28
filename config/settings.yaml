@@ -93,8 +93,11 @@ strategies:
   # ============================================================
   # CONFLUENCE (Phase 1-6 neues Multi-Factor System) — aktiviert
   # ============================================================
+  # 28.10.2026: abgeschaltet — Panda-9 handelt jetzt den Donchian-Ausbruch
+  # (daily_trend unten). Live 11.–28.10.: 16 Trades, 1 Gewinner, −6,6 %;
+  # passt zur Faktor-Analyse (kein Signal im Score, docs/BACKTEST_BEFUNDE.md).
   confluence:
-    enabled: true
+    enabled: false
     interval_seconds: 45
     # ACHTUNG Skala: Der Confluence-Score liegt auf 0-1 (gewichtetes Mittel der
     # Faktor-Scores). Die alten Werte 5.8/3.5 stammten von einer nie umgesetzten
@@ -131,11 +134,27 @@ strategies:
     min_signal_confidence: 0.0    # Gate im Loop aus — min_confluence_score im Aggregator ist maßgeblich
     loss_cooldown_seconds: 1800   # Symbol 30 Min pausieren nach Verlust-Exit (gegen Verlustketten)
 
+  # ============================================================
+  # DONCHIAN-AUSBRUCH auf Tageskerzen (Panda-9 seit 28.10.2026)
+  # ============================================================
+  # Kauf, wenn der Tagesschluss über dem 20-Tage-Hoch liegt; Verkauf, wenn er
+  # unter das 10-Tage-Tief fällt (Turtle-System 1). Kein TP/SL. Backtest mit
+  # 100 €, 0,25 %, je Coin 20 % (angehoben auf 30 € Mindestorder), höchstens
+  # 2 Positionen, BTC+ETH+SOL ab 02/2021: +107 % (Halten +41 %), größter
+  # Rückgang 28 % (60 %); vote3 kam auf +190 % (49 %). Details und alle
+  # Varianten: docs/BACKTEST_BEFUNDE.md, „Donchian-Ausbruch".
+  daily_trend:
+    enabled: true
+    rule: donchian
+    entry_days: 20
+    exit_days: 10
+    check_interval_s: 900     # Soll/Ist-Abgleich alle 15 Minuten
+
 risk:
   max_risk_per_trade: 0.02      # 2% des Portfolios
   max_daily_drawdown: 0.10       # 10% → Pause bis nächster Tag
   max_position_size: 0.20        # 20% des Portfolios pro Position
-  max_leverage: 50               # Absolutes Leverage-Limit
+  max_leverage: 1                # Spot-Börse: kein Hebel (war 50, Ä9)
   max_concurrent_positions: 2
   cooldown_after_losses: 300     # 5 Min Pause nach 3 Verlusten
 

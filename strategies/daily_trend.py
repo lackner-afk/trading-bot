@@ -11,6 +11,10 @@ Der Wert liegt im Crash-Schutz, nicht im Timing: 2022 verlor Halten 65–76 %,
 die Mehrheitsregel 21–37 %. Keine Einzelregel war überall die beste, darum die
 Mehrheit. tools/backtest_daily.py rechnet mit denselben Funktionen.
 
+Zweite Regel (`rule: donchian`, Panda-9 seit 28.10.2026): Donchian-Ausbruch —
+Kauf über dem 20-Tage-Hoch, Verkauf unter dem 10-Tage-Tief. Gleicher Ablauf,
+nur eine andere Trendfamilie, damit beide Paper-Bots Verschiedenes testen.
+
 Kurse: öffentliche Kraken-Tageskerzen in EUR (kein Key nötig). Fusion liefert
 die Ausführungspreise wie bei jeder anderen Strategie.
 """
@@ -43,6 +47,30 @@ def vote_count(close: pd.Series) -> pd.Series:
     return sum(rule_signal(close, r).astype(int) for r in RULES)
 
 
+def donchian_hold(high: pd.Series, low: pd.Series, close: pd.Series,
+                  entry: int, exit: int) -> pd.Series:
+    """
+    Donchian-Ausbruch (Turtle-Regel): einsteigen, wenn der Schlusskurs über dem
+    höchsten Hoch der vorigen `entry` Tage liegt; halten, bis er unter das
+    tiefste Tief der vorigen `exit` Tage fällt. True = am Tagesschluss halten.
+
+    Anders als die Mehrheitsregel hängt der Zustand vom Weg ab — dieselbe
+    Kerze kann je nach Vorgeschichte halten oder nicht. Darum wird er über die
+    ganze Historie fortgeschrieben; live und im Backtest dieselbe Funktion.
+    """
+    upper = high.rolling(entry).max().shift(1)
+    lower = low.rolling(exit).min().shift(1)
+    state = False
+    out = []
+    for c, up, lo in zip(close.to_numpy(), upper.to_numpy(), lower.to_numpy()):
+        if not state and c > up:
+            state = True
+        elif state and c < lo:
+            state = False
+        out.append(state)
+    return pd.Series(out, index=close.index)
+
+
 @dataclass
 class TrendVote:
     symbol: str
@@ -51,6 +79,17 @@ class TrendVote:
     candle_date: datetime   # Datum der zuletzt abgeschlossenen Tageskerze (UTC)
     close: float
     rules: Dict[str, bool]
+    # Nur Donchian: Kanal für die nächste Kerze (Ausbruchs-Hoch, Ausstiegs-Tief)
+    upper: Optional[float] = None
+    lower: Optional[float] = None
+
+    def describe(self) -> str:
+        """Einzeiler für Log und Dashboard."""
+        verdict = 'halten' if self.hold else 'draußen'
+        if self.upper is not None:
+            return (f"Schluss {self.close:.2f} · Hoch {self.upper:.2f} · Tief {self.lower:.2f} → {verdict}")
+        ja = ', '.join(r for r, ok in self.rules.items() if ok) or 'keine'
+        return f"{self.votes}/5 Regeln ({ja}) → {verdict}"
 
 
 class DailyTrendStrategy:
@@ -58,6 +97,11 @@ class DailyTrendStrategy:
         self.config = config or {}
         self.logger = logging.getLogger('DailyTrend')
         self.min_votes = int(self.config.get('min_votes', MIN_VOTES))
+        self.rule = self.config.get('rule', 'vote')       # vote | donchian
+        self.entry_days = int(self.config.get('entry_days', 20))
+        self.exit_days = int(self.config.get('exit_days', 10))
+        if self.rule not in ('vote', 'donchian'):
+            raise ValueError(f"daily_trend.rule unbekannt: {self.rule}")
         self.last_votes: Dict[str, TrendVote] = {}
         self._exchange = None
 
@@ -66,8 +110,14 @@ class DailyTrendStrategy:
         """BTC_EUR -> BTC/EUR"""
         return symbol.replace('_', '/')
 
-    async def fetch_daily_closes(self, symbol: str) -> Optional[pd.Series]:
-        """Abgeschlossene Tageskerzen (Schlusskurse) von Kraken, ältestes zuerst."""
+    @property
+    def label(self) -> str:
+        if self.rule == 'donchian':
+            return f"Donchian {self.entry_days}/{self.exit_days} Tage"
+        return f"mindestens {self.min_votes} von 5 Regeln"
+
+    async def fetch_daily(self, symbol: str) -> Optional[pd.DataFrame]:
+        """Abgeschlossene Tageskerzen (Hoch, Tief, Schluss) von Kraken, ältestes zuerst."""
         import ccxt.async_support as ccxt
         if self._exchange is None:
             self._exchange = ccxt.kraken({'enableRateLimit': True})
@@ -82,12 +132,29 @@ class DailyTrendStrategy:
         # Die heutige Kerze ist noch offen — nur auf abgeschlossenen entscheiden
         today = pd.Timestamp(datetime.now(timezone.utc).date())
         df = df[df['date'] < today]
-        return df.set_index('date')['close'].astype(float)
+        return df.set_index('date')[['high', 'low', 'close']].astype(float)
 
-    def evaluate(self, symbol: str, close: pd.Series) -> Optional[TrendVote]:
-        if close is None or len(close) <= max(int(r[3:]) for r in RULES):
-            self.logger.warning(f"{symbol}: zu wenig Tageskerzen ({0 if close is None else len(close)})")
+    def evaluate(self, symbol: str, daily: pd.DataFrame) -> Optional[TrendVote]:
+        need = self.entry_days * 3 if self.rule == 'donchian' else max(int(r[3:]) for r in RULES)
+        if daily is None or len(daily) <= need:
+            self.logger.warning(f"{symbol}: zu wenig Tageskerzen ({0 if daily is None else len(daily)})")
             return None
+        close = daily['close']
+        if self.rule == 'donchian':
+            hold = bool(donchian_hold(daily['high'], daily['low'], close,
+                                      self.entry_days, self.exit_days).iloc[-1])
+            vote = TrendVote(
+                symbol=symbol,
+                votes=int(hold),
+                hold=hold,
+                candle_date=close.index[-1].to_pydatetime(),
+                close=float(close.iloc[-1]),
+                rules={'ausbruch': hold},
+                upper=float(daily['high'].iloc[-self.entry_days:].max()),
+                lower=float(daily['low'].iloc[-self.exit_days:].min()),
+            )
+            self.last_votes[symbol] = vote
+            return vote
         rules = {r: bool(rule_signal(close, r).iloc[-1]) for r in RULES}
         votes = sum(rules.values())
         vote = TrendVote(

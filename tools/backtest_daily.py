@@ -14,12 +14,17 @@ beste heraussuchen:
   vote3       halten, solange mindestens 3 der 5 Regeln oben halten wollen
               (am 14.10.2026 nachträglich ergänzt, nach T1 — Kandidat für den
               Live-Betrieb, weil keine Einzelregel überall die beste war)
+  don20/don55 Donchian-Ausbruch: Kauf über dem 20-/55-Tage-Hoch, Verkauf unter
+              dem 10-/20-Tage-Tief (Turtle-Systeme 1 und 2; am 28.10.2026 vor
+              dem Lauf festgelegt, Kandidat für den Umbau von Panda-9)
 
 Umgebung:
   TAKER_FEE=0.0025  START_CAPITAL=100  MIN_ORDER_AMOUNT=30
   POSITION_FRACTION=0.2  (Anteil des Kapitals je Coin; leer = gleichmäßig
                           aufteilen. Live gilt die harte 20-%-Grenze des
                           RiskManagers.)
+  MAX_POSITIONS=1   (höchstens so viele Coins gleichzeitig; leer = alle.
+                     Wollen mehr Coins rein, gewinnt die Reihenfolge in SYMBOLS)
   SYMBOLS=BTC/USDT,ETH/USDT,SOL/USDT
   SINCE=2018-01-01  (Startdatum der Datenabfrage; Bewertung beginnt, sobald
                      alle Coins 200 Tage Vorlauf haben)
@@ -41,6 +46,7 @@ _spec = importlib.util.spec_from_file_location(
 _daily_trend = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_daily_trend)
 MIN_VOTES, rule_signal, vote_count = _daily_trend.MIN_VOTES, _daily_trend.rule_signal, _daily_trend.vote_count
+donchian_hold = _daily_trend.donchian_hold
 
 # Über die Umgebung änderbar, z. B. SYMBOLS=BTC/USDT,ETH/USDT — wichtig gegen
 # Auswahl-Verzerrung: SOL stieg 2021 auf das ~18-Fache und trägt viel vom Ergebnis.
@@ -50,9 +56,11 @@ START_CAPITAL = float(os.environ.get('START_CAPITAL', 100.0))
 MIN_ORDER_AMOUNT = float(os.environ.get('MIN_ORDER_AMOUNT', 30.0))
 SINCE = os.environ.get('SINCE', '2018-01-01')
 POSITION_FRACTION = float(os.environ.get('POSITION_FRACTION') or 1 / len(SYMBOLS))
+MAX_POSITIONS = int(os.environ.get('MAX_POSITIONS') or len(SYMBOLS))
 WARMUP = 200
 
-VARIANTS = ['hold', 'sma50', 'sma100', 'sma200', 'mom30', 'mom90', 'vote3']
+VARIANTS = ['hold', 'sma50', 'sma100', 'sma200', 'mom30', 'mom90', 'vote3', 'don20', 'don55']
+DONCHIAN = {'don20': (20, 10), 'don55': (55, 20)}
 
 
 def fetch_daily(exchange, symbol):
@@ -71,11 +79,14 @@ def fetch_daily(exchange, symbol):
     df['date'] = pd.to_datetime(df['ts'], unit='ms', utc=True).dt.tz_localize(None)
     # Die heutige Tageskerze ist noch nicht abgeschlossen
     df = df[df['date'] < pd.Timestamp.utcnow().tz_localize(None).normalize()]
-    return df.set_index('date')[['open', 'close']]
+    return df.set_index('date')[['open', 'high', 'low', 'close']]
 
 
-def signals(close: pd.Series, variant: str) -> pd.Series:
+def signals(df: pd.DataFrame, variant: str) -> pd.Series:
     """True = am Tagesschluss halten wollen."""
+    close = df['close']
+    if variant in DONCHIAN:
+        return donchian_hold(df['high'], df['low'], close, *DONCHIAN[variant])
     if variant == 'hold':
         return pd.Series(True, index=close.index)
     if variant == 'vote3':
@@ -86,7 +97,7 @@ def signals(close: pd.Series, variant: str) -> pd.Series:
 def simulate(data: dict, variant: str, start, end):
     """Tagesweise Simulation von start bis end (inklusive)."""
     dates = [d for d in data[SYMBOLS[0]].index if start <= d <= end]
-    sig = {s: signals(data[s]['close'], variant) for s in SYMBOLS}
+    sig = {s: signals(data[s], variant) for s in SYMBOLS}
     cash = START_CAPITAL
     units = {s: 0.0 for s in SYMBOLS}
     fees = 0.0
@@ -108,6 +119,8 @@ def simulate(data: dict, variant: str, start, end):
                     trades += 1
                     units[s] = 0.0
                 elif want and units[s] == 0:
+                    if sum(1 for u in units.values() if u > 0) >= MAX_POSITIONS:
+                        continue
                     budget = equity_open * POSITION_FRACTION
                     # Wie live (main.py _execute_signal): zu kleine Order auf die
                     # Mindestgröße anheben, solange sie höchstens das halbe Kapital
@@ -151,7 +164,7 @@ def main():
     start, end = common[WARMUP], common[-1]
     print(f"Bewertung {start.date()} bis {end.date()} ({len(common) - WARMUP} Tage), "
           f"Gebühr {TAKER_FEE:.2%}, Start {START_CAPITAL:.0f} €, Mindestorder {MIN_ORDER_AMOUNT:.0f} €, "
-          f"je Coin {POSITION_FRACTION:.0%}\n")
+          f"je Coin {POSITION_FRACTION:.0%}, höchstens {MAX_POSITIONS} Positionen\n")
 
     full = {v: simulate(data, v, start, end) for v in VARIANTS}
     print(f"{'Variante':9s} {'Ende €':>9s} {'gesamt':>9s} {'p.a.':>7s} {'MaxDD':>6s} {'Sharpe':>6s} {'Trades':>6s} {'Gebühr €':>9s}")
