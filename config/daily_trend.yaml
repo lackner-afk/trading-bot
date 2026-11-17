@@ -10,6 +10,12 @@ general:
   start_capital: 1000
 
 strategies:
+  # Trend-1 bleibt bei drei Coins (eine Position je Coin) — XRP testet nur Panda-9.
+  momentum:
+    pairs:
+      - BTC_EUR
+      - ETH_EUR
+      - SOL_EUR
   confluence:
     enabled: false
   daily_trend:

@@ -52,10 +52,16 @@ strategies:
   momentum:
     enabled: false
     leverage: 10
+    # Diese Liste gilt für ALLE Strategien, auch den Tagestrend. Die Reihenfolge
+    # zählt: sind weniger Plätze frei als Kaufsignale, gewinnt die Coin weiter oben.
+    # XRP seit 17.11.2026 (Panda-9): im Backtest mehr Trades (186 statt 164), aber
+    # kein messbarer Mehrertrag (+114 % gegen +107 %, Rückgang 33 % gegen 28 %).
+    # Führt Fusion ein Paar nicht, streicht der Feed es beim Start (steht im bot.log).
     pairs:
       - BTC_EUR
       - ETH_EUR
       - SOL_EUR
+      - XRP_EUR
     take_profit: 0.015       # 1.5%
     stop_loss: 0.008         # 0.8%
     trailing_stop: 0.005     # 0.5%
