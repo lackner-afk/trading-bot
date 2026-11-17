@@ -443,3 +443,88 @@ Neustart am 28.10. mit 100 €, alte Datenbank gesichert.
 
 Je Lauf stehen im JSON-Ergebnis zusätzlich `long_pnl`, `short_pnl`,
 `short_wins` und `fees` (Summe der Gebühren).
+
+## Unabhängige Prüfung (17.11.2026): Tagestrend gegen Zufall und außerhalb der Stichprobe
+
+Werkzeug: `tools/robustness_daily.py` (gleicher Simulator wie `backtest_daily.py`).
+Daten: Binance-Tageskerzen bis 16.11.2026, 0,25 % je Order, Mindestorder 30 €.
+
+**Die +107 % für don20 sind reproduzierbar** (BTC+ETH+SOL ab 02/2021, 100 €,
+je Coin 20 %, höchstens 2 Positionen: +107,2 %, Rückgang 27,8 %, 82 Rundreisen,
+15,87 € Gebühren). Halten liegt bis heute bei +19,5 % statt der oben genannten
++41 % — der Markt ist seit Ende Oktober gefallen.
+
+### Zufalls-Baseline
+
+Je Coin dieselben Halte- und Pausenphasen (gleiche Zahl Trades, gleiche Zeit im
+Markt), nur in zufälliger Reihenfolge. Anteil der Zufallsläufe, die mindestens
+so gut sind wie die Regel:
+
+| Lauf | Regel | Zufall Median (5–95 %) | Rendite | Sharpe | Rückgang |
+|---|---|---|---|---|---|
+| don20, 3 Coins ab 02/2021, 100 €, max. 2 (**Panda-9**) | +107 % | +77 % (−43 bis +245 %) | **33 %** | 35 % | 6,5 % |
+| don20, BTC+ETH ab 03/2018, 100 €, max. 2 | +328 % | +97 % (−46 bis +247 %) | 0,7 % | 3 % | 7,5 % |
+| don20, 3 Coins **EUR** ab 12/2021, 100 €, max. 2 | +35 % | −20 % (−54 bis +90 %) | 32 % | 30 % | 6 % |
+| vote3, 3 Coins ab 02/2021, 1000 €, max. 3 (**Trend-1**) | +279 % | +60 % (−22 bis +229 %) | 3,5 % | 10 % | 57 % |
+
+In der Konfiguration, die Panda-9 tatsächlich fährt, ist die Rendite **nicht von
+Zufalls-Timing unterscheidbar** — ein Drittel der Würfelläufe ist gleich gut
+oder besser. Belegbar ist am ehesten der kleinere Rückgang (6–8 %), und das
+gute Ergebnis ab 2018 stammt aus den Jahren vor 2023.
+
+### Zeit-Split und Walk-forward
+
+| | 1. Hälfte | 2. Hälfte (ab 01/2024 bzw. 07/2022) |
+|---|---|---|
+| don20, 3 Coins ab 02/2021 | +130 % (Sharpe 1,13) | **−9 %** (Sharpe −0,02) |
+| Halten, gleiche Größe | +14 % | +9 % |
+| don20, BTC+ETH ab 03/2018 | +318 % (Sharpe 1,28) | +9 % (Sharpe 0,20) |
+| Halten, gleiche Größe | +31 % | +87 % |
+| vote3, 3 Coins, 1000 € | +179 % | +25 % (Halten +2 %) |
+
+Je Kalenderjahr (3 Coins, jedes Jahr frisch 100 €): don20 2024 +3 % (Halten
++46 %), 2025 −5 % (−6 %), 2026 −10 % (−20 %).
+
+Walk-forward (Einstiegslänge N aus 5–100 auf den 730 Tagen davor nach Sharpe
+gewählt, 365 Tage gehandelt, verkettet): 3 Coins ab 02/2023 gewählt +48 %,
+fest 20 +57 %, Halten +57 %. BTC+ETH ab 03/2020: gewählt +108 %, fest 20
++305 %, Halten +490 %. **Die Auswahl der Länge auf Vergangenheitsdaten bringt
+nichts** — die gewählte Länge springt (5, 30, 20, 15, 100, 10, 40).
+
+Parameterfläche (3 Coins): N=10 +204 %, 15 +165 %, **20 +107 %**, 30 +126 %,
+40 +91 %, 55 +64 %, 80 +238 %, 100 +242 %. Kein Plateau, aber überall positiv
+und überall kleinerer Rückgang als Halten (26–54 % gegen 60 %).
+
+Rollierende 2-Jahres-Läufe (Start jeden Monat, überlappend): don20 schlägt
+Halten in **42 %** der Fälle (beide Körbe); negativ in 31 % (3 Coins, Halten
+38 %) bzw. 14 % (BTC+ETH, Halten 28 %).
+
+### Was das heißt
+
+- **Belegt:** Die Regel halbiert etwa den größten Rückgang. **Nicht belegt:**
+  dass sie mehr Rendite bringt als Halten oder als zufälliges Ein- und
+  Aussteigen mit gleicher Marktzeit. Seit 2024 hat sie nichts verdient.
+- **100 € schmeicheln dem Backtest:** Mit 100 € ist jede Position 30 € = 30 %
+  des Kapitals (Mindestorder), mit 1000 € sind es 20 %. Derselbe Lauf mit
+  1000 € bringt +80 % statt +107 %. Der Unterschied ist Positionsgröße über
+  der 20-%-Grenze, kein Signalvorteil.
+- **Kosten sind hier kein Problem:** 82 Rundreisen in 5,7 Jahren. Selbst 1 %
+  je Seite lässt +67 % übrig (0 %: +122 %).
+- **Signalquelle:** Live entscheidet auf Kraken-EUR-Kerzen, der Backtest auf
+  Binance-USDT. Über 660 Tage unterscheidet sich der don20-Zustand an 70 (BTC),
+  37 (ETH) und 34 (SOL) Tagen — 5–11 % der Zeit steht live etwas anderes als im
+  Backtest. Gegen Binance-EUR sind es 19 / 6 / 16 Tage.
+- **Tageslimit:** Im Backtest-Depot gab es einen Tag mit ≥10 % Verlust
+  (−18,6 %). Live hätte der Risk-Loop dort alles verkauft; der Backtest bildet
+  das nicht ab.
+- **Nicht messbar von hier:** die echten Paper-Ergebnisse beider Bots
+  (Datenbanken liegen nur auf dem VPS) und der echte Fusion-Spread.
+
+### Alter Backtest (`backtest.py`)
+
+Lauf am 17.11.2026, Binance 1h, 19.08.–17.11.2026, Hebel 10, mit Shorts:
+Momentum −74,3 % (397 Trades, Sharpe −4,55), Mean Reversion −77,2 %, Breakout
++27,8 %, Scalper 0 Trades; Halten −5,3 %. Die in `momentum.py` genannten
+„+4,2 %, Sharpe 1,14" lassen sich nicht nachstellen. Der Backtest rechnet eine
+andere Regel als der Live-Pfad (Zustand statt Kreuzung, 1h statt 5m, Hebel 10
+und Shorts statt Spot) — seine Zahlen sagen nichts über den Bot.
