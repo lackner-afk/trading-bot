@@ -149,6 +149,17 @@ class Portfolio:
             )
         ''')
 
+        # Tagesstart und Verlustserie überleben einen Neustart — sonst setzt
+        # jeder Neustart das Tageslimit und den Verlust-Cooldown zurück.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS daily_state (
+                id INTEGER PRIMARY KEY,
+                day TEXT NOT NULL,
+                daily_start_balance REAL NOT NULL,
+                consecutive_losses INTEGER NOT NULL
+            )
+        ''')
+
         conn.commit()
         conn.close()
 
@@ -173,13 +184,21 @@ class Portfolio:
             data['timestamp'] = datetime.fromisoformat(data['timestamp'])
             self.positions[row[0]] = Position(**data)
 
+        cursor.execute('SELECT day, daily_start_balance, consecutive_losses FROM daily_state WHERE id = 1')
+        daily = cursor.fetchone()
+
         conn.close()
         self._update_equity()
         # Tagesstart nach einem Neustart: die geladene Equity, nicht start_capital.
         # Sonst schloss der erste Risiko-Check alles, sobald das Konto 10 % unter
-        # dem Startkapital lag — bei jedem Neustart. Ein Verlust vor dem Neustart
-        # am selben Tag geht dabei verloren (Tagesstart wird nicht gespeichert).
+        # dem Startkapital lag — bei jedem Neustart.
         self.daily_start_balance = self.equity
+        if daily:
+            self.consecutive_losses = int(daily[2])
+            # Neustart am selben Tag: der gespeicherte Tagesstart gilt weiter,
+            # ein Verlust von vor dem Neustart zählt also noch zum Tageslimit.
+            if daily[0] == self.day_start.isoformat() and daily[1] > 0:
+                self.daily_start_balance = float(daily[1])
 
     def _save_state(self):
         """Speichert Portfolio-Zustand in DB"""
@@ -198,6 +217,11 @@ class Portfolio:
             data['timestamp'] = pos.timestamp.isoformat()
             cursor.execute('INSERT INTO positions (symbol, data) VALUES (?, ?)',
                           (symbol, json.dumps(data)))
+
+        cursor.execute('''
+            INSERT OR REPLACE INTO daily_state (id, day, daily_start_balance, consecutive_losses)
+            VALUES (1, ?, ?, ?)
+        ''', (self.day_start.isoformat(), self.daily_start_balance, self.consecutive_losses))
 
         conn.commit()
         conn.close()
@@ -219,6 +243,7 @@ class Portfolio:
             self.daily_start_balance = self.equity
             self.day_start = datetime.now().date()
             self.daily_pnl = 0.0
+            self._save_state()
 
     def open_position(self, symbol: str, side: str, size: float, price: float,
                      leverage: float, strategy: str, stop_loss: float = None,
@@ -361,11 +386,18 @@ class Portfolio:
         if len(self.equity_history) < 2:
             return 0.0
 
-        # Stündliche Returns berechnen
+        # Die Historie wird im Sekundentakt geschrieben. Für stündliche Returns
+        # zählt je Stunde der letzte Wert — sonst würden Sekunden-Returns mit dem
+        # Stunden-Faktor annualisiert (Sharpe um den Faktor ~60 zu klein).
+        hourly: Dict[datetime, float] = {}
+        for ts, eq in self.equity_history:
+            hourly[ts.replace(minute=0, second=0, microsecond=0)] = eq
+        equities = [hourly[k] for k in sorted(hourly)]
+
         returns = []
-        for i in range(1, len(self.equity_history)):
-            prev_eq = self.equity_history[i-1][1]
-            curr_eq = self.equity_history[i][1]
+        for i in range(1, len(equities)):
+            prev_eq = equities[i-1]
+            curr_eq = equities[i]
             if prev_eq > 0:
                 returns.append((curr_eq - prev_eq) / prev_eq)
 
