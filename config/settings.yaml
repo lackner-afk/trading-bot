@@ -52,10 +52,16 @@ strategies:
   momentum:
     enabled: false
     leverage: 10
+    # Diese Liste gilt für ALLE Strategien, auch den Tagestrend. Die Reihenfolge
+    # zählt: sind weniger Plätze frei als Kaufsignale, gewinnt die Coin weiter oben.
+    # XRP seit 17.11.2026 (Panda-9): im Backtest mehr Trades (186 statt 164), aber
+    # kein messbarer Mehrertrag (+114 % gegen +107 %, Rückgang 33 % gegen 28 %).
+    # Führt Fusion ein Paar nicht, streicht der Feed es beim Start (steht im bot.log).
     pairs:
       - BTC_EUR
       - ETH_EUR
       - SOL_EUR
+      - XRP_EUR
     take_profit: 0.015       # 1.5%
     stop_loss: 0.008         # 0.8%
     trailing_stop: 0.005     # 0.5%
@@ -166,6 +172,12 @@ exchange_rules:
   # einen eigenen Mindestbetrag pro Paar, gilt der — steht im bot.log als
   # "BTC_EUR: min. Ordervolumen ... EUR" (Fusion: 30 EUR je Paar, Stand 06.10.2026).
   min_order_eur: 30
+  # Ein kleines Konto kommt mit 20 % je Position nicht auf die Mindestorder
+  # (100 € → 20 € < 30 €). true: genau die Mindestorder ist trotzdem erlaubt,
+  # solange sie höchstens das halbe Kapital bindet (bewusst entschieden am
+  # 17.11.2026). false: dann handelt der Bot erst ab ~150 € Kapital.
+  # Tageslimit (10 %) und Risiko je Trade (2 %) bleiben davon unberührt.
+  allow_min_order_exception: true
 
 fees:
   # Bitpanda Fusion Stufe 1 (siehe docs/BACKTEST_BEFUNDE.md). Der Bot setzt nur

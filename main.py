@@ -192,8 +192,14 @@ class TradingBot:
                     "SHADOW MODE: Orders werden simuliert, NICHT an die Börse geschickt."
                 )
             else:
-                self.logger.critical(
-                    "!!! SHADOW MODE AUS — es werden ECHTE Orders mit ECHTEM GELD platziert !!!"
+                # Der Live-Pfad ist unvollständig: _close_position bucht den Ausstieg
+                # nur lokal und schickt KEINE Verkaufsorder, und die LiveOrderEngine
+                # meldet die gefüllte Menge in Coins, die hier als EUR gebucht wird.
+                # Mit echtem Geld hieße das: kaufen, aber nie verkaufen.
+                raise RuntimeError(
+                    "Echte Orders sind gesperrt: der Live-Pfad sendet keine Verkaufsorders "
+                    "(main.py _close_position) und verbucht Füllmengen in der falschen Einheit. "
+                    "Erst beheben und testen, dann diese Sperre entfernen."
                 )
 
             # Echte Execution Engine
@@ -211,7 +217,15 @@ class TradingBot:
             )
         else:
             # === PAPER MODE (Standard) ===
-            self.order_engine = OrderEngine(config=fees_config)
+            # Der Abschnitt slippage: (min/max) wurde nie durchgereicht — die Engine
+            # las slippage_min/slippage_max aus dem fees-Abschnitt und nahm die Defaults.
+            slippage_config = self.config.get('slippage', {}) or {}
+            engine_config = dict(fees_config)
+            if 'min' in slippage_config:
+                engine_config['slippage_min'] = slippage_config['min']
+            if 'max' in slippage_config:
+                engine_config['slippage_max'] = slippage_config['max']
+            self.order_engine = OrderEngine(config=engine_config)
             data_feed = general.get('data_feed', 'bitpanda')
             bitpanda_key = os.getenv('BITPANDA_API_KEY')
             if data_feed == 'bitpanda' and bitpanda_key:
@@ -286,6 +300,9 @@ class TradingBot:
         exchange_rules = self.config.get('exchange_rules', {})
         self.spot_only: bool = bool(exchange_rules.get('spot_only', True))
         self._min_order_fallback: float = float(exchange_rules.get('min_order_eur', 10.0))
+        # Darf die Mindestorder die Positionsgrenze (20 %) überschreiten? Ohne das
+        # kann ein 100-€-Konto bei 30 € Mindestorder gar nicht handeln.
+        self._allow_min_order_exception: bool = bool(exchange_rules.get('allow_min_order_exception', False))
         self._throttled_logs: Dict[str, datetime] = {}
 
         # Dashboard: Verlauf, Aktivitäts-Feed und Pause-Schalter
@@ -899,55 +916,68 @@ class TradingBot:
         self.logger.info(f"Tages-Trendfilter gestartet (alle {interval:.0f} s, {self.daily_trend.label})")
 
         while self.running:
-            prices = self.crypto_feed.get_prices(max_age_seconds=self._max_price_age)
-            for symbol in self._pairs:
+            # list(): FusionFeed kann die geteilte Paar-Liste beim Start kürzen
+            for symbol in list(self._pairs):
+                # Ein Fehler bei einer Coin darf die übrigen nicht mitreißen —
+                # sonst startete der Supervisor den ganzen Loop mit Wartezeit neu.
                 try:
-                    daily = await self.daily_trend.fetch_daily(symbol)
+                    await self._daily_trend_step(symbol, logged)
+                except asyncio.CancelledError:
+                    raise
                 except Exception as e:
-                    self._log_throttled(f"daily:{symbol}",
-                                        f"[TAGESTREND] {symbol}: Tageskerzen nicht ladbar: {e!r}")
-                    continue
-                vote = self.daily_trend.evaluate(symbol, daily)
-                if vote is None:
-                    continue
-                self._last_cycle_at = datetime.now()
-
-                # Einmal je neuer Tageskerze ins Log — nicht alle 15 Minuten
-                key = (vote.candle_date, vote.votes)
-                if logged.get(symbol) != key:
-                    logged[symbol] = key
-                    self.logger.info(f"[TAGESTREND] {symbol} Kerze {vote.candle_date:%d.%m.}: {vote.describe()}")
-
-                price = prices.get(symbol)
-                if price is None:
-                    continue
-                position = self.portfolio.positions.get(symbol)
-
-                if vote.hold and position is None:
-                    # Nach dem Tageslimit schließt der Risk-Loop alles — nicht gleich wieder kaufen
-                    if self.portfolio.get_daily_drawdown() >= self.risk_manager.max_daily_drawdown:
-                        self._log_throttled(f"daily-dd:{symbol}",
-                                            f"[TAGESTREND] {symbol}: Tageslimit erreicht — Einstieg morgen.")
-                        continue
-                    signal = ScalperSignal(
-                        signal_type=SignalType.LONG,
-                        symbol=symbol,
-                        price=price,
-                        confidence=1.0 if vote.upper is not None else vote.votes / 5,
-                        reason=f"Tagestrend: {vote.describe()}",
-                        # Kein TP/SL: raus geht es nur, wenn der Tagestrend kippt
-                        take_profit=0.0,
-                        stop_loss=0.0,
-                        suggested_leverage=1,
-                    )
-                    await self._execute_signal(signal, strategy_name='daily_trend')
-
-                elif not vote.hold and position is not None and position.market_type == 'daily_trend':
-                    await self._close_position(
-                        symbol, price, f"Tagestrend gekippt: {vote.describe()}"
-                    )
+                    self.logger.error(f"[TAGESTREND] {symbol}: Abgleich fehlgeschlagen: {e!r}")
 
             await asyncio.sleep(interval)
+
+    async def _daily_trend_step(self, symbol: str, logged: Dict[str, tuple]):
+        """Ein Soll/Ist-Abgleich für eine Coin."""
+        try:
+            daily = await self.daily_trend.fetch_daily(symbol)
+        except Exception as e:
+            self._log_throttled(f"daily:{symbol}",
+                                f"[TAGESTREND] {symbol}: Tageskerzen nicht ladbar: {e!r}")
+            return
+        vote = self.daily_trend.evaluate(symbol, daily)
+        if vote is None:
+            return
+        self._last_cycle_at = datetime.now()
+
+        # Einmal je neuer Tageskerze ins Log — nicht alle 15 Minuten
+        key = (vote.candle_date, vote.votes)
+        if logged.get(symbol) != key:
+            logged[symbol] = key
+            self.logger.info(f"[TAGESTREND] {symbol} Kerze {vote.candle_date:%d.%m.}: {vote.describe()}")
+
+        # Preis erst NACH dem Laden der Tageskerzen holen: der Abruf dauert, und
+        # ein vorher gezogener Preis wäre bei der letzten Coin mehrere Abrufe alt.
+        price = self.crypto_feed.get_price(symbol, max_age_seconds=self._max_price_age)
+        if price is None:
+            return
+        position = self.portfolio.positions.get(symbol)
+
+        if vote.hold and position is None:
+            # Nach dem Tageslimit schließt der Risk-Loop alles — nicht gleich wieder kaufen
+            if self.portfolio.get_daily_drawdown() >= self.risk_manager.max_daily_drawdown:
+                self._log_throttled(f"daily-dd:{symbol}",
+                                    f"[TAGESTREND] {symbol}: Tageslimit erreicht — Einstieg morgen.")
+                return
+            signal = ScalperSignal(
+                signal_type=SignalType.LONG,
+                symbol=symbol,
+                price=price,
+                confidence=1.0 if vote.upper is not None else vote.votes / 5,
+                reason=f"Tagestrend: {vote.describe()}",
+                # Kein TP/SL: raus geht es nur, wenn der Tagestrend kippt
+                take_profit=0.0,
+                stop_loss=0.0,
+                suggested_leverage=1,
+            )
+            await self._execute_signal(signal, strategy_name='daily_trend')
+
+        elif not vote.hold and position is not None and position.market_type == 'daily_trend':
+            await self._close_position(
+                symbol, price, f"Tagestrend gekippt: {vote.describe()}"
+            )
 
     async def _risk_check_loop(self):
         """Risk-Check Loop (alle 5 Minuten)"""
@@ -1054,37 +1084,17 @@ class TradingBot:
         if signal.price > 0 and signal.stop_loss > 0:
             sl_distance_pct = abs(signal.price - signal.stop_loss) / signal.price
 
-        # Risk-Check (Phase 5: regime + macro aware)
-        risk_check = self.risk_manager.check_trade(
-            portfolio_equity=state.equity,
-            position_size=state.equity * 0.1,
-            leverage=leverage,
-            current_positions=len(state.positions),
-            consecutive_losses=self.portfolio.consecutive_losses,
-            daily_drawdown=self.portfolio.get_daily_drawdown(),
-            sl_distance_pct=sl_distance_pct if sl_distance_pct > 0 else None,
-            regime=regime,
-            macro_risk_multiplier=macro_risk_multiplier
-        )
-
-        if risk_check.action == RiskAction.BLOCK:
-            self.logger.warning(f"Trade blockiert: {risk_check.reason}")
-            return
-
-        if risk_check.action == RiskAction.COOLDOWN:
-            self.logger.info(f"Cooldown aktiv: {risk_check.reason}")
-            return
-
         # Position Sizing wie im Backtest: Margin ist der Equity-Anteil,
         # das Notional (= size) ergibt sich daraus mal Hebel.
         if sl_distance_pct > 0 and hasattr(signal, 'atr_value') and signal.atr_value > 0:
             margin = self.risk_manager.size_from_risk(state.equity, sl_distance_pct)
         else:
             margin = state.equity * 0.20
-        # Skaliert auf Kapital: Min 15% des Equity, Max 25% des Equity
+        # Skaliert auf Kapital: mindestens 15 % der Equity, höchstens die
+        # Positionsgrenze des RiskManagers (stand hier auf 25 % — darüber).
         min_margin = max(10.0, state.equity * 0.15)
-        max_margin = state.equity * 0.25
-        margin = max(min_margin, min(max_margin, margin))
+        max_margin = state.equity * self.risk_manager.MAX_POSITION_SIZE
+        margin = max(min(min_margin, max_margin), min(max_margin, margin))
 
         if margin > state.balance or state.balance < 20:
             return
@@ -1092,20 +1102,81 @@ class TradingBot:
         position_size = margin * leverage
 
         # Mindestordergröße der Börse (Fusion: 30 €). Ein kleines Konto liegt mit
-        # 15–25 % darunter — dann auf das Minimum anheben, solange es höchstens die
-        # Hälfte des Kapitals bindet, damit zwei Positionen nebeneinander Platz haben.
+        # 20 % darunter — dann auf das Minimum anheben, solange es höchstens die
+        # Hälfte des Kapitals bindet. Das überschreitet die Positionsgrenze und ist
+        # deshalb eine ausdrückliche Ausnahme (exchange_rules.allow_min_order_exception).
         min_order = self._min_order_amount(signal.symbol)
+        at_min_order = False
         if position_size < min_order:
             bumped_margin = min_order / leverage
-            if bumped_margin <= state.balance and bumped_margin <= state.equity * 0.5:
+            share = bumped_margin / state.equity if state.equity > 0 else 1.0
+            over_limit = share > self.risk_manager.MAX_POSITION_SIZE
+            if (bumped_margin <= state.balance and share <= 0.5
+                    and (not over_limit or self._allow_min_order_exception)):
                 position_size = min_order
+                at_min_order = True
+                if over_limit:
+                    self._log_throttled(
+                        f"oversize:{signal.symbol}",
+                        f"[RISIKO] {signal.symbol}: Mindestorder {min_order:.2f} € = {share:.0%} des Kapitals — "
+                        f"über der Positionsgrenze von {self.risk_manager.MAX_POSITION_SIZE:.0%} "
+                        f"(Ausnahme laut exchange_rules.allow_min_order_exception).",
+                        every_s=86400,
+                    )
             else:
                 self._log_throttled(
                     f"minorder:{signal.symbol}",
                     f"[MINDESTORDER] {signal.symbol}: {position_size:.2f} € unter Börsen-Minimum "
-                    f"{min_order:.2f} € und Anheben würde mehr als das halbe Kapital binden — kein Trade."
+                    f"{min_order:.2f} € und Anheben ist nicht erlaubt "
+                    f"(über der Positionsgrenze oder mehr als das halbe Kapital) — kein Trade."
                 )
                 return
+
+        # Risk-Check mit der ECHTEN Ordergröße (früher: Platzhalter 10 % der Equity,
+        # und eine verlangte Kürzung wurde ignoriert).
+        risk_check = self.risk_manager.check_trade(
+            portfolio_equity=state.equity,
+            position_size=position_size / leverage,
+            leverage=leverage,
+            current_positions=len(state.positions),
+            consecutive_losses=self.portfolio.consecutive_losses,
+            daily_drawdown=self.portfolio.get_daily_drawdown(),
+            sl_distance_pct=sl_distance_pct if sl_distance_pct > 0 else None,
+            regime=regime,
+            macro_risk_multiplier=macro_risk_multiplier,
+            exchange_min_order=(min_order / leverage) if (at_min_order and self._allow_min_order_exception) else None,
+        )
+
+        # CLOSE_ALL (Tageslimit erreicht) fiel früher durch: nur BLOCK und COOLDOWN
+        # wurden abgefangen, der Einstieg lief trotz überschrittenem Limit weiter.
+        if risk_check.action in (RiskAction.BLOCK, RiskAction.CLOSE_ALL):
+            self._log_throttled(
+                f"risk-block:{signal.symbol}",
+                f"Trade blockiert ({signal.symbol}): {risk_check.reason}",
+                every_s=300,
+            )
+            return
+
+        if risk_check.action == RiskAction.COOLDOWN:
+            self.logger.info(f"Cooldown aktiv: {risk_check.reason}")
+            return
+
+        if risk_check.action == RiskAction.REDUCE_SIZE and risk_check.suggested_size is not None:
+            reduced = risk_check.suggested_size * leverage
+            if reduced < min_order:
+                # Kleiner als die Mindestorder geht nicht — dann lieber gar nicht
+                # handeln, als die verlangte Kürzung zu übergehen.
+                self._log_throttled(
+                    f"reduce-skip:{signal.symbol}",
+                    f"[RISIKO] {signal.symbol}: kein Trade — {risk_check.reason}; "
+                    f"gekürzt wären es {reduced:.2f} €, unter der Mindestorder {min_order:.2f} €.",
+                    every_s=3600,
+                )
+                return
+            self.logger.info(
+                f"[RISIKO] {signal.symbol}: {position_size:.2f} € → {reduced:.2f} € ({risk_check.reason})"
+            )
+            position_size = reduced
 
         side = 'buy' if signal.signal_type == SignalType.LONG else 'sell'
 
@@ -1403,8 +1474,18 @@ class TradingBot:
         if not position:
             return
 
-        # Taker-Gebühr aus der Config (Bitpanda Fusion: 0,25 %) — war fest 0,06 %
-        fees = position.size * self.order_engine.fees.get('crypto_taker', 0.0025)
+        # Paper: auch der Verkauf rutscht. Bisher wurde nur der Einstieg mit
+        # Slippage gerechnet, der Ausstieg exakt zum Feed-Kurs — einseitig zu gut.
+        if not self.is_live and hasattr(self.order_engine, 'apply_slippage'):
+            exit_side = 'sell' if position.side == 'long' else 'buy'
+            price = self.order_engine.apply_slippage(price, exit_side, position.size)
+
+        # Taker-Gebühr auf den Verkaufswert, nicht auf den Einstiegswert: eine
+        # Position, die 50 % im Plus liegt, kostet beim Verkauf auch 50 % mehr Gebühr.
+        exit_notional = position.size
+        if position.entry_price > 0:
+            exit_notional = position.size * price / position.entry_price
+        fees = exit_notional * self.order_engine.fees.get('crypto_taker', 0.0025)
 
         trade = self.portfolio.close_position(
             symbol=symbol,

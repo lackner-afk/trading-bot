@@ -19,7 +19,19 @@ python backtest.py --grid
 
 # Monitor logs in real-time
 tail -f bot.log
+
+# Tests (no network needed)
+pip install -r requirements-dev.txt && python -m pytest tests
+
+# Daily-trend backtest and its robustness check (random baseline, walk-forward)
+POSITION_FRACTION=0.2 MAX_POSITIONS=2 python tools/backtest_daily.py
+POSITION_FRACTION=0.2 MAX_POSITIONS=2 python tools/robustness_daily.py
 ```
+
+> **Status 17.11.2026:** the only strategy that trades is `daily_trend` (Donchian 20/10 on daily
+> candles for Panda-9, majority vote for Trend-1). Momentum, scalper, ML and confluence are all
+> `enabled: false`. Measured evidence and its limits: `docs/BACKTEST_BEFUNDE.md`,
+> section "Unabhängige Prüfung (17.11.2026)".
 
 ## Architecture Overview
 
@@ -143,7 +155,15 @@ All feeds compute these on candle data:
 
 ## Strategies
 
-### Momentum (strategies/momentum.py) — ENABLED
+### Daily trend (strategies/daily_trend.py) — ENABLED (the only active strategy)
+
+- Signals from **closed Kraken EUR daily candles**, execution at the feed price on the next 15-minute check
+- `rule: donchian` (Panda-9): buy when the close is above the prior 20-day high, sell below the prior 10-day low
+- `rule: vote` (Trend-1 overlay `config/daily_trend.yaml`): hold while ≥3 of 5 rules (SMA 50/100/200, momentum 30/90) agree
+- No TP/SL; long only, 1x. Same functions are used by `tools/backtest_daily.py`
+- With 100 € the 30 € minimum order makes every position 30 % of equity — above the 20 % position limit (logged as `[RISIKO]`)
+
+### Momentum (strategies/momentum.py) — DISABLED
 
 - **Signal**: EMA9 crosses EMA21 on 5m candles + RSI filter
   - LONG: EMA9 > EMA21 + RSI in [35, 55]
@@ -151,8 +171,9 @@ All feeds compute these on candle data:
 - **1h trend filter**: Blocks longs in downtrends, blocks shorts in uptrends
 - **ATR-based sizing**: SL = ATR×2.0, TP = ATR×4.0, trailing = ATR×1.2
 - **Cooldown**: 300s per symbol after signal
-- **Leverage**: 10–20x depending on confidence (RSI + EMA spread)
-- **Backtest results**: +4.2% return, 60% win rate, 6.3% max DD, Sharpe 1.14
+- **Leverage**: suggests 10x (confidence is effectively constant); forced to 1 by `spot_only`
+- The old "+4.2% / Sharpe 1.14" claim is **not reproducible**: `backtest.py` on 19.08.–17.11.2026 gives −74 %
+  (10x, shorts, 1h candles — a different rule than the live 5m path)
 
 ### Scalper (strategies/crypto_scalper.py) — DISABLED
 
@@ -161,7 +182,9 @@ All feeds compute these on candle data:
 - **Leverage**: Base 20x, max 50x, scaled by confidence
 - Disabled via `scalper.enabled: false` in settings.yaml (too noisy on 1m timeframe)
 
-### ML Predictor (strategies/ml_predictor.py) — ENABLED
+### ML Predictor (strategies/ml_predictor.py) — DISABLED
+
+- Never placed a trade (`_ml_loop` only logs) and cannot train in paper mode: `train()` needs 500 candles, the feeds keep 300
 
 - **Model**: `GradientBoostingClassifier` (100 estimators, depth=5, lr=0.1)
 - **Features**: RSI, RSI-change, BB position, volume ratio, 5m/15m price change, EMA cross, momentum, volatility, sentiment
@@ -185,6 +208,15 @@ All feeds compute these on candle data:
 ### Risk Actions
 
 `RiskManager.check_trade()` returns one of: `ALLOW`, `REDUCE_SIZE`, `BLOCK`, `CLOSE_ALL`, `COOLDOWN`
+
+### Known gaps (verified 17.11.2026)
+
+- `check_trade()` now gets the real order size; a `REDUCE_SIZE` below the exchange minimum means no trade
+- The minimum order may exceed the 20 % position limit only via `exchange_rules.allow_min_order_exception: true`
+  (exactly the minimum order, never more than 50 % of equity; decided by the user 17.11.2026)
+- Strategies without a stop-loss (daily trend) have no real 2 % risk bound — `check_trade` assumes a 1 % stop
+- `calculate_position_size()` (Kelly) is never called
+- Live mode with `shadow_mode: false` refuses to start: `_close_position` sends no sell order
 
 ### Position Sizing
 
@@ -239,48 +271,29 @@ Applied in `_execute_signal` in every mode, so paper results match Bitpanda Fusi
 general:
   mode: paper          # NEVER change to 'live' without explicit user confirmation
   start_capital: 100   # EUR
-  base_currency: EUR
+  data_feed: bitpanda
 
 strategies:
-  momentum:
+  momentum:   {enabled: false}   # pairs: here define the traded pairs for ALL strategies
+  scalper:    {enabled: false}
+  ml:         {enabled: false}
+  confluence: {enabled: false}
+  daily_trend:
     enabled: true
-    leverage: 10        # Base leverage (scales 10–20x by confidence)
-    pairs: [BTC_EUR, ETH_EUR, SOL_EUR]
-    take_profit: 0.015  # 1.5%
-    stop_loss: 0.008    # 0.8%
-    trailing_stop: 0.005
-    cooldown_seconds: 900
-    rsi_long_threshold: 55
-    rsi_short_threshold: 45
-    sl_atr_multiplier: 2.0
-    tp_atr_multiplier: 4.0
-
-  scalper:
-    enabled: false      # Disabled — too noisy on 1m candles
-
-  ml:
-    enabled: true
-    retrain_hours: 6
-    min_confidence: 0.65
+    rule: donchian     # vote in config/daily_trend.yaml (Trend-1)
+    entry_days: 20
+    exit_days: 10
 
 risk:
   max_risk_per_trade: 0.02
   max_daily_drawdown: 0.10
-  max_position_size: 0.20
-  max_leverage: 50
+  max_position_size: 0.20        # NOT read by the code (class constant applies)
+  max_leverage: 1
   max_concurrent_positions: 2
-  cooldown_after_losses: 300
+  cooldown_after_losses: 300     # NOT read by the code (it reads cooldown_seconds)
 
-fees:
-  crypto_maker: 0.0004
-  crypto_taker: 0.0006
-
-notifications:
-  console: true
-  telegram:
-    enabled: true
-    token: ${TELEGRAM_BOT_TOKEN}    # Set in config/secrets.env
-    chat_id: ${TELEGRAM_CHAT_ID}
+fees:    {crypto_maker: 0.0025, crypto_taker: 0.0025}
+slippage: {min: 0.0001, max: 0.0005}   # entry and exit in paper mode
 ```
 
 ### Secrets

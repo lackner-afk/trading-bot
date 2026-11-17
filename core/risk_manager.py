@@ -41,6 +41,10 @@ class RiskManager:
     MAX_CONCURRENT_POSITIONS = 5
     COOLDOWN_AFTER_LOSSES = 3       # Anzahl Verluste für Cooldown
     COOLDOWN_DURATION = 300         # 5 Minuten Pause
+    # Ausnahme nur für die Mindestorder der Börse (siehe check_trade): eine Order
+    # in genau dieser Größe darf die Positionsgrenze überschreiten, aber nie mehr
+    # als das halbe Kapital binden.
+    MIN_ORDER_EXCEPTION_CAP = 0.50
 
     def __init__(self, config: Dict = None):
         self.logger = logging.getLogger('RiskManager')
@@ -92,7 +96,8 @@ class RiskManager:
                    regime: str = None,
                    macro_risk_multiplier: float = 1.0,
                    asset_beta_group: str = None,
-                   current_beta_exposure: float = 0.0) -> RiskCheck:
+                   current_beta_exposure: float = 0.0,
+                   exchange_min_order: float = None) -> RiskCheck:
         """
         Prüft ob ein Trade den Risiko-Regeln entspricht
 
@@ -104,6 +109,10 @@ class RiskManager:
             consecutive_losses: Anzahl aufeinanderfolgender Verluste
             daily_drawdown: Aktueller täglicher Drawdown (0.0 - 1.0)
             sl_distance_pct: Optionaler ATR-basierter SL-Abstand als Bruchteil (z.B. 0.012)
+            exchange_min_order: Mindestorder der Börse in EUR. Nur wenn gesetzt, darf
+                eine Position GENAU in dieser Größe die Positionsgrenze überschreiten
+                (kleines Konto: 30 € von 100 €) — höchstens bis MIN_ORDER_EXCEPTION_CAP.
+                Alle anderen Grenzen gelten unverändert.
 
         Returns:
             RiskCheck mit Aktion und Begründung
@@ -160,7 +169,12 @@ class RiskManager:
 
         # 7. Position-Size-Limit
         max_size = portfolio_equity * self.MAX_POSITION_SIZE
-        if position_size > max_size:
+        min_order_exception = (
+            exchange_min_order is not None
+            and position_size <= exchange_min_order + 1e-9
+            and position_size <= portfolio_equity * self.MIN_ORDER_EXCEPTION_CAP
+        )
+        if position_size > max_size and not min_order_exception:
             return RiskCheck(
                 action=RiskAction.REDUCE_SIZE,
                 reason=f"Positionsgröße reduziert auf {self.MAX_POSITION_SIZE:.0%} des Portfolios",
