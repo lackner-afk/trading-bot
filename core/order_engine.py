@@ -125,6 +125,10 @@ class OrderEngine:
         else:
             return price * (1 - total_slippage)
 
+    def apply_slippage(self, price: float, side: str, size: float) -> float:
+        """Ausführungspreis inkl. Slippage — auch für Exits, die nicht als Order laufen."""
+        return self._calculate_slippage(price, side, size)
+
     def _calculate_fees(self, size: float, price: float, order_type: OrderType,
                        market_type: str) -> float:
         """Berechnet Trading-Fees (size ist bereits in USD)"""

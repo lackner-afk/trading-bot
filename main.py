@@ -211,7 +211,15 @@ class TradingBot:
             )
         else:
             # === PAPER MODE (Standard) ===
-            self.order_engine = OrderEngine(config=fees_config)
+            # Der Abschnitt slippage: (min/max) wurde nie durchgereicht — die Engine
+            # las slippage_min/slippage_max aus dem fees-Abschnitt und nahm die Defaults.
+            slippage_config = self.config.get('slippage', {}) or {}
+            engine_config = dict(fees_config)
+            if 'min' in slippage_config:
+                engine_config['slippage_min'] = slippage_config['min']
+            if 'max' in slippage_config:
+                engine_config['slippage_max'] = slippage_config['max']
+            self.order_engine = OrderEngine(config=engine_config)
             data_feed = general.get('data_feed', 'bitpanda')
             bitpanda_key = os.getenv('BITPANDA_API_KEY')
             if data_feed == 'bitpanda' and bitpanda_key:
@@ -1409,8 +1417,18 @@ class TradingBot:
         if not position:
             return
 
-        # Taker-Gebühr aus der Config (Bitpanda Fusion: 0,25 %) — war fest 0,06 %
-        fees = position.size * self.order_engine.fees.get('crypto_taker', 0.0025)
+        # Paper: auch der Verkauf rutscht. Bisher wurde nur der Einstieg mit
+        # Slippage gerechnet, der Ausstieg exakt zum Feed-Kurs — einseitig zu gut.
+        if not self.is_live and hasattr(self.order_engine, 'apply_slippage'):
+            exit_side = 'sell' if position.side == 'long' else 'buy'
+            price = self.order_engine.apply_slippage(price, exit_side, position.size)
+
+        # Taker-Gebühr auf den Verkaufswert, nicht auf den Einstiegswert: eine
+        # Position, die 50 % im Plus liegt, kostet beim Verkauf auch 50 % mehr Gebühr.
+        exit_notional = position.size
+        if position.entry_price > 0:
+            exit_notional = position.size * price / position.entry_price
+        fees = exit_notional * self.order_engine.fees.get('crypto_taker', 0.0025)
 
         trade = self.portfolio.close_position(
             symbol=symbol,
