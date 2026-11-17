@@ -1067,8 +1067,14 @@ class TradingBot:
             macro_risk_multiplier=macro_risk_multiplier
         )
 
-        if risk_check.action == RiskAction.BLOCK:
-            self.logger.warning(f"Trade blockiert: {risk_check.reason}")
+        # CLOSE_ALL (Tageslimit erreicht) fiel früher durch: nur BLOCK und COOLDOWN
+        # wurden abgefangen, der Einstieg lief trotz überschrittenem Limit weiter.
+        if risk_check.action in (RiskAction.BLOCK, RiskAction.CLOSE_ALL):
+            self._log_throttled(
+                f"risk-block:{signal.symbol}",
+                f"Trade blockiert ({signal.symbol}): {risk_check.reason}",
+                every_s=300,
+            )
             return
 
         if risk_check.action == RiskAction.COOLDOWN:
