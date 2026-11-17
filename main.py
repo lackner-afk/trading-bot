@@ -192,8 +192,14 @@ class TradingBot:
                     "SHADOW MODE: Orders werden simuliert, NICHT an die Börse geschickt."
                 )
             else:
-                self.logger.critical(
-                    "!!! SHADOW MODE AUS — es werden ECHTE Orders mit ECHTEM GELD platziert !!!"
+                # Der Live-Pfad ist unvollständig: _close_position bucht den Ausstieg
+                # nur lokal und schickt KEINE Verkaufsorder, und die LiveOrderEngine
+                # meldet die gefüllte Menge in Coins, die hier als EUR gebucht wird.
+                # Mit echtem Geld hieße das: kaufen, aber nie verkaufen.
+                raise RuntimeError(
+                    "Echte Orders sind gesperrt: der Live-Pfad sendet keine Verkaufsorders "
+                    "(main.py _close_position) und verbucht Füllmengen in der falschen Einheit. "
+                    "Erst beheben und testen, dann diese Sperre entfernen."
                 )
 
             # Echte Execution Engine
@@ -907,55 +913,68 @@ class TradingBot:
         self.logger.info(f"Tages-Trendfilter gestartet (alle {interval:.0f} s, {self.daily_trend.label})")
 
         while self.running:
-            prices = self.crypto_feed.get_prices(max_age_seconds=self._max_price_age)
-            for symbol in self._pairs:
+            # list(): FusionFeed kann die geteilte Paar-Liste beim Start kürzen
+            for symbol in list(self._pairs):
+                # Ein Fehler bei einer Coin darf die übrigen nicht mitreißen —
+                # sonst startete der Supervisor den ganzen Loop mit Wartezeit neu.
                 try:
-                    daily = await self.daily_trend.fetch_daily(symbol)
+                    await self._daily_trend_step(symbol, logged)
+                except asyncio.CancelledError:
+                    raise
                 except Exception as e:
-                    self._log_throttled(f"daily:{symbol}",
-                                        f"[TAGESTREND] {symbol}: Tageskerzen nicht ladbar: {e!r}")
-                    continue
-                vote = self.daily_trend.evaluate(symbol, daily)
-                if vote is None:
-                    continue
-                self._last_cycle_at = datetime.now()
-
-                # Einmal je neuer Tageskerze ins Log — nicht alle 15 Minuten
-                key = (vote.candle_date, vote.votes)
-                if logged.get(symbol) != key:
-                    logged[symbol] = key
-                    self.logger.info(f"[TAGESTREND] {symbol} Kerze {vote.candle_date:%d.%m.}: {vote.describe()}")
-
-                price = prices.get(symbol)
-                if price is None:
-                    continue
-                position = self.portfolio.positions.get(symbol)
-
-                if vote.hold and position is None:
-                    # Nach dem Tageslimit schließt der Risk-Loop alles — nicht gleich wieder kaufen
-                    if self.portfolio.get_daily_drawdown() >= self.risk_manager.max_daily_drawdown:
-                        self._log_throttled(f"daily-dd:{symbol}",
-                                            f"[TAGESTREND] {symbol}: Tageslimit erreicht — Einstieg morgen.")
-                        continue
-                    signal = ScalperSignal(
-                        signal_type=SignalType.LONG,
-                        symbol=symbol,
-                        price=price,
-                        confidence=1.0 if vote.upper is not None else vote.votes / 5,
-                        reason=f"Tagestrend: {vote.describe()}",
-                        # Kein TP/SL: raus geht es nur, wenn der Tagestrend kippt
-                        take_profit=0.0,
-                        stop_loss=0.0,
-                        suggested_leverage=1,
-                    )
-                    await self._execute_signal(signal, strategy_name='daily_trend')
-
-                elif not vote.hold and position is not None and position.market_type == 'daily_trend':
-                    await self._close_position(
-                        symbol, price, f"Tagestrend gekippt: {vote.describe()}"
-                    )
+                    self.logger.error(f"[TAGESTREND] {symbol}: Abgleich fehlgeschlagen: {e!r}")
 
             await asyncio.sleep(interval)
+
+    async def _daily_trend_step(self, symbol: str, logged: Dict[str, tuple]):
+        """Ein Soll/Ist-Abgleich für eine Coin."""
+        try:
+            daily = await self.daily_trend.fetch_daily(symbol)
+        except Exception as e:
+            self._log_throttled(f"daily:{symbol}",
+                                f"[TAGESTREND] {symbol}: Tageskerzen nicht ladbar: {e!r}")
+            return
+        vote = self.daily_trend.evaluate(symbol, daily)
+        if vote is None:
+            return
+        self._last_cycle_at = datetime.now()
+
+        # Einmal je neuer Tageskerze ins Log — nicht alle 15 Minuten
+        key = (vote.candle_date, vote.votes)
+        if logged.get(symbol) != key:
+            logged[symbol] = key
+            self.logger.info(f"[TAGESTREND] {symbol} Kerze {vote.candle_date:%d.%m.}: {vote.describe()}")
+
+        # Preis erst NACH dem Laden der Tageskerzen holen: der Abruf dauert, und
+        # ein vorher gezogener Preis wäre bei der letzten Coin mehrere Abrufe alt.
+        price = self.crypto_feed.get_price(symbol, max_age_seconds=self._max_price_age)
+        if price is None:
+            return
+        position = self.portfolio.positions.get(symbol)
+
+        if vote.hold and position is None:
+            # Nach dem Tageslimit schließt der Risk-Loop alles — nicht gleich wieder kaufen
+            if self.portfolio.get_daily_drawdown() >= self.risk_manager.max_daily_drawdown:
+                self._log_throttled(f"daily-dd:{symbol}",
+                                    f"[TAGESTREND] {symbol}: Tageslimit erreicht — Einstieg morgen.")
+                return
+            signal = ScalperSignal(
+                signal_type=SignalType.LONG,
+                symbol=symbol,
+                price=price,
+                confidence=1.0 if vote.upper is not None else vote.votes / 5,
+                reason=f"Tagestrend: {vote.describe()}",
+                # Kein TP/SL: raus geht es nur, wenn der Tagestrend kippt
+                take_profit=0.0,
+                stop_loss=0.0,
+                suggested_leverage=1,
+            )
+            await self._execute_signal(signal, strategy_name='daily_trend')
+
+        elif not vote.hold and position is not None and position.market_type == 'daily_trend':
+            await self._close_position(
+                symbol, price, f"Tagestrend gekippt: {vote.describe()}"
+            )
 
     async def _risk_check_loop(self):
         """Risk-Check Loop (alle 5 Minuten)"""
@@ -1113,6 +1132,17 @@ class TradingBot:
             bumped_margin = min_order / leverage
             if bumped_margin <= state.balance and bumped_margin <= state.equity * 0.5:
                 position_size = min_order
+                # Die Anhebung überschreitet die 20-%-Grenze des RiskManagers
+                # (bei 100 € sind 30 € = 30 %). Das Verhalten bleibt, wie es war —
+                # aber es soll im Log stehen statt stillschweigend zu passieren.
+                share = bumped_margin / state.equity if state.equity > 0 else 0.0
+                if share > self.risk_manager.MAX_POSITION_SIZE:
+                    self._log_throttled(
+                        f"oversize:{signal.symbol}",
+                        f"[RISIKO] {signal.symbol}: Mindestorder {min_order:.2f} € = {share:.0%} des Kapitals — "
+                        f"über der Positionsgrenze von {self.risk_manager.MAX_POSITION_SIZE:.0%}.",
+                        every_s=86400,
+                    )
             else:
                 self._log_throttled(
                     f"minorder:{signal.symbol}",

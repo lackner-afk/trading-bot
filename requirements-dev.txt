@@ -1,0 +1,3 @@
+# Nur für Tests: python -m pytest tests
+-r requirements.txt
+pytest>=8.0
