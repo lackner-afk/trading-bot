@@ -116,7 +116,7 @@ class Backtester:
 
         if ccxt_async is None:
             self.logger.error("ccxt nicht installiert - pip install ccxt")
-            self.price_data = self._generate_simulated_data(symbols, days)
+            self.price_data = self._simulated_or_fail(symbols, days, "ccxt nicht installiert")
             return self.price_data
 
         # Exchange-spezifische Initialisierung
@@ -149,8 +149,7 @@ class Backtester:
             await exchange.close()
 
         if len(self.price_data) == 0:
-            self.logger.warning("Keine API-Daten verfügbar - generiere simulierte Daten")
-            self.price_data = self._generate_simulated_data(symbols, days)
+            self.price_data = self._simulated_or_fail(symbols, days, "keine API-Daten verfügbar")
 
         return self.price_data
 
@@ -239,6 +238,20 @@ class Backtester:
         df = df.drop_duplicates(subset='timestamp').sort_values('timestamp').reset_index(drop=True)
 
         return df
+
+    def _simulated_or_fail(self, symbols: List[str], days: int, why: str) -> Dict[str, pd.DataFrame]:
+        """
+        Früher fiel der Backtest stillschweigend auf Zufallskurse zurück und
+        druckte danach Rendite, Sharpe und Trefferquote, als wären es Marktdaten.
+        Zufallsdaten gibt es jetzt nur noch auf ausdrücklichen Wunsch
+        (config allow_simulated_data: true).
+        """
+        if not self.config.get('allow_simulated_data', False):
+            raise RuntimeError(
+                f"Backtest abgebrochen: {why}. Ergebnisse auf Zufallskursen wären wertlos."
+            )
+        self.logger.warning(f"{why} - generiere simulierte Daten (ausdrücklich erlaubt)")
+        return self._generate_simulated_data(symbols, days)
 
     def _generate_simulated_data(self, symbols: List[str], days: int) -> Dict[str, pd.DataFrame]:
         """
