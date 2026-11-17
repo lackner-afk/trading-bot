@@ -211,8 +211,10 @@ All feeds compute these on candle data:
 
 ### Known gaps (verified 17.11.2026)
 
-- `check_trade()` is called with a placeholder size (10 % of equity), not the real order size; `REDUCE_SIZE` is ignored
-- The minimum-order bump can exceed the 20 % position limit; strategies without a stop-loss (daily trend) have no 2 % risk bound
+- `check_trade()` now gets the real order size; a `REDUCE_SIZE` below the exchange minimum means no trade
+- The minimum order may exceed the 20 % position limit only via `exchange_rules.allow_min_order_exception: true`
+  (exactly the minimum order, never more than 50 % of equity; decided by the user 17.11.2026)
+- Strategies without a stop-loss (daily trend) have no real 2 % risk bound — `check_trade` assumes a 1 % stop
 - `calculate_position_size()` (Kelly) is never called
 - Live mode with `shadow_mode: false` refuses to start: `_close_position` sends no sell order
 

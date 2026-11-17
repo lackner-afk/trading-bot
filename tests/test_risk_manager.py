@@ -38,3 +38,14 @@ def test_halb_kelly():
     assert rm.calculate_position_size(1000, 0.6, 10, 10) == pytest.approx(100)
     # negativer Erwartungswert → keine Position
     assert rm.calculate_position_size(1000, 0.3, 10, 10) == 0
+
+
+def test_mindestorder_ausnahme_nur_fuer_genau_diese_groesse():
+    rm = RiskManager()
+    assert rm.check_trade(100, 30, 1, 0, 0, 0.0, exchange_min_order=30).action == RiskAction.ALLOW
+    # größer als die Mindestorder: wieder gekürzt
+    assert rm.check_trade(100, 40, 1, 0, 0, 0.0, exchange_min_order=30).action == RiskAction.REDUCE_SIZE
+    # mehr als das halbe Kapital: keine Ausnahme
+    assert rm.check_trade(50, 30, 1, 0, 0, 0.0, exchange_min_order=30).action == RiskAction.REDUCE_SIZE
+    # das Tageslimit schlägt die Ausnahme
+    assert rm.check_trade(100, 30, 1, 0, 0, 0.10, exchange_min_order=30).action == RiskAction.CLOSE_ALL

@@ -300,6 +300,9 @@ class TradingBot:
         exchange_rules = self.config.get('exchange_rules', {})
         self.spot_only: bool = bool(exchange_rules.get('spot_only', True))
         self._min_order_fallback: float = float(exchange_rules.get('min_order_eur', 10.0))
+        # Darf die Mindestorder die Positionsgrenze (20 %) überschreiten? Ohne das
+        # kann ein 100-€-Konto bei 30 € Mindestorder gar nicht handeln.
+        self._allow_min_order_exception: bool = bool(exchange_rules.get('allow_min_order_exception', False))
         self._throttled_logs: Dict[str, datetime] = {}
 
         # Dashboard: Verlauf, Aktivitäts-Feed und Pause-Schalter
@@ -1081,17 +1084,67 @@ class TradingBot:
         if signal.price > 0 and signal.stop_loss > 0:
             sl_distance_pct = abs(signal.price - signal.stop_loss) / signal.price
 
-        # Risk-Check (Phase 5: regime + macro aware)
+        # Position Sizing wie im Backtest: Margin ist der Equity-Anteil,
+        # das Notional (= size) ergibt sich daraus mal Hebel.
+        if sl_distance_pct > 0 and hasattr(signal, 'atr_value') and signal.atr_value > 0:
+            margin = self.risk_manager.size_from_risk(state.equity, sl_distance_pct)
+        else:
+            margin = state.equity * 0.20
+        # Skaliert auf Kapital: mindestens 15 % der Equity, höchstens die
+        # Positionsgrenze des RiskManagers (stand hier auf 25 % — darüber).
+        min_margin = max(10.0, state.equity * 0.15)
+        max_margin = state.equity * self.risk_manager.MAX_POSITION_SIZE
+        margin = max(min(min_margin, max_margin), min(max_margin, margin))
+
+        if margin > state.balance or state.balance < 20:
+            return
+
+        position_size = margin * leverage
+
+        # Mindestordergröße der Börse (Fusion: 30 €). Ein kleines Konto liegt mit
+        # 20 % darunter — dann auf das Minimum anheben, solange es höchstens die
+        # Hälfte des Kapitals bindet. Das überschreitet die Positionsgrenze und ist
+        # deshalb eine ausdrückliche Ausnahme (exchange_rules.allow_min_order_exception).
+        min_order = self._min_order_amount(signal.symbol)
+        at_min_order = False
+        if position_size < min_order:
+            bumped_margin = min_order / leverage
+            share = bumped_margin / state.equity if state.equity > 0 else 1.0
+            over_limit = share > self.risk_manager.MAX_POSITION_SIZE
+            if (bumped_margin <= state.balance and share <= 0.5
+                    and (not over_limit or self._allow_min_order_exception)):
+                position_size = min_order
+                at_min_order = True
+                if over_limit:
+                    self._log_throttled(
+                        f"oversize:{signal.symbol}",
+                        f"[RISIKO] {signal.symbol}: Mindestorder {min_order:.2f} € = {share:.0%} des Kapitals — "
+                        f"über der Positionsgrenze von {self.risk_manager.MAX_POSITION_SIZE:.0%} "
+                        f"(Ausnahme laut exchange_rules.allow_min_order_exception).",
+                        every_s=86400,
+                    )
+            else:
+                self._log_throttled(
+                    f"minorder:{signal.symbol}",
+                    f"[MINDESTORDER] {signal.symbol}: {position_size:.2f} € unter Börsen-Minimum "
+                    f"{min_order:.2f} € und Anheben ist nicht erlaubt "
+                    f"(über der Positionsgrenze oder mehr als das halbe Kapital) — kein Trade."
+                )
+                return
+
+        # Risk-Check mit der ECHTEN Ordergröße (früher: Platzhalter 10 % der Equity,
+        # und eine verlangte Kürzung wurde ignoriert).
         risk_check = self.risk_manager.check_trade(
             portfolio_equity=state.equity,
-            position_size=state.equity * 0.1,
+            position_size=position_size / leverage,
             leverage=leverage,
             current_positions=len(state.positions),
             consecutive_losses=self.portfolio.consecutive_losses,
             daily_drawdown=self.portfolio.get_daily_drawdown(),
             sl_distance_pct=sl_distance_pct if sl_distance_pct > 0 else None,
             regime=regime,
-            macro_risk_multiplier=macro_risk_multiplier
+            macro_risk_multiplier=macro_risk_multiplier,
+            exchange_min_order=(min_order / leverage) if (at_min_order and self._allow_min_order_exception) else None,
         )
 
         # CLOSE_ALL (Tageslimit erreicht) fiel früher durch: nur BLOCK und COOLDOWN
@@ -1108,48 +1161,22 @@ class TradingBot:
             self.logger.info(f"Cooldown aktiv: {risk_check.reason}")
             return
 
-        # Position Sizing wie im Backtest: Margin ist der Equity-Anteil,
-        # das Notional (= size) ergibt sich daraus mal Hebel.
-        if sl_distance_pct > 0 and hasattr(signal, 'atr_value') and signal.atr_value > 0:
-            margin = self.risk_manager.size_from_risk(state.equity, sl_distance_pct)
-        else:
-            margin = state.equity * 0.20
-        # Skaliert auf Kapital: Min 15% des Equity, Max 25% des Equity
-        min_margin = max(10.0, state.equity * 0.15)
-        max_margin = state.equity * 0.25
-        margin = max(min_margin, min(max_margin, margin))
-
-        if margin > state.balance or state.balance < 20:
-            return
-
-        position_size = margin * leverage
-
-        # Mindestordergröße der Börse (Fusion: 30 €). Ein kleines Konto liegt mit
-        # 15–25 % darunter — dann auf das Minimum anheben, solange es höchstens die
-        # Hälfte des Kapitals bindet, damit zwei Positionen nebeneinander Platz haben.
-        min_order = self._min_order_amount(signal.symbol)
-        if position_size < min_order:
-            bumped_margin = min_order / leverage
-            if bumped_margin <= state.balance and bumped_margin <= state.equity * 0.5:
-                position_size = min_order
-                # Die Anhebung überschreitet die 20-%-Grenze des RiskManagers
-                # (bei 100 € sind 30 € = 30 %). Das Verhalten bleibt, wie es war —
-                # aber es soll im Log stehen statt stillschweigend zu passieren.
-                share = bumped_margin / state.equity if state.equity > 0 else 0.0
-                if share > self.risk_manager.MAX_POSITION_SIZE:
-                    self._log_throttled(
-                        f"oversize:{signal.symbol}",
-                        f"[RISIKO] {signal.symbol}: Mindestorder {min_order:.2f} € = {share:.0%} des Kapitals — "
-                        f"über der Positionsgrenze von {self.risk_manager.MAX_POSITION_SIZE:.0%}.",
-                        every_s=86400,
-                    )
-            else:
+        if risk_check.action == RiskAction.REDUCE_SIZE and risk_check.suggested_size is not None:
+            reduced = risk_check.suggested_size * leverage
+            if reduced < min_order:
+                # Kleiner als die Mindestorder geht nicht — dann lieber gar nicht
+                # handeln, als die verlangte Kürzung zu übergehen.
                 self._log_throttled(
-                    f"minorder:{signal.symbol}",
-                    f"[MINDESTORDER] {signal.symbol}: {position_size:.2f} € unter Börsen-Minimum "
-                    f"{min_order:.2f} € und Anheben würde mehr als das halbe Kapital binden — kein Trade."
+                    f"reduce-skip:{signal.symbol}",
+                    f"[RISIKO] {signal.symbol}: kein Trade — {risk_check.reason}; "
+                    f"gekürzt wären es {reduced:.2f} €, unter der Mindestorder {min_order:.2f} €.",
+                    every_s=3600,
                 )
                 return
+            self.logger.info(
+                f"[RISIKO] {signal.symbol}: {position_size:.2f} € → {reduced:.2f} € ({risk_check.reason})"
+            )
+            position_size = reduced
 
         side = 'buy' if signal.signal_type == SignalType.LONG else 'sell'
 
