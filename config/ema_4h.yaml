@@ -1,0 +1,34 @@
+# Overlay für den dritten Paper-Bot Swing-1 (seit 24.11.2026): EMA 20/50 auf
+# 4h-Kerzen, immer im Markt — long oder short. Wird über settings.yaml gelegt
+# (BOT_CONFIG_OVERLAY=config/ema_4h.yaml); hier stehen nur die Abweichungen.
+#
+# ACHTUNG: Bitpanda Fusion ist Spot-only und kann nicht shorten. Dieser Bot TUT
+# NUR SO (Paper) — als Vergleich, ob die Short-Seite im Abwärtsmarkt etwas bringt.
+# Leihkosten für Shorts sind nicht eingerechnet. Echtgeld ginge so nicht.
+#
+# Backtest (vorab festgelegte Varianten, alle berichtet): docs/BACKTEST_BEFUNDE.md,
+# „Long/Short auf 4h-Kerzen". 4h EMA 20/50: ~14 Trades/Monat, letzte 365 Tage
+# −11 % (Halten −36 %), letzte 90 Tage +5 % (Halten −25 %).
+
+general:
+  start_capital: 1000
+
+exchange_rules:
+  spot_only: false          # nur Paper: Shorts zulassen (Hebel bleibt 1, risk.max_leverage)
+
+strategies:
+  confluence:
+    enabled: false
+  daily_trend:
+    enabled: true
+    rule: ema
+    timeframe: 4h
+    ema_fast: 20
+    ema_slow: 50
+    check_interval_s: 900     # Abgleich alle 15 Minuten, neue Kerze alle 4 Stunden
+
+risk:
+  max_concurrent_positions: 4   # eine je Coin (BTC, ETH, SOL, XRP), je 20 %
+
+dashboard:
+  bot_name: Swing-1

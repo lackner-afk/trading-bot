@@ -20,10 +20,10 @@ general:
   # der Bot rechnet mit echten Marktdaten, protokolliert aber nur, was er
   # tun würde. Erst nach einer erfolgreichen Testphase auf false setzen.
   shadow_mode: true
-  # 100 EUR: 15-25 % davon liegen unter Bitpandas Mindestorder (Fusion: 30 EUR).
-  # main.py hebt eine Order deshalb auf die Mindestgroesse an, solange sie
-  # hoechstens die Haelfte des Kapitals bindet — so wuerde man real handeln.
-  start_capital: 100
+  # Alle drei Paper-Bots starten mit 1000 EUR (seit 24.11.2026, vorher Panda-9
+  # 100 EUR) — so sind sie direkt vergleichbar. Mit 1000 EUR liegen 20 % je Coin
+  # (200 EUR) klar über Bitpandas Mindestorder (Fusion: 30 EUR).
+  start_capital: 1000
   # Woher die Kurse im Paper-Modus kommen:
   #   bitpanda = Bitpanda Fusion (braucht BITPANDA_API_KEY in secrets.env;
   #              fehlt der Key oder liefert Fusion keine Kurse: Kraken mit Warnung)

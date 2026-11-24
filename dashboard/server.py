@@ -445,9 +445,15 @@ class DashboardServer:
         bot = self.bot
         strategy = bot.daily_trend
         donchian = strategy.rule == 'donchian'
+        ema = strategy.rule == 'ema'
         coins = []
         for symbol, v in sorted(strategy.last_votes.items()):
-            if donchian:
+            spread = None
+            if ema:
+                # Abstand schnelle zu langsamer EMA; ±5 % füllen den Balken, 0,5 = Wende
+                spread = (v.ema_fast / v.ema_slow - 1) if v.ema_slow else 0.0
+                score = min(1.0, max(0.0, 0.5 + spread * 10))
+            elif donchian:
                 span = (v.upper - v.lower) or 1.0
                 score = min(1.0, max(0.0, (v.close - v.lower) / span))
             else:
@@ -459,6 +465,8 @@ class DashboardServer:
                 'score': score,
                 'decision': v.describe(),
                 'hold': v.hold,
+                'direction': v.direction,
+                'spread': spread,
                 'upper': v.upper,
                 'time': v.candle_date.isoformat(timespec='seconds'),
                 'regime': None,
@@ -467,11 +475,14 @@ class DashboardServer:
             })
         last_cycle = getattr(bot, '_last_cycle_at', None)
         return {
-            'threshold': 1.0 if donchian else strategy.min_votes / 5,
+            'threshold': 0.5 if ema else 1.0 if donchian else strategy.min_votes / 5,
             'scale_min': 0.0,
-            'kind': 'donchian' if donchian else 'daily_trend',
+            'kind': 'ema' if ema else 'donchian' if donchian else 'daily_trend',
             'entry_days': strategy.entry_days,
             'exit_days': strategy.exit_days,
+            'ema_fast': strategy.ema_fast,
+            'ema_slow': strategy.ema_slow,
+            'timeframe': strategy.timeframe,
             'feed': type(bot.crypto_feed).__name__,
             'last_cycle': last_cycle.isoformat(timespec='seconds') if last_cycle else None,
             'coins': coins,
@@ -571,14 +582,22 @@ class DashboardServer:
             n, w, pnl = by_key.get(k, (0, 0, 0.0))
             out.append({
                 'key': k,
-                'name': ('Donchian-Ausbruch' if k == 'daily_trend' and cfg.get(k, {}).get('rule') == 'donchian'
-                         else strategy_name(k)),
+                'name': self._daily_trend_name(cfg.get(k, {})) if k == 'daily_trend' else strategy_name(k),
                 'enabled': bool(cfg.get(k, {}).get('enabled')),
                 'trades': n,
                 'win_rate': (w / n) if n else None,
                 'pnl': pnl,
             })
         return out
+
+    @staticmethod
+    def _daily_trend_name(cfg: Dict) -> str:
+        rule = cfg.get('rule')
+        if rule == 'donchian':
+            return 'Donchian-Ausbruch'
+        if rule == 'ema':
+            return f"EMA {cfg.get('ema_fast', 20)}/{cfg.get('ema_slow', 50)} long/short"
+        return strategy_name('daily_trend')
 
     def _settings(self) -> Dict:
         cfg = self.bot.config

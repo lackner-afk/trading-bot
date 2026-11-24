@@ -513,7 +513,9 @@
         const price = c.price ? ` <span class="label">${num2.format(c.price)} €</span>` : '';
         return `<div class="sig">
           <div class="sig-top"><span>${esc(c.coin)}${price}</span>
-            <span class="v">${sig.kind === 'daily_trend'
+            <span class="v">${sig.kind === 'ema'
+              ? `${c.direction > 0 ? 'Long' : 'Short'} <span class="gap">${c.spread >= 0 ? '+' : '−'}${pct(Math.abs(c.spread))}</span>`
+              : sig.kind === 'daily_trend'
               ? `${Math.round(c.score * 5)}/5`
               : sig.kind === 'donchian'
               ? (c.hold ? 'drin' : `${pct(c.upper / (c.price || c.upper) - 1)} bis Hoch`)
@@ -527,7 +529,9 @@
     }
     const feed = sig.feed === 'FusionFeed' ? 'Bitpanda Fusion' : sig.feed === 'KrakenFeed' ? 'Kraken' : sig.feed;
     const beat = sig.last_cycle ? `letzter Durchgang vor ${ago(sig.last_cycle, nowIso)}` : 'noch kein Durchgang';
-    $('signals-foot').textContent = sig.kind === 'daily_trend'
+    $('signals-foot').textContent = sig.kind === 'ema'
+      ? `Balken = Abstand EMA ${sig.ema_fast} zu EMA ${sig.ema_slow} auf ${sig.timeframe}-Kerzen · rechts vom Strich long, links short (nur simuliert) · Kurse ${feed} · ${beat}`
+      : sig.kind === 'daily_trend'
       ? `Strich = ${Math.round(th * 5)} von 5 Trendregeln auf Tageskerzen · kein Ziel/Stop, Ausstieg wenn der Trend kippt · Kurse ${feed} · ${beat}`
       : sig.kind === 'donchian'
       ? `Balken = Schlusskurs zwischen ${sig.exit_days}-Tage-Tief und ${sig.entry_days}-Tage-Hoch · Kauf über dem Hoch, Verkauf unter dem Tief · Kurse ${feed} · ${beat}`

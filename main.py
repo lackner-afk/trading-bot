@@ -942,42 +942,49 @@ class TradingBot:
             return
         self._last_cycle_at = datetime.now()
 
-        # Einmal je neuer Tageskerze ins Log — nicht alle 15 Minuten
+        # Einmal je neuer Kerze ins Log — nicht alle 15 Minuten
         key = (vote.candle_date, vote.votes)
         if logged.get(symbol) != key:
             logged[symbol] = key
-            self.logger.info(f"[TAGESTREND] {symbol} Kerze {vote.candle_date:%d.%m.}: {vote.describe()}")
+            fmt = '%d.%m.' if self.daily_trend.timeframe == '1d' else '%d.%m. %H:%M UTC'
+            self.logger.info(f"[TAGESTREND] {symbol} Kerze {vote.candle_date:{fmt}}: {vote.describe()}")
 
-        # Preis erst NACH dem Laden der Tageskerzen holen: der Abruf dauert, und
+        # Preis erst NACH dem Laden der Kerzen holen: der Abruf dauert, und
         # ein vorher gezogener Preis wäre bei der letzten Coin mehrere Abrufe alt.
         price = self.crypto_feed.get_price(symbol, max_age_seconds=self._max_price_age)
         if price is None:
             return
         position = self.portfolio.positions.get(symbol)
 
-        if vote.hold and position is None:
-            # Nach dem Tageslimit schließt der Risk-Loop alles — nicht gleich wieder kaufen
+        # Soll: +1 long, -1 short, 0 draußen. Long-only-Regeln kennen nur +1/0;
+        # die EMA-Regel wechselt direkt von long auf short (schließen, dann öffnen).
+        target = vote.target
+        if position is not None and position.market_type == 'daily_trend':
+            current = 1 if position.side == 'long' else -1
+            if current == target:
+                return
+            reason = ("Tagestrend gekippt" if target == 0 else "Richtung gewechselt")
+            await self._close_position(symbol, price, f"{reason}: {vote.describe()}")
+            position = self.portfolio.positions.get(symbol)
+
+        if target != 0 and position is None:
+            # Nach dem Tageslimit schließt der Risk-Loop alles — nicht gleich wieder einsteigen
             if self.portfolio.get_daily_drawdown() >= self.risk_manager.max_daily_drawdown:
                 self._log_throttled(f"daily-dd:{symbol}",
                                     f"[TAGESTREND] {symbol}: Tageslimit erreicht — Einstieg morgen.")
                 return
             signal = ScalperSignal(
-                signal_type=SignalType.LONG,
+                signal_type=SignalType.LONG if target > 0 else SignalType.SHORT,
                 symbol=symbol,
                 price=price,
-                confidence=1.0 if vote.upper is not None else vote.votes / 5,
+                confidence=1.0 if vote.upper is not None or vote.direction is not None else vote.votes / 5,
                 reason=f"Tagestrend: {vote.describe()}",
-                # Kein TP/SL: raus geht es nur, wenn der Tagestrend kippt
+                # Kein TP/SL: raus geht es nur, wenn der Trend kippt
                 take_profit=0.0,
                 stop_loss=0.0,
                 suggested_leverage=1,
             )
             await self._execute_signal(signal, strategy_name='daily_trend')
-
-        elif not vote.hold and position is not None and position.market_type == 'daily_trend':
-            await self._close_position(
-                symbol, price, f"Tagestrend gekippt: {vote.describe()}"
-            )
 
     async def _risk_check_loop(self):
         """Risk-Check Loop (alle 5 Minuten)"""

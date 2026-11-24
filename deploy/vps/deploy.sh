@@ -47,8 +47,9 @@ docker compose up -d --build --remove-orphans
 docker image prune -f > /dev/null
 for i in $(seq 1 30); do
   if curl -fsS --max-time 3 http://127.0.0.1:3400/health > /dev/null \
-     && curl -fsS --max-time 3 http://127.0.0.1:3401/health > /dev/null; then
-    echo "==> Dashboards antworten auf 127.0.0.1:3400 (Panda-9, Donchian) und :3401 (Trend-1, Mehrheitsregel)"
+     && curl -fsS --max-time 3 http://127.0.0.1:3401/health > /dev/null \
+     && curl -fsS --max-time 3 http://127.0.0.1:3402/health > /dev/null; then
+    echo "==> Dashboards antworten auf 127.0.0.1:3400 (Panda-9, Donchian), :3401 (Trend-1, Mehrheitsregel) und :3402 (Swing-1, EMA long/short)"
     docker compose ps --format 'table {{.Name}}\t{{.Status}}'
     exit 0
   fi

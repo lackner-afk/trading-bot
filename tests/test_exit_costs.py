@@ -11,7 +11,7 @@ def test_slippage_abschnitt_wird_gelesen(make_bot):
 
 
 def test_exit_gebuehr_auf_verkaufswert(make_bot):
-    bot = make_bot({'slippage': {'min': 0.0, 'max': 0.0}})
+    bot = make_bot({'general': {'start_capital': 100}, 'slippage': {'min': 0.0, 'max': 0.0}})
     run(bot._execute_signal(long_signal(), strategy_name='daily_trend'))
     pos = bot.portfolio.positions['BTC_EUR']
     assert pos.size == 30.0 and pos.entry_price == 50000.0
@@ -23,7 +23,7 @@ def test_exit_gebuehr_auf_verkaufswert(make_bot):
 
 
 def test_exit_bekommt_slippage(make_bot):
-    bot = make_bot({'slippage': {'min': 0.001, 'max': 0.001}})
+    bot = make_bot({'general': {'start_capital': 100}, 'slippage': {'min': 0.001, 'max': 0.001}})
     run(bot._execute_signal(long_signal(), strategy_name='daily_trend'))
     assert bot.portfolio.positions['BTC_EUR'].entry_price == pytest.approx(50000 * 1.001)
     run(bot._close_position('BTC_EUR', 50000.0, 'Test'))
@@ -32,7 +32,7 @@ def test_exit_bekommt_slippage(make_bot):
 
 def test_rundreise_ohne_kursbewegung_kostet_gebuehr_plus_slippage(make_bot):
     """Kurs unverändert: Verlust = 2 × 0,25 % Gebühr + 2 × Slippage auf 30 €."""
-    bot = make_bot({'slippage': {'min': 0.0005, 'max': 0.0005}})
+    bot = make_bot({'general': {'start_capital': 100}, 'slippage': {'min': 0.0005, 'max': 0.0005}})
     run(bot._execute_signal(long_signal(), strategy_name='daily_trend'))
     run(bot._close_position('BTC_EUR', 50000.0, 'Test'))
     pnl = bot.portfolio.trades[-1].pnl

@@ -50,13 +50,14 @@ def test_max_positionen_aus_config(make_bot):
 # --- Risk-Check mit echter Ordergröße, Mindestorder als ausdrückliche Ausnahme ---
 
 def test_mindestorder_ausnahme_erlaubt_30_prozent(make_bot):
-    bot = make_bot()   # settings.yaml: allow_min_order_exception: true, 100 €
+    bot = make_bot({'general': {'start_capital': 100}})   # Ausnahme laut settings.yaml an
     run(bot._execute_signal(long_signal(), strategy_name='daily_trend'))
     assert bot.portfolio.positions['BTC_EUR'].size == 30.0
 
 
 def test_ohne_ausnahme_handelt_ein_100_euro_konto_nicht(make_bot):
-    bot = make_bot({'exchange_rules': {'allow_min_order_exception': False}})
+    bot = make_bot({'general': {'start_capital': 100},
+                    'exchange_rules': {'allow_min_order_exception': False}})
     run(bot._execute_signal(long_signal(), strategy_name='daily_trend'))
     assert bot.portfolio.positions == {}
 
@@ -82,7 +83,7 @@ def test_kuerzung_bei_drawdown_wird_befolgt(make_bot):
 
 
 def test_kuerzung_unter_mindestorder_heisst_kein_trade(make_bot):
-    bot = make_bot()   # 100 €: 30 € lassen sich nicht kürzen
+    bot = make_bot({'general': {'start_capital': 100}})   # 30 € lassen sich nicht kürzen
     bot.portfolio.daily_start_balance = bot.portfolio.equity / 0.95
     run(bot._execute_signal(long_signal(), strategy_name='daily_trend'))
     assert bot.portfolio.positions == {}
@@ -90,7 +91,7 @@ def test_kuerzung_unter_mindestorder_heisst_kein_trade(make_bot):
 
 def test_risiko_je_trade_gilt_auch_fuer_die_mindestorder(make_bot):
     """Die Ausnahme betrifft nur die Positionsgrenze: 30 € mit 10 % Stop = 3 € > 2 €."""
-    bot = make_bot()
+    bot = make_bot({'general': {'start_capital': 100}})
     sig = long_signal(stop_loss=45000.0)
     run(bot._execute_signal(sig, strategy_name='confluence'))
     assert bot.portfolio.positions == {}

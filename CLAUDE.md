@@ -28,8 +28,10 @@ POSITION_FRACTION=0.2 MAX_POSITIONS=2 python tools/backtest_daily.py
 POSITION_FRACTION=0.2 MAX_POSITIONS=2 python tools/robustness_daily.py
 ```
 
-> **Status 17.11.2026:** the only strategy that trades is `daily_trend` (Donchian 20/10 on daily
-> candles for Panda-9, majority vote for Trend-1). Momentum, scalper, ML and confluence are all
+> **Status 24.11.2026:** the only strategy that trades is `daily_trend` — three paper bots, all
+> with 1000 €: Panda-9 (Donchian 20/10 on daily candles), Trend-1 (majority vote, overlay
+> `config/daily_trend.yaml`) and Swing-1 (EMA 20/50 on 4h candles, long AND simulated short,
+> overlay `config/ema_4h.yaml` — the only one with `spot_only: false`). Momentum, scalper, ML and confluence are all
 > `enabled: false`. Measured evidence and its limits: `docs/BACKTEST_BEFUNDE.md`,
 > section "Unabhängige Prüfung (17.11.2026)".
 
@@ -160,8 +162,12 @@ All feeds compute these on candle data:
 - Signals from **closed Kraken EUR daily candles**, execution at the feed price on the next 15-minute check
 - `rule: donchian` (Panda-9): buy when the close is above the prior 20-day high, sell below the prior 10-day low
 - `rule: vote` (Trend-1 overlay `config/daily_trend.yaml`): hold while ≥3 of 5 rules (SMA 50/100/200, momentum 30/90) agree
-- No TP/SL; long only, 1x. Same functions are used by `tools/backtest_daily.py`
-- With 100 € the 30 € minimum order makes every position 30 % of equity — above the 20 % position limit (logged as `[RISIKO]`)
+- `rule: ema` (Swing-1 overlay `config/ema_4h.yaml`): `timeframe: 4h`, always in the market — long while EMA 20 > EMA 50,
+  otherwise short; a direction change closes and reopens in the same step. Shorts only pass `_execute_signal`
+  because that overlay sets `spot_only: false` (Fusion cannot short — paper comparison only, no borrow costs)
+- `TrendVote.target` (+1/−1/0) drives `_daily_trend_step`; the open candle is dropped in `closed_candles()`
+- No TP/SL; 1x. Same functions are used by `tools/backtest_daily.py` and `tools/backtest_longshort.py`
+- Below ~150 € the 30 € minimum order exceeds the 20 % position limit (only via `allow_min_order_exception`, logged as `[RISIKO]`)
 
 ### Momentum (strategies/momentum.py) — DISABLED
 
@@ -270,7 +276,7 @@ Applied in `_execute_signal` in every mode, so paper results match Bitpanda Fusi
 ```yaml
 general:
   mode: paper          # NEVER change to 'live' without explicit user confirmation
-  start_capital: 100   # EUR
+  start_capital: 1000  # EUR (all three bots since 24.11.2026)
   data_feed: bitpanda
 
 strategies:
@@ -354,7 +360,9 @@ Exchange-side safety net, independent of `core/risk_manager.py`:
 ## VPS deployment (deploy/vps/)
 
 - `./deploy/vps/deploy.sh` rsyncs to `deploy@91.98.234.212:/home/deploy/trading-bot` and runs `docker compose up -d --build --remove-orphans`
-- Containers: `trading-bot` (bot + dashboard on 127.0.0.1:3400, `DASHBOARD_HOST=0.0.0.0` inside) and `trading-recorder`; shared volume `/state` (`BOT_STATE_DIR`)
+- Containers: `trading-bot` (Panda-9, dashboard on 127.0.0.1:3400, `DASHBOARD_HOST=0.0.0.0` inside), `trading-trend` (Trend-1, :3401),
+  `trading-swing` (Swing-1, :3402) and `trading-recorder`; each bot has its own `/state` volume (`BOT_STATE_DIR`);
+  the Panda-9 dashboard switches to the others via `DASHBOARD_PEERS`
 - nginx + Let's Encrypt in front: https://bot.silvertoast.at
 - Secrets only on the server: `config/secrets.env` (BITPANDA_API_KEY — a Fusion key, not a Bitpanda app key) and `config/dashboard.env`
 - If Fusion delivers no prices at startup (rejected key still "starts"), the bot falls back to Kraken and logs an ERROR

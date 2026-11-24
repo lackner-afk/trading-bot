@@ -410,6 +410,34 @@ der Zustand vom Verlauf abhängt, kauft der Bot nach einem Neustart auch einen
 Ausbruch, der schon Tage zurückliegt — im Backtest wäre er dort schon drin.
 Neustart am 28.10. mit 100 €, alte Datenbank gesichert.
 
+## Long/Short auf 4h-Kerzen (24.11.2026): Swing-1
+
+Wunsch: ein dritter Paper-Bot, der mehr handelt und so tut, als könnte er
+shorten. Werkzeug `tools/backtest_longshort.py`, sechs Varianten vorab
+festgelegt und alle berichtet; BTC/ETH/SOL/XRP (Binance USDT), 20 % je Coin,
+0,25 % je Seite, Hebel 1, Ausführung zur nächsten Eröffnung, **keine Leihkosten**.
+
+| Variante | Trades/Monat | letzte 365 T | letzte 90 T | ab 03/2021 |
+|---|---|---|---|---|
+| 1d Donchian 20/10 Long/Short | ~7 | −1 % (Rückgang 33 %) | ±0 % | −14 % |
+| **4h EMA 20/50, immer drin** | ~14 | **−11 %** (37 %) | **+5 %** | +20 % |
+| 4h Donchian 55/20 Long/Short | ~17 | −6 % | −8 % | −41 % |
+| 4h Donchian 20/10 Long/Short | ~35 | −34 % | −23 % | −71 % |
+| 1h EMA 20/50, immer drin | ~58 | −54 % | −24 % | −77 % |
+| Halten | – | −36 % (41 %) | −25 % | +114 % |
+
+- **Mehr Trades = schlechter.** Ab ~30 Trades im Monat fressen 0,25 % Gebühr alles.
+- **Short federt den Abwärtsmarkt ab**, verdient im letzten Jahr aber nichts.
+- **Die Spalte „ab 2021" ist wertlos:** kein Rebalancing, SOL dominiert. Ein Start
+  zwei Monate früher (01/2021) ergab für die EMA-Variante +474 % statt +20 %.
+- Werkzeug-Fehler unterwegs: `parse8601('2021-01-01')` liefert ohne Uhrzeit
+  `None` → ccxt lud nur die letzten 1000 Kerzen. Das Werkzeug nutzt jetzt die volle Angabe.
+
+**Entscheidung (Nici, 24.11.2026):** 4h EMA 20/50 läuft als **Swing-1**
+(`config/ema_4h.yaml`, `spot_only: false` nur dort) mit 1000 €. Gleichzeitig
+startet Panda-9 mit 1000 € statt 100 €, damit alle drei Bots direkt vergleichbar sind.
+Das ist ein Vergleichsexperiment, kein Echtgeld-Kandidat: Fusion kann nicht shorten.
+
 ## Nächste Schritte, falls weiterverfolgt
 
 1. **Andere Datenquellen.** Der Bot sieht nur Kerzen. Orderbuchtiefe und
