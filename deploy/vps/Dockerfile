@@ -15,6 +15,7 @@ RUN pip install -r /tmp/requirements.txt
 
 COPY config/settings.yaml config/settings.yaml
 COPY config/daily_trend.yaml config/daily_trend.yaml
+COPY config/ema_4h.yaml config/ema_4h.yaml
 COPY core core
 COPY data data
 COPY strategies strategies

@@ -40,3 +40,12 @@ def test_nur_swing1_darf_shorten():
     assert swing['risk']['max_leverage'] == 1
     assert swing['strategies']['daily_trend']['rule'] == 'ema'
     assert swing['strategies']['momentum']['pairs'] == ['BTC_EUR', 'ETH_EUR', 'SOL_EUR', 'XRP_EUR']
+
+
+def test_dockerfile_kopiert_alle_overlays():
+    """Swing-1 startete am 24.11.2026 nicht: das Overlay fehlte im Image."""
+    dockerfile = (ROOT / 'deploy' / 'vps' / 'Dockerfile').read_text()
+    compose = (ROOT / 'deploy' / 'vps' / 'docker-compose.yml').read_text()
+    import re
+    for overlay in re.findall(r'BOT_CONFIG_OVERLAY:\s*(\S+)', compose):
+        assert f'COPY {overlay} {overlay}' in dockerfile
